@@ -281,10 +281,9 @@ _test_not_contains "stream_in_box has no sleep 0.3" "sleep 0.3" "$sb_code"
 _test_contains "streambox source checks for Ctrl+O (\\x0f)" '\x0f' "$sb_source"
 _test_contains "stream_in_box calls _log_viewer" "_log_viewer" "$sb_code"
 
-# Verify the log viewer uses alternate screen
+# Verify the log viewer uses clear + cursor hide/show
 lv_code=$(declare -f _log_viewer)
-_test_contains "_log_viewer uses smcup (alt screen)" "smcup" "$lv_code"
-_test_contains "_log_viewer uses rmcup (restore screen)" "rmcup" "$lv_code"
+_test_contains "_log_viewer clears screen" "tput clear" "$lv_code"
 _test_contains "_log_viewer hides cursor (civis)" "civis" "$lv_code"
 _test_contains "_log_viewer restores cursor (cnorm)" "cnorm" "$lv_code"
 
