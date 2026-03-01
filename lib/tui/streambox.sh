@@ -52,11 +52,10 @@ _log_viewer() {
   tput smcup
   tput civis 2>/dev/null  # hide cursor
 
-  update_term_size
-  local _lv_rows=$TERM_ROWS
-  local _lv_cols=$TERM_COLS
-  local _lv_content_h=$(( _lv_rows - 3 ))  # header + separator + footer
-  (( _lv_content_h < 1 )) && _lv_content_h=1
+  # Terminal dimensions (updated every frame)
+  local _lv_rows=0
+  local _lv_cols=0
+  local _lv_content_h=1
 
   # State
   local _lv_offset=0
@@ -69,6 +68,15 @@ _log_viewer() {
   _lv_lines=()
 
   # ── Draw helpers ──
+
+  # Refresh terminal dimensions (call before each frame)
+  _lv_update_size() {
+    update_term_size
+    _lv_rows=$TERM_ROWS
+    _lv_cols=$TERM_COLS
+    _lv_content_h=$(( _lv_rows - 3 ))  # header + separator + footer
+    (( _lv_content_h < 1 )) && _lv_content_h=1
+  }
 
   _lv_draw_header() {
     tput cup 0 0
@@ -87,14 +95,14 @@ _log_viewer() {
 
   _lv_draw_footer() {
     tput cup $(( _lv_rows - 1 )) 0
-    local _ft_left="  ↑↓/jk scroll  g/G top/bottom"
+    local _ft_left="  up/dn/jk scroll  g/G top/bottom"
     local _ft_mode=""
     if [[ "$_lv_follow" == "true" ]]; then
       _ft_mode="following"
     else
       local _lv_bot=$(( _lv_offset + _lv_content_h ))
       (( _lv_bot > _lv_total )) && _lv_bot=$_lv_total
-      _ft_mode="line $(( _lv_offset + 1 ))–${_lv_bot}/${_lv_total}"
+      _ft_mode="line $(( _lv_offset + 1 ))-${_lv_bot}/${_lv_total}"
     fi
     local _ft_right="Ctrl+O close  "
     local _ft_mid="  •  ${_ft_mode}"
@@ -159,6 +167,7 @@ _log_viewer() {
   }
 
   # ── Initial draw ──
+  _lv_update_size
   tput clear
   _lv_load_lines
   _lv_draw_header
@@ -166,6 +175,9 @@ _log_viewer() {
   _lv_draw_footer
 
   # ── Key loop ──
+  local _lv_prev_rows=$_lv_rows
+  local _lv_prev_cols=$_lv_cols
+
   while true; do
     _lv_read_key
     local _k="$REPLY"
@@ -213,6 +225,14 @@ _log_viewer() {
     # Only re-read file when needed (follow mode timeout or G)
     if [[ "$_lv_need_reload" == "true" ]]; then
       _lv_load_lines
+    fi
+
+    # Detect terminal resize — full clear if size changed
+    _lv_update_size
+    if (( _lv_rows != _lv_prev_rows || _lv_cols != _lv_prev_cols )); then
+      tput clear
+      _lv_prev_rows=$_lv_rows
+      _lv_prev_cols=$_lv_cols
     fi
 
     _lv_draw_header
