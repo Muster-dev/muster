@@ -313,7 +313,9 @@ ${_k8s_env_lines}"
               IFS= read -rsn1 _post_key 2>/dev/null || true
               if [[ "$_post_key" == $'\x0f' ]]; then
                 _log_viewer "$name deploy log" "$log_file"
-                # After viewer closes, show hint again
+                # rmcup restores screen; reprint hint on same line
+                printf '\r'
+                tput el 2>/dev/null || true
                 printf '  %bCtrl+O view full log  •  any key to continue%b ' "${DIM}" "${RESET}"
               else
                 # Any other key — continue

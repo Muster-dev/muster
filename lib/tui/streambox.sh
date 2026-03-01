@@ -227,19 +227,9 @@ stream_in_box() {
     local _key=""
     IFS= read -rsn1 -t 1 _key 2>/dev/null || true
     if [[ "$_key" == $'\x0f' ]]; then
-      # Ctrl+O pressed — open log viewer (placeholder for Task 2)
+      # Ctrl+O pressed — open log viewer
       _log_viewer "$title" "$log_file" "$cmd_pid"
-      # After viewer returns, redraw the collapsed box
-      printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$tcut" "${RESET}${ACCENT}" "$pad" "${RESET}"
-      r=0
-      while (( r < box_lines )); do
-        local empty_pad
-        empty_pad=$(printf '%*s' "$((inner - 1))" "")
-        printf '  %b│%b %s %b│%b\n' "${ACCENT}" "${RESET}" "$empty_pad" "${ACCENT}" "${RESET}"
-        r=$((r + 1))
-      done
-      printf '  %b└%s┘%b\n' "${ACCENT}" "$bottom" "${RESET}"
-      printf '  %b%*s%s%b\n' "${DIM}" "$_hint_pad" "" "$_hint" "${RESET}"
+      # rmcup restores the screen; refresh loop redraws on next iteration
     fi
   done
 
