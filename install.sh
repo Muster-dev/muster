@@ -272,9 +272,12 @@ if [[ "$_interactive" = true ]]; then
       fi
       ;;
     *)
-      echo ""
-      printf '  %bSkipped. Install muster-tui later:%b\n' "$_D" "$_R"
-      printf '  %b  go install github.com/%s@latest%b\n' "$_D" "$TUI_REPO" "$_R"
+      # Only show skip message if the user actively chose to skip (fresh install)
+      if [[ "$_fresh_install" = true ]]; then
+        echo ""
+        printf '  %bSkipped. Install muster-tui later:%b\n' "$_D" "$_R"
+        printf '  %b  go install github.com/%s@latest%b\n' "$_D" "$TUI_REPO" "$_R"
+      fi
       ;;
   esac
 fi
