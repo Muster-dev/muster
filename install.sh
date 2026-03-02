@@ -395,7 +395,7 @@ if [[ "$_fresh_install" = true && "$_interactive" = true ]]; then
       echo ""
       # Source PATH update so muster is available
       export PATH="${BIN_DIR}:${PATH}"
-      "${BIN_DIR}/muster" setup
+      "${BIN_DIR}/muster" setup </dev/tty
       ;;
     *)
       echo ""
