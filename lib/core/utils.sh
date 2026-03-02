@@ -27,10 +27,17 @@ trap '_on_resize' WINCH
 
 # Track whether TUI modified terminal state
 _MUSTER_TUI_ACTIVE="false"
+_MUSTER_TUI_FULLSCREEN="false"
 
 # Call this when entering TUI mode (dashboard, menus with cursor hidden, etc.)
 muster_tui_enter() {
   _MUSTER_TUI_ACTIVE="true"
+}
+
+# Call this when entering full-screen TUI (dashboard) — clear on exit
+muster_tui_fullscreen() {
+  _MUSTER_TUI_ACTIVE="true"
+  _MUSTER_TUI_FULLSCREEN="true"
 }
 
 # Cleanup terminal state on exit — only resets if TUI was active
@@ -40,7 +47,9 @@ cleanup_term() {
     tput cnorm 2>/dev/null || true
     printf '\033[0m' 2>/dev/null
     stty echo 2>/dev/null || true
-    echo ""
+    if [[ "$_MUSTER_TUI_FULLSCREEN" = "true" ]]; then
+      clear 2>/dev/null || true
+    fi
   fi
 }
 trap cleanup_term EXIT

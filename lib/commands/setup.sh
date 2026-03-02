@@ -47,6 +47,7 @@ _setup_redraw() {
 }
 
 _setup_screen_inner() {
+  muster_tui_fullscreen
   clear
   update_term_size
 
