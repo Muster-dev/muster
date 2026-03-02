@@ -144,6 +144,7 @@ TUI_REPO="ImJustRicky/muster-tui"
 
 if [[ "$_interactive" = true ]]; then
   # Check if muster-tui is already installed
+  # Only prompt on fresh installs or if muster-tui is already present (offer update)
   _tui_installed=false
   _tui_existing_ver=""
   if command -v muster-tui >/dev/null 2>&1; then
@@ -160,6 +161,7 @@ if [[ "$_interactive" = true ]]; then
     fi
   fi
 
+  _tui_choice="skip"
   if [[ "$_tui_installed" = true ]]; then
     echo ""
     printf '  %b%bmuster-tui%b already installed %b(%s)%b\n' "$_B" "$_M" "$_R" "$_D" "${_tui_existing_ver:-unknown}" "$_R"
@@ -169,10 +171,9 @@ if [[ "$_interactive" = true ]]; then
     echo ""
     printf '  %bChoose [1/2]:%b ' "$_M" "$_R"
     read -r _tui_choice </dev/tty
-    # Map "keep" to skip
     [[ "${_tui_choice:-1}" == "1" ]] && _tui_choice="skip"
     [[ "${_tui_choice:-}" == "2" ]] && _tui_choice="install"
-  else
+  elif [[ "$_fresh_install" = true ]]; then
     echo ""
     printf '  %b%bmuster-tui%b %bis an optional rich TUI frontend with a%b\n' "$_B" "$_M" "$_R" "$_D" "$_R"
     printf '  %bfull-screen dashboard, streaming deploy logs, and%b\n' "$_D" "$_R"
