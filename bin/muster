@@ -4,7 +4,7 @@
 # https://getmuster.dev | https://github.com/ImJustRicky/muster
 set -uo pipefail
 
-MUSTER_VERSION="0.5.6"
+MUSTER_VERSION="0.5.7"
 
 # Resolve symlinks (macOS bash 3.2 has no readlink -f)
 _muster_self="${BASH_SOURCE[0]}"
@@ -114,6 +114,10 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/auth.sh"
     cmd_auth "$@"
     ;;
+  update|--update)
+    source "$MUSTER_ROOT/lib/core/updater.sh"
+    update_apply
+    ;;
   --help|-h)
     echo -e "${BOLD}muster${RESET} — Universal deploy framework"
     echo ""
@@ -135,6 +139,7 @@ case "${1:-}" in
     echo "  skill       Manage addon skills (add, create, remove, list, run)"
     echo "  projects    List registered projects (--prune to clean stale)"
     echo "  auth        Manage API tokens (create, list, revoke, verify)"
+    echo "  update      Update muster to latest version"
     echo ""
     echo "Options:"
     echo "  -v, --version   Show version"
