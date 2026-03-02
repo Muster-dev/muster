@@ -216,10 +216,10 @@ _settings_global_cli() {
 
   # Validate key
   case "$key" in
-    color_mode|log_color_mode|log_retention_days|default_stack|default_health_timeout|scanner_exclude|update_check) ;;
+    tui_mode|color_mode|log_color_mode|log_retention_days|default_stack|default_health_timeout|scanner_exclude|update_check) ;;
     *)
       err "Unknown global setting: ${key}"
-      echo "  Valid keys: color_mode, log_color_mode, log_retention_days, default_stack,"
+      echo "  Valid keys: tui_mode, color_mode, log_color_mode, log_retention_days, default_stack,"
       echo "              default_health_timeout, scanner_exclude, update_check"
       return 1
       ;;
@@ -288,6 +288,13 @@ _settings_global_cli() {
 
   # Validate and set
   case "$key" in
+    tui_mode)
+      case "$value" in
+        go|bash) ;;
+        *) err "tui_mode must be go or bash"; return 1 ;;
+      esac
+      global_config_set "$key" "\"$value\""
+      ;;
     color_mode)
       case "$value" in
         auto|always|never) ;;
@@ -351,102 +358,118 @@ _settings_muster_global() {
       scanner_ex="(none)"
     fi
 
+    local tui_mode
+    tui_mode=$(global_config_get "tui_mode" 2>/dev/null)
+    : "${tui_mode:=go}"
+
     # Build toggle data
     _TOG_LABELS=()
     _TOG_OPTIONS=()
     _TOG_STATES=()
 
+    # TUI mode: go / bash
+    _TOG_LABELS[0]="TUI mode"
+    _TOG_OPTIONS[0]="go|bash"
+    case "$tui_mode" in
+      bash) _TOG_STATES[0]=1 ;;
+      *)    _TOG_STATES[0]=0 ;;
+    esac
+
     # Color mode: auto / always / never
-    _TOG_LABELS[0]="Color mode"
-    _TOG_OPTIONS[0]="auto|always|never"
+    _TOG_LABELS[1]="Color mode"
+    _TOG_OPTIONS[1]="auto|always|never"
     case "$color_mode" in
-      always) _TOG_STATES[0]=1 ;;
-      never)  _TOG_STATES[0]=2 ;;
-      *)      _TOG_STATES[0]=0 ;;
+      always) _TOG_STATES[1]=1 ;;
+      never)  _TOG_STATES[1]=2 ;;
+      *)      _TOG_STATES[1]=0 ;;
     esac
 
     # Log color mode: auto / raw / none
-    _TOG_LABELS[1]="Log color mode"
-    _TOG_OPTIONS[1]="auto|raw|none"
+    _TOG_LABELS[2]="Log color mode"
+    _TOG_OPTIONS[2]="auto|raw|none"
     case "$log_color_mode" in
-      raw)  _TOG_STATES[1]=1 ;;
-      none) _TOG_STATES[1]=2 ;;
-      *)    _TOG_STATES[1]=0 ;;
+      raw)  _TOG_STATES[2]=1 ;;
+      none) _TOG_STATES[2]=2 ;;
+      *)    _TOG_STATES[2]=0 ;;
     esac
 
     # Update check: on / off
-    _TOG_LABELS[2]="Update check"
-    _TOG_OPTIONS[2]="on|off"
+    _TOG_LABELS[3]="Update check"
+    _TOG_OPTIONS[3]="on|off"
     case "$update_check" in
-      off) _TOG_STATES[2]=1 ;;
-      *)   _TOG_STATES[2]=0 ;;
+      off) _TOG_STATES[3]=1 ;;
+      *)   _TOG_STATES[3]=0 ;;
     esac
 
     # Default stack: bare / docker / compose / k8s
-    _TOG_LABELS[3]="Default stack"
-    _TOG_OPTIONS[3]="bare|docker|compose|k8s"
+    _TOG_LABELS[4]="Default stack"
+    _TOG_OPTIONS[4]="bare|docker|compose|k8s"
     case "$default_stack" in
-      docker)  _TOG_STATES[3]=1 ;;
-      compose) _TOG_STATES[3]=2 ;;
-      k8s)     _TOG_STATES[3]=3 ;;
-      *)       _TOG_STATES[3]=0 ;;
+      docker)  _TOG_STATES[4]=1 ;;
+      compose) _TOG_STATES[4]=2 ;;
+      k8s)     _TOG_STATES[4]=3 ;;
+      *)       _TOG_STATES[4]=0 ;;
     esac
 
     # Log retention days: 3 / 7 / 14 / 30 / 90
-    _TOG_LABELS[4]="Log retention (days)"
-    _TOG_OPTIONS[4]="3|7|14|30|90"
+    _TOG_LABELS[5]="Log retention (days)"
+    _TOG_OPTIONS[5]="3|7|14|30|90"
     case "$log_retention" in
-      3)  _TOG_STATES[4]=0 ;;
-      14) _TOG_STATES[4]=2 ;;
-      30) _TOG_STATES[4]=3 ;;
-      90) _TOG_STATES[4]=4 ;;
-      *)  _TOG_STATES[4]=1 ;;
+      3)  _TOG_STATES[5]=0 ;;
+      14) _TOG_STATES[5]=2 ;;
+      30) _TOG_STATES[5]=3 ;;
+      90) _TOG_STATES[5]=4 ;;
+      *)  _TOG_STATES[5]=1 ;;
     esac
 
     # Health timeout: 5 / 10 / 15 / 30 / 60
-    _TOG_LABELS[5]="Health timeout (s)"
-    _TOG_OPTIONS[5]="5|10|15|30|60"
+    _TOG_LABELS[6]="Health timeout (s)"
+    _TOG_OPTIONS[6]="5|10|15|30|60"
     case "$health_timeout" in
-      5)  _TOG_STATES[5]=0 ;;
-      15) _TOG_STATES[5]=2 ;;
-      30) _TOG_STATES[5]=3 ;;
-      60) _TOG_STATES[5]=4 ;;
-      *)  _TOG_STATES[5]=1 ;;
+      5)  _TOG_STATES[6]=0 ;;
+      15) _TOG_STATES[6]=2 ;;
+      30) _TOG_STATES[6]=3 ;;
+      60) _TOG_STATES[6]=4 ;;
+      *)  _TOG_STATES[6]=1 ;;
     esac
 
     echo ""
     _toggle_select "Muster Settings"
 
     # Read back chosen values
-    local new_color new_log_color new_update new_stack new_retention new_timeout
+    local new_tui new_color new_log_color new_update new_stack new_retention new_timeout
     case $(( _TOG_STATES[0] )) in
+      1) new_tui="bash" ;;
+      *) new_tui="go" ;;
+    esac
+    case $(( _TOG_STATES[1] )) in
       1) new_color="always" ;;
       2) new_color="never" ;;
       *) new_color="auto" ;;
     esac
-    case $(( _TOG_STATES[1] )) in
+    case $(( _TOG_STATES[2] )) in
       1) new_log_color="raw" ;;
       2) new_log_color="none" ;;
       *) new_log_color="auto" ;;
     esac
-    case $(( _TOG_STATES[2] )) in
+    case $(( _TOG_STATES[3] )) in
       1) new_update="off" ;;
       *) new_update="on" ;;
     esac
-    case $(( _TOG_STATES[3] )) in
+    case $(( _TOG_STATES[4] )) in
       1) new_stack="docker" ;;
       2) new_stack="compose" ;;
       3) new_stack="k8s" ;;
       *) new_stack="bare" ;;
     esac
-    case $(( _TOG_STATES[4] )) in
+    case $(( _TOG_STATES[5] )) in
       0) new_retention=3 ;;
       2) new_retention=14 ;;
       3) new_retention=30 ;;
       4) new_retention=90 ;;
       *) new_retention=7 ;;
     esac
-    case $(( _TOG_STATES[5] )) in
+    case $(( _TOG_STATES[6] )) in
       0) new_timeout=5 ;;
       2) new_timeout=15 ;;
       3) new_timeout=30 ;;
@@ -455,6 +478,7 @@ _settings_muster_global() {
     esac
 
     # Save all settings
+    global_config_set "tui_mode" "\"$new_tui\""
     global_config_set "color_mode" "\"$new_color\""
     global_config_set "log_color_mode" "\"$new_log_color\""
     global_config_set "update_check" "\"$new_update\""
