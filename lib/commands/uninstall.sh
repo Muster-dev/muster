@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# muster/lib/commands/uninstall.sh — Remove muster from a project
+# muster/lib/commands/uninstall.sh — Remove muster from a project or the system
 
 source "$MUSTER_ROOT/lib/tui/menu.sh"
 
 cmd_uninstall() {
   case "${1:-}" in
     --help|-h)
-      echo "Usage: muster uninstall"
+      echo "Usage: muster uninstall [--system]"
       echo ""
       echo "Remove muster configuration from the current project."
       echo "Deletes muster.json (or deploy.json) and .muster/ directory."
+      echo ""
+      echo "Flags:"
+      echo "  --system    Uninstall muster itself from this machine"
+      echo "  -h, --help  Show this help"
       return 0
+      ;;
+    --system)
+      _uninstall_system
+      return $?
       ;;
     --*)
       err "Unknown flag: $1"
@@ -18,6 +26,19 @@ cmd_uninstall() {
       return 1
       ;;
   esac
+
+  # Check if we're inside a project
+  local _cfg
+  _cfg=$(find_config 2>/dev/null) || true
+  if [[ -z "$_cfg" ]]; then
+    echo ""
+    echo "  Not inside a muster project."
+    echo ""
+    echo "  To uninstall muster from this machine:"
+    echo "    muster uninstall --system"
+    echo ""
+    return 1
+  fi
 
   load_config
 
@@ -71,5 +92,45 @@ cmd_uninstall() {
   echo ""
   ok "muster removed from ${project_dir}"
   echo -e "  ${DIM}Run 'muster setup' to set up again${RESET}"
+  echo ""
+}
+
+_uninstall_system() {
+  local install_dir="${MUSTER_INSTALL_DIR:-$HOME/.muster}"
+  local bin_dir="${MUSTER_BIN_DIR:-$HOME/.local/bin}"
+
+  echo ""
+  echo -e "  ${BOLD}${RED}Uninstall muster from this machine${RESET}"
+  echo ""
+  echo -e "  ${DIM}This will remove:${RESET}"
+  [[ -d "$install_dir" ]] && echo -e "    ${RED}*${RESET} ${install_dir}/  (repo, settings, tokens, skills)"
+  [[ -L "${bin_dir}/muster" || -f "${bin_dir}/muster" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster"
+  [[ -L "${bin_dir}/muster-mcp" || -f "${bin_dir}/muster-mcp" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster-mcp"
+  [[ -L "${bin_dir}/muster-tui" || -f "${bin_dir}/muster-tui" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster-tui"
+  echo ""
+  echo -e "  ${DIM}Project configs (.muster/ in your projects) will NOT be removed.${RESET}"
+  echo ""
+
+  menu_select "Are you sure?" "No, keep muster" "Yes, uninstall muster"
+
+  if [[ "$MENU_RESULT" != "Yes, uninstall muster" ]]; then
+    info "Cancelled"
+    echo ""
+    return 0
+  fi
+
+  # Remove binaries/symlinks
+  rm -f "${bin_dir}/muster" "${bin_dir}/muster-mcp" "${bin_dir}/muster-tui" 2>/dev/null
+  ok "Removed binaries"
+
+  # Remove install directory
+  if [[ -d "$install_dir" ]]; then
+    rm -rf "$install_dir"
+    ok "Removed ${install_dir}/"
+  fi
+
+  echo ""
+  ok "muster has been uninstalled."
+  echo -e "  ${DIM}To reinstall: curl -fsSL https://getmuster.dev/install.sh | bash${RESET}"
   echo ""
 }

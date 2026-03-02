@@ -94,8 +94,9 @@ case "${1:-}" in
     cmd_settings "$@"
     ;;
   uninstall)
+    shift
     source "$MUSTER_ROOT/lib/commands/uninstall.sh"
-    cmd_uninstall
+    cmd_uninstall "$@"
     ;;
   skill)
     shift
@@ -130,7 +131,7 @@ case "${1:-}" in
     echo "  doctor      Run project diagnostics (--fix to auto-repair)"
     echo "  cleanup     Clean up stuck processes"
     echo "  settings    View and edit project/global settings"
-    echo "  uninstall   Remove muster from project"
+    echo "  uninstall   Remove muster from project (--system to uninstall muster itself)"
     echo "  skill       Manage addon skills (add, create, remove, list, run)"
     echo "  projects    List registered projects (--prune to clean stale)"
     echo "  auth        Manage API tokens (create, list, revoke, verify)"
