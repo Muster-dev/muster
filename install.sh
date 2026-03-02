@@ -16,7 +16,9 @@ mkdir -p "$INSTALL_DIR"
 chmod 700 "$INSTALL_DIR"
 
 # Clone or update
+_fresh_install=true
 if [[ -d "${INSTALL_DIR}/repo" ]]; then
+  _fresh_install=false
   echo "  Updating existing installation..."
   (cd "${INSTALL_DIR}/repo" && git pull --quiet)
 else
@@ -245,6 +247,27 @@ if [[ -t 0 ]]; then
       echo ""
       echo "  Skipped. You can install muster-tui later:"
       echo "    go install github.com/${TUI_REPO}@latest"
+      ;;
+  esac
+fi
+
+# ── First-time setup ──
+# On fresh install, offer to run muster setup immediately
+if [[ "$_fresh_install" = true && -t 0 ]]; then
+  echo ""
+  echo "  Ready to set up your first project?"
+  printf "  Run muster setup now? [Y/n] "
+  read -r _setup_answer
+  case "${_setup_answer:-Y}" in
+    [Yy]|"")
+      echo ""
+      # Source PATH update so muster is available
+      export PATH="${BIN_DIR}:${PATH}"
+      "${BIN_DIR}/muster" setup
+      ;;
+    *)
+      echo ""
+      echo "  No problem! Run 'muster setup' when you're ready."
       ;;
   esac
 fi
