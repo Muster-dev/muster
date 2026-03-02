@@ -7,6 +7,16 @@ INSTALL_DIR="${MUSTER_INSTALL_DIR:-$HOME/.muster}"
 BIN_DIR="${MUSTER_BIN_DIR:-$HOME/.local/bin}"
 MANIFEST="${INSTALL_DIR}/install.json"
 
+# When piped (curl | bash), stdin is the script itself, not the terminal.
+# Re-attach stdin to /dev/tty so interactive prompts work.
+_interactive=false
+if [[ -t 0 ]]; then
+  _interactive=true
+elif [[ -e /dev/tty ]]; then
+  exec </dev/tty
+  _interactive=true
+fi
+
 echo ""
 echo "  Installing muster..."
 echo ""
@@ -90,7 +100,7 @@ if [[ "$_needs_path" = true ]]; then
   _export_line="export PATH=\"\$HOME/.local/bin:\$PATH\""
   _added=false
 
-  if [[ -n "$_shell_profile" && -t 0 ]]; then
+  if [[ -n "$_shell_profile" && "$_interactive" = true ]]; then
     printf "  Add to %s? [Y/n] " "$_shell_profile"
     read -r _answer
     case "${_answer:-Y}" in
@@ -115,7 +125,7 @@ fi
 # Offer optional muster-tui (rich TUI frontend built with Go)
 TUI_REPO="ImJustRicky/muster-tui"
 
-if [[ -t 0 ]]; then
+if [[ "$_interactive" = true ]]; then
   # Check if muster-tui is already installed
   _tui_installed=false
   _tui_existing_ver=""
@@ -253,7 +263,7 @@ fi
 
 # ── First-time setup ──
 # On fresh install, offer to run muster setup immediately
-if [[ "$_fresh_install" = true && -t 0 ]]; then
+if [[ "$_fresh_install" = true && "$_interactive" = true ]]; then
   echo ""
   echo "  Ready to set up your first project?"
   printf "  Run muster setup now? [Y/n] "
