@@ -4,7 +4,7 @@
 # https://getmuster.dev | https://github.com/ImJustRicky/muster
 set -uo pipefail
 
-MUSTER_VERSION="0.5.5"
+MUSTER_VERSION="0.5.6"
 
 # Resolve symlinks (macOS bash 3.2 has no readlink -f)
 _muster_self="${BASH_SOURCE[0]}"
@@ -141,9 +141,30 @@ case "${1:-}" in
     echo "  -h, --help      Show this help"
     ;;
   "")
-    # Default: prefer muster-tui (Go TUI) if installed, fall back to bash dashboard
+    # Default: prefer muster-tui (Go TUI) if installed
     if command -v muster-tui >/dev/null 2>&1; then
-      exec muster-tui "$@"
+      _tui_config="$HOME/.muster-tui/config.json"
+      _tui_has_token=false
+
+      # Check if muster-tui already has a token
+      if [[ -f "$_tui_config" ]] && has_cmd jq; then
+        _tui_tok=$(jq -r '.token // ""' "$_tui_config" 2>/dev/null)
+        [[ -n "$_tui_tok" ]] && _tui_has_token=true
+      fi
+
+      # Auto-pair: create token and save to muster-tui config
+      if [[ "$_tui_has_token" = false ]]; then
+        source "$MUSTER_ROOT/lib/core/auth.sh"
+        _tui_token=""
+        if _tui_token=$(auth_create_token "muster-tui" "admin" 2>/dev/null) && [[ -n "$_tui_token" ]]; then
+          muster-tui --set-token "$_tui_token" >/dev/null 2>&1 && _tui_has_token=true
+        fi
+      fi
+
+      # Only launch if token is configured
+      if [[ "$_tui_has_token" = true ]]; then
+        exec muster-tui
+      fi
     fi
     source "$MUSTER_ROOT/lib/tui/dashboard.sh"
     cmd_dashboard
