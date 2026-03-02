@@ -8,7 +8,7 @@ ADDON_LOCAL_BIN="${HOME}/.local/bin"
 # ── Addon registry ──
 # Each addon: <name>|<repo>|<binaries (comma-sep)>|<dest-dir>|<description>
 _ADDON_REGISTRY=(
-  "fleet-cloud|Muster-dev/muster-fleet-cloud|muster-tunnel,muster-agent|${ADDON_BIN_DIR}|Cloud fleet deployment (tunnel + agent)"
+  "fleet-cloud|Muster-dev/muster-fleet-cloud|muster-tunnel,muster-agent|${ADDON_LOCAL_BIN}|Cloud fleet deployment (tunnel + agent)"
   "tui|ImJustRicky/muster-tui|muster-tui|${ADDON_LOCAL_BIN}|Rich TUI frontend"
 )
 

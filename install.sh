@@ -347,8 +347,7 @@ if [[ "$_interactive" = true ]]; then
         printf '  %bInstall manually: https://github.com/%s%b\n' "$_D" "$FLEET_REPO" "$_R"
       else
         _fc_base="https://github.com/${FLEET_REPO}/releases/download/v${_fc_ver}"
-        _fc_prefix="${INSTALL_DIR}/bin"
-        mkdir -p "$_fc_prefix"
+        _fc_prefix="$BIN_DIR"
 
         _fc_ok=true
         for _fc_bin in muster-tunnel muster-agent; do
@@ -366,14 +365,6 @@ if [[ "$_interactive" = true ]]; then
           printf '  %b✓%b fleet cloud installed! %b(v%s)%b\n' "$_G" "$_R" "$_D" "$_fc_ver" "$_R"
 
           _write_manifest "fleet-cloud" "$_fc_ver" "${_fc_prefix}/muster-tunnel"
-
-          # Ensure ~/.muster/bin is in PATH
-          if ! printf '%s' "$PATH" | tr ':' '\n' | grep -qx "$_fc_prefix"; then
-            echo ""
-            printf '  %b~/.muster/bin is not in your PATH.%b\n' "$_D" "$_R"
-            printf '  %bAdd it with:%b\n' "$_D" "$_R"
-            printf '  %b  export PATH="$HOME/.muster/bin:$PATH"%b\n' "$_D" "$_R"
-          fi
 
           echo ""
           printf '  Next steps:\n'
