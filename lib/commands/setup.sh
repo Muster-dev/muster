@@ -481,6 +481,21 @@ _setup_noninteractive() {
     ri=$((ri + 1))
   done
 
+  # ── Build git-pull map from --git-pull flags ──
+  # Format: svc[=remote:branch]  (defaults: origin:main)
+  local _gp_keys=()
+  local _gp_vals=()
+  local gpi=0
+  while (( gpi < ${#_FLAG_GIT_PULL[@]} )); do
+    local spec="${_FLAG_GIT_PULL[$gpi]}"
+    local gp_svc="${spec%%=*}"
+    local gp_rest="${spec#*=}"
+    [[ "$gp_rest" == "$spec" ]] && gp_rest=""
+    _gp_keys[${#_gp_keys[@]}]="$gp_svc"
+    _gp_vals[${#_gp_vals[@]}]="$gp_rest"
+    gpi=$((gpi + 1))
+  done
+
   # ── Build services JSON ──
   local services_json="{"
   local deploy_order_json="["
@@ -637,8 +652,27 @@ _setup_noninteractive() {
       fi
     fi
 
+    # Build git_pull config from --git-pull flags
+    local git_pull_json=""
+    li=0
+    while (( li < ${#_gp_keys[@]} )); do
+      if [[ "${_gp_keys[$li]}" == "$svc" || "${_gp_keys[$li]}" == "$key" ]]; then
+        local gp_spec="${_gp_vals[$li]}"
+        local gp_remote="origin"
+        local gp_branch="main"
+        if [[ -n "$gp_spec" ]]; then
+          gp_remote="${gp_spec%%:*}"
+          gp_branch="${gp_spec#*:}"
+          [[ "$gp_branch" == "$gp_remote" ]] && gp_branch="main"
+        fi
+        git_pull_json=",\"git_pull\":{\"enabled\":true,\"remote\":\"${gp_remote}\",\"branch\":\"${gp_branch}\"}"
+        break
+      fi
+      li=$((li + 1))
+    done
+
     [[ "$first" == "true" ]] && first=false || services_json+=","
-    services_json+="\"${key}\":{\"name\":\"${display_name}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}${remote_json}${k8s_json}${skip_deploy_json}}"
+    services_json+="\"${key}\":{\"name\":\"${display_name}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}${remote_json}${k8s_json}${skip_deploy_json}${git_pull_json}}"
     deploy_order_json+="\"${key}\","
   done
 
@@ -780,6 +814,7 @@ print(json.dumps(data, indent=2))
 _FLAG_HEALTH=()
 _FLAG_CREDS=()
 _FLAG_REMOTE=()
+_FLAG_GIT_PULL=()
 
 cmd_setup() {
   # ── Parse flags ──
@@ -788,6 +823,7 @@ cmd_setup() {
   _FLAG_HEALTH=()
   _FLAG_CREDS=()
   _FLAG_REMOTE=()
+  _FLAG_GIT_PULL=()
   local has_flags=false
 
   while [[ $# -gt 0 ]]; do
@@ -809,6 +845,8 @@ cmd_setup() {
         _FLAG_CREDS[${#_FLAG_CREDS[@]}]="$2"; shift 2 ;;
       --remote)
         _FLAG_REMOTE[${#_FLAG_REMOTE[@]}]="$2"; shift 2 ;;
+      --git-pull)
+        _FLAG_GIT_PULL[${#_FLAG_GIT_PULL[@]}]="$2"; shift 2 ;;
       --name|-n)
         flag_name="$2"; shift 2 ;;
       --namespace)
@@ -829,6 +867,7 @@ cmd_setup() {
         echo "  --health <spec>       Per-service health: svc=type[:arg:arg] (repeatable)"
         echo "  --creds <spec>        Per-service credentials: svc=mode (repeatable)"
         echo "  --remote <spec>       Per-service remote: svc=user@host[:port][:path] (repeatable)"
+        echo "  --git-pull <spec>     Per-service git pull: svc[=remote:branch] (repeatable)"
         echo "  --namespace <ns>      Kubernetes namespace (default: default)"
         echo "  --name, -n <name>     Project name (default: directory basename)"
         echo "  --force, -f           Overwrite existing muster.json without prompting"
@@ -840,6 +879,11 @@ cmd_setup() {
         echo "  --health api=none"
         echo ""
         echo "Credential modes: off, save, session, always"
+        echo ""
+        echo "Git pull spec examples:"
+        echo "  --git-pull api                           (defaults: origin/main)"
+        echo "  --git-pull api=origin:main"
+        echo "  --git-pull api=upstream:develop"
         echo ""
         echo "Remote spec examples:"
         echo "  --remote api=deploy@prod.example.com"
@@ -1095,8 +1139,30 @@ cmd_setup() {
         "Every time")             cred_mode="always" ;;
       esac
 
+      # Git pull
+      _SETUP_CUR_SUMMARY=(
+        ""
+        "  ${GREEN}*${RESET} Health: ${health_choice}"
+        "  ${GREEN}*${RESET} Credentials: ${cred_choice}"
+      )
+      _setup_screen 5 "Configure ${svc} (${svc_index}/${#selected_services[@]})"
+      menu_select "Auto git pull before deploy for ${svc}?" "No" "Yes"
+      local gp_choice="$MENU_RESULT"
+      local git_pull_json=""
+      if [[ "$gp_choice" == "Yes" ]]; then
+        printf '\n  %b>%b Git remote [origin]: ' "${ACCENT}" "${RESET}"
+        local _gp_remote_in=""
+        IFS= read -r _gp_remote_in
+        printf '  %b>%b Git branch [main]: ' "${ACCENT}" "${RESET}"
+        local _gp_branch_in=""
+        IFS= read -r _gp_branch_in
+        [[ -z "$_gp_remote_in" ]] && _gp_remote_in="origin"
+        [[ -z "$_gp_branch_in" ]] && _gp_branch_in="main"
+        git_pull_json=",\"git_pull\":{\"enabled\":true,\"remote\":\"${_gp_remote_in}\",\"branch\":\"${_gp_branch_in}\"}"
+      fi
+
       [[ "$first" == "true" ]] && first=false || services_json+=","
-      services_json+="\"${key}\":{\"name\":\"${svc}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}}"
+      services_json+="\"${key}\":{\"name\":\"${svc}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}${git_pull_json}}"
       deploy_order_json+="\"${key}\","
     done
 
@@ -1379,8 +1445,30 @@ _setup_manual_flow() {
       "Every time")             cred_mode="always" ;;
     esac
 
+    # Git pull
+    _SETUP_CUR_SUMMARY=(
+      ""
+      "  ${GREEN}*${RESET} Health: ${health_choice}"
+      "  ${GREEN}*${RESET} Credentials: ${cred_choice}"
+    )
+    _setup_screen 5 "Configure ${svc} (${svc_index}/${#selected_services[@]})"
+    menu_select "Auto git pull before deploy for ${svc}?" "No" "Yes"
+    local gp_choice="$MENU_RESULT"
+    local git_pull_json=""
+    if [[ "$gp_choice" == "Yes" ]]; then
+      printf '\n  %b>%b Git remote [origin]: ' "${ACCENT}" "${RESET}"
+      local _gp_remote_in=""
+      IFS= read -r _gp_remote_in
+      printf '  %b>%b Git branch [main]: ' "${ACCENT}" "${RESET}"
+      local _gp_branch_in=""
+      IFS= read -r _gp_branch_in
+      [[ -z "$_gp_remote_in" ]] && _gp_remote_in="origin"
+      [[ -z "$_gp_branch_in" ]] && _gp_branch_in="main"
+      git_pull_json=",\"git_pull\":{\"enabled\":true,\"remote\":\"${_gp_remote_in}\",\"branch\":\"${_gp_branch_in}\"}"
+    fi
+
     [[ "$first" == "true" ]] && first=false || services_json+=","
-    services_json+="\"${key}\":{\"name\":\"${svc}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}}"
+    services_json+="\"${key}\":{\"name\":\"${svc}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}${git_pull_json}}"
     deploy_order_json+="\"${key}\","
   done
 

@@ -2,4 +2,4 @@
 *.log
 .muster/logs/
 .muster/vault
-*.md
+

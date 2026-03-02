@@ -5,6 +5,11 @@
   "services": {
     "api": {
       "name": "API Server",
+      "git_pull": {
+        "enabled": false,
+        "remote": "origin",
+        "branch": "main"
+      },
       "health": {
         "type": "http",
         "endpoint": "/health",

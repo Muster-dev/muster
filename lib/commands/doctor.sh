@@ -317,6 +317,35 @@ $(cat "$hf" 2>/dev/null)"
     fi
   fi
 
+  # ── (l) Fleet connectivity (if remotes.json exists) ──
+  local _fleet_cfg="${project_dir}/remotes.json"
+  if [[ -f "$_fleet_cfg" ]] && has_cmd jq; then
+    local _fleet_machines
+    _fleet_machines=$(jq -r '.machines | keys[]' "$_fleet_cfg" 2>/dev/null)
+    if [[ -n "$_fleet_machines" ]]; then
+      source "$MUSTER_ROOT/lib/core/fleet.sh"
+      FLEET_CONFIG_FILE="$_fleet_cfg"
+
+      local _fleet_ok=0 _fleet_fail=0
+      while IFS= read -r _fm; do
+        [[ -z "$_fm" ]] && continue
+        if fleet_check "$_fm" 2>/dev/null; then
+          _fleet_ok=$(( _fleet_ok + 1 ))
+        else
+          _fleet_fail=$(( _fleet_fail + 1 ))
+        fi
+      done <<< "$_fleet_machines"
+
+      if (( _fleet_fail == 0 )); then
+        _doc_pass "Fleet: all ${_fleet_ok} machine(s) reachable"
+      elif (( _fleet_ok == 0 )); then
+        _doc_fail "Fleet: all ${_fleet_fail} machine(s) unreachable"
+      else
+        _doc_warn "Fleet: ${_fleet_ok} reachable, ${_fleet_fail} unreachable"
+      fi
+    fi
+  fi
+
   # ── Summary ──
   if [[ "$_json_mode" == "true" ]]; then
     printf '{"pass":%d,"warnings":%d,"failures":%d,"checks":[%s]}\n' \

@@ -140,6 +140,108 @@ _dashboard_header() {
   bottom=$(printf '%*s' "$w" "" | sed 's/ /─/g')
   printf '  %b└%s┘%b\n' "${ACCENT}" "$bottom" "${RESET}"
   echo ""
+
+  # Fleet panel (only if remotes.json exists)
+  local _fleet_config="${project_dir}/remotes.json"
+  if [[ -f "$_fleet_config" ]] && has_cmd jq; then
+    local _fleet_label="Fleet"
+    local _fleet_label_pad_len=$(( w - ${#_fleet_label} - 3 ))
+    (( _fleet_label_pad_len < 1 )) && _fleet_label_pad_len=1
+    local _fleet_label_pad
+    _fleet_label_pad=$(printf '%*s' "$_fleet_label_pad_len" "" | sed 's/ /─/g')
+    printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$_fleet_label" "${RESET}${ACCENT}" "$_fleet_label_pad" "${RESET}"
+
+    local _fleet_machines
+    _fleet_machines=$(jq -r '.machines | keys[]' "$_fleet_config" 2>/dev/null)
+
+    if [[ -z "$_fleet_machines" ]]; then
+      local _empty_msg="No machines configured"
+      local _empty_pad_len=$(( inner - ${#_empty_msg} - 2 ))
+      (( _empty_pad_len < 0 )) && _empty_pad_len=0
+      local _empty_pad
+      _empty_pad=$(printf '%*s' "$_empty_pad_len" "")
+      printf '  %b│%b  %b%s%b%s%b│%b\n' "${ACCENT}" "${RESET}" "${DIM}" "$_empty_msg" "${RESET}" "$_empty_pad" "${ACCENT}" "${RESET}"
+    else
+      # Launch background SSH checks (same pattern as health checks)
+      local _fleet_cache_dir="${_HEALTH_CACHE_DIR}/fleet"
+      mkdir -p "$_fleet_cache_dir"
+      local _fleet_keys=()
+
+      while IFS= read -r _fm; do
+        [[ -z "$_fm" ]] && continue
+        _fleet_keys[${#_fleet_keys[@]}]="$_fm"
+
+        # Background connectivity check
+        (
+          local _fm_data
+          _fm_data=$(jq -r --arg n "$_fm" '.machines[$n] | "\(.user // "")\n\(.host // "")\n\(.port // 22)\n\(.identity_file // "")"' "$_fleet_config" 2>/dev/null)
+          local _u="" _h="" _p="" _id=""
+          local _li=0
+          while IFS= read -r _line; do
+            case $_li in
+              0) _u="$_line" ;; 1) _h="$_line" ;; 2) _p="$_line" ;; 3) _id="$_line" ;;
+            esac
+            _li=$(( _li + 1 ))
+          done <<< "$_fm_data"
+          [[ -z "$_p" || "$_p" == "null" ]] && _p="22"
+          [[ "$_id" == "null" ]] && _id=""
+
+          local _sopts="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+          [[ -n "$_id" ]] && _sopts="${_sopts} -i ${_id/#\~/$HOME}"
+          [[ "$_p" != "22" ]] && _sopts="${_sopts} -p ${_p}"
+
+          if ssh $_sopts "${_u}@${_h}" "echo ok" &>/dev/null; then
+            printf 'online' > "${_fleet_cache_dir}/${_fm}"
+          else
+            printf 'offline' > "${_fleet_cache_dir}/${_fm}"
+          fi
+        ) &
+      done <<< "$_fleet_machines"
+
+      # Render machines from cache
+      local _fi=0
+      while (( _fi < ${#_fleet_keys[@]} )); do
+        local _fm="${_fleet_keys[$_fi]}"
+        local _fm_data
+        _fm_data=$(jq -r --arg n "$_fm" '.machines[$n] | "\(.user)@\(.host) \(.mode // "push")"' "$_fleet_config" 2>/dev/null)
+        local _fm_host="${_fm_data% *}"
+        local _fm_mode="${_fm_data##* }"
+
+        # Read cached status
+        local _fm_status_icon="○" _fm_status_color="$YELLOW"
+        if [[ -f "${_fleet_cache_dir}/${_fm}" ]]; then
+          local _fm_cached
+          _fm_cached=$(cat "${_fleet_cache_dir}/${_fm}")
+          case "$_fm_cached" in
+            online)  _fm_status_icon="●"; _fm_status_color="$GREEN" ;;
+            offline) _fm_status_icon="●"; _fm_status_color="$RED" ;;
+          esac
+        fi
+
+        local _fm_display="${_fm}: ${_fm_host} (${_fm_mode})"
+        local _max_fm=$(( inner - 4 ))
+        if (( ${#_fm_display} > _max_fm )); then
+          _fm_display="${_fm_display:0:$((_max_fm - 3))}..."
+        fi
+
+        local _fm_content_len=$(( 4 + ${#_fm_display} ))
+        local _fm_pad_len=$(( inner - _fm_content_len ))
+        (( _fm_pad_len < 0 )) && _fm_pad_len=0
+        local _fm_pad
+        _fm_pad=$(printf '%*s' "$_fm_pad_len" "")
+
+        printf '  %b│%b  %b%s%b %s%s%b│%b\n' \
+          "${ACCENT}" "${RESET}" "$_fm_status_color" "$_fm_status_icon" "${RESET}" "$_fm_display" "$_fm_pad" "${ACCENT}" "${RESET}"
+
+        _fi=$(( _fi + 1 ))
+      done
+    fi
+
+    local _fleet_bottom
+    _fleet_bottom=$(printf '%*s' "$w" "" | sed 's/ /─/g')
+    printf '  %b└%s┘%b\n' "${ACCENT}" "$_fleet_bottom" "${RESET}"
+    echo ""
+  fi
 }
 
 _dashboard_home() {
@@ -348,6 +450,12 @@ cmd_dashboard() {
     [[ "$has_logs" == "true" ]] && actions[${#actions[@]}]="Logs"
     [[ "$has_rollback" == "true" ]] && actions[${#actions[@]}]="Rollback"
     actions[${#actions[@]}]="Cleanup"
+
+    # Add Fleet action if remotes.json exists
+    if [[ -f "${project_dir}/remotes.json" ]]; then
+      actions[${#actions[@]}]="Fleet"
+    fi
+
     actions[${#actions[@]}]="Settings"
 
     # Add installed skills from project and global dirs (check for updates via cached registry)
@@ -455,6 +563,11 @@ cmd_dashboard() {
     menu_select "Actions" "${actions[@]}"
     MENU_TIMEOUT=0
 
+    # Escape from main menu returns to dashboard
+    if [[ "$MENU_RESULT" == "__back__" ]]; then
+      continue
+    fi
+
     case "$MENU_RESULT" in
       "__timeout__")
         continue
@@ -462,7 +575,7 @@ cmd_dashboard() {
       Deploy)
         source "$MUSTER_ROOT/lib/commands/deploy.sh"
         cmd_deploy
-        _dashboard_pause
+        [[ $? -ne 2 ]] && _dashboard_pause
         ;;
       Status)
         source "$MUSTER_ROOT/lib/commands/status.sh"
@@ -472,15 +585,21 @@ cmd_dashboard() {
       Logs)
         source "$MUSTER_ROOT/lib/commands/logs.sh"
         cmd_logs
+        [[ $? -ne 2 ]] && _dashboard_pause
         ;;
       Rollback)
         source "$MUSTER_ROOT/lib/commands/rollback.sh"
         cmd_rollback
-        _dashboard_pause
+        [[ $? -ne 2 ]] && _dashboard_pause
         ;;
       Cleanup)
         source "$MUSTER_ROOT/lib/commands/cleanup.sh"
         cmd_cleanup
+        _dashboard_pause
+        ;;
+      Fleet)
+        source "$MUSTER_ROOT/lib/commands/fleet.sh"
+        cmd_fleet
         _dashboard_pause
         ;;
       Settings)
@@ -580,7 +699,7 @@ cmd_dashboard() {
               skill_remove "$_run_name"
               _dashboard_pause
               ;;
-            "Back")
+            "Back"|"__back__")
               ;;
           esac
         fi

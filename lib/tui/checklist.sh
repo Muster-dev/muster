@@ -33,7 +33,7 @@ checklist_select() {
   _cl_draw_header() {
     echo ""
     echo -e "  ${BOLD}${title}${RESET}"
-    echo -e "  ${DIM}↑/↓ navigate  ␣ toggle  ⏎ confirm${RESET}"
+    echo -e "  ${DIM}↑/↓ navigate  ␣ toggle  ⏎ confirm  esc back${RESET}"
     echo ""
   }
 
@@ -140,6 +140,13 @@ checklist_select() {
         else
           checked[$selected]=1
         fi
+        ;;
+      $'\x1b')
+        # Bare Escape — go back
+        _cl_clear
+        tput cnorm
+        CHECKLIST_RESULT="__back__"
+        return 0
         ;;
       '')
         _cl_clear

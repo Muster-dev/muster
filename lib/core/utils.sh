@@ -125,9 +125,12 @@ _load_env_file() {
 # Unset all variables loaded by _load_env_file
 _unload_env_file() {
   local k
-  for k in "${_MUSTER_ENV_VARS[@]}"; do
-    unset "$k"
-  done
+  # bash 3.2: "${arr[@]}" with empty array triggers "unbound variable" under set -u
+  if [[ ${#_MUSTER_ENV_VARS[@]} -gt 0 ]]; then
+    for k in "${_MUSTER_ENV_VARS[@]}"; do
+      unset "$k"
+    done
+  fi
   _MUSTER_ENV_VARS=()
 }
 

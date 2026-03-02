@@ -32,10 +32,15 @@ cmd_logs() {
 
     while IFS= read -r svc; do
       [[ -z "$svc" ]] && continue
-      service_names+=("$svc")
+      service_names[${#service_names[@]}]="$svc"
     done <<< "$services"
 
-    menu_select target "Stream logs for which service?" "${service_names[@]}"
+    service_names[${#service_names[@]}]="Back"
+    menu_select "Stream logs for which service?" "${service_names[@]}"
+    if [[ "$MENU_RESULT" == "Back" || "$MENU_RESULT" == "__back__" ]]; then
+      return 2
+    fi
+    target="$MENU_RESULT"
   fi
 
   local hook="${project_dir}/.muster/hooks/${target}/logs.sh"

@@ -95,6 +95,13 @@ menu_select() {
       $'\x1b[B')
         (( selected < count - 1 )) && selected=$((selected + 1))
         ;;
+      $'\x1b')
+        # Bare Escape — go back
+        _menu_clear
+        tput cnorm
+        MENU_RESULT="__back__"
+        return 0
+        ;;
       '')
         # Enter — collapse to selected choice
         _menu_clear

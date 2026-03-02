@@ -524,7 +524,7 @@ skill_run() {
 
   if [[ -z "$name" ]]; then
     err "Usage: muster skill run <name> [args...]"
-    exit 1
+    return 1
   fi
 
   # Find skill: check SKILLS_DIR first, then fall back to global
@@ -539,7 +539,7 @@ skill_run() {
 
   if [[ ! -x "$run_script" ]]; then
     err "Skill '${name}' not found or not executable"
-    exit 1
+    return 1
   fi
 
   # Export context env vars

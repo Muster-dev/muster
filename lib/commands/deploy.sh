@@ -82,10 +82,16 @@ cmd_deploy() {
 
     # Interactive: let user choose all or specific services (skip in JSON mode)
     if [[ "$_json_mode" == "false" && -t 0 ]] && (( ${#all_services[@]} > 1 )); then
-      menu_select "Deploy which services?" "All services" "Select services"
-      if [[ "$MENU_RESULT" == "Select services" ]]; then
+      menu_select "Deploy which services?" "All services" "Select services" "Back"
+      if [[ "$MENU_RESULT" == "Back" || "$MENU_RESULT" == "__back__" ]]; then
+        _unload_env_file
+        return 2
+      elif [[ "$MENU_RESULT" == "Select services" ]]; then
         checklist_select "Select services to deploy:" "${all_services[@]}"
-        if [[ -z "$CHECKLIST_RESULT" ]]; then
+        if [[ "$CHECKLIST_RESULT" == "__back__" ]]; then
+          _unload_env_file
+          return 2
+        elif [[ -z "$CHECKLIST_RESULT" ]]; then
           warn "No services selected"
           _unload_env_file
           return 0
@@ -158,6 +164,36 @@ cmd_deploy() {
 
       printf '{"event":"start","service":"%s","name":"%s","index":%d,"total":%d,"log_file":"%s"}\n' \
         "$svc" "$name" "$current" "$total" "$log_file"
+
+      # Auto git pull (JSON mode)
+      local _gp_enabled=""
+      _gp_enabled=$(config_get ".services.${svc}.git_pull.enabled")
+      if [[ "$_gp_enabled" == "true" ]]; then
+        local _gp_remote _gp_branch
+        _gp_remote=$(config_get ".services.${svc}.git_pull.remote")
+        _gp_branch=$(config_get ".services.${svc}.git_pull.branch")
+        [[ "$_gp_remote" == "null" || -z "$_gp_remote" ]] && _gp_remote="origin"
+        [[ "$_gp_branch" == "null" || -z "$_gp_branch" ]] && _gp_branch="main"
+
+        printf '{"event":"git_pull","service":"%s","remote":"%s","branch":"%s","status":"pulling"}\n' \
+          "$svc" "$_gp_remote" "$_gp_branch"
+
+        local _gp_rc=0
+        if remote_is_enabled "$svc"; then
+          _remote_load_config "$svc"
+          _remote_build_opts
+          local _gp_cmd="cd ${_REMOTE_PROJECT_DIR:-.} && git pull ${_gp_remote} ${_gp_branch}"
+          ssh $_SSH_OPTS "${_REMOTE_USER}@${_REMOTE_HOST}" "$_gp_cmd" >/dev/null 2>&1 || _gp_rc=$?
+        else
+          git pull "$_gp_remote" "$_gp_branch" >/dev/null 2>&1 || _gp_rc=$?
+        fi
+
+        if (( _gp_rc != 0 )); then
+          printf '{"event":"git_pull","service":"%s","status":"failed","exit_code":%d}\n' "$svc" "$_gp_rc"
+        else
+          printf '{"event":"git_pull","service":"%s","status":"done"}\n' "$svc"
+        fi
+      fi
 
       # Run the hook, tee to log file, and stream each line as NDJSON
       local _deploy_rc=0
@@ -296,6 +332,18 @@ ${_k8s_env_lines}" 2>&1
         fi
       fi
 
+      # Show git pull status
+      local _gp_enabled
+      _gp_enabled=$(config_get ".services.${svc}.git_pull.enabled")
+      if [[ "$_gp_enabled" == "true" ]]; then
+        local _gp_remote _gp_branch
+        _gp_remote=$(config_get ".services.${svc}.git_pull.remote")
+        _gp_branch=$(config_get ".services.${svc}.git_pull.branch")
+        [[ "$_gp_remote" == "null" || -z "$_gp_remote" ]] && _gp_remote="origin"
+        [[ "$_gp_branch" == "null" || -z "$_gp_branch" ]] && _gp_branch="main"
+        echo -e "  ${DIM}Git pull:${RESET} ${_gp_remote}/${_gp_branch} ${GREEN}(enabled)${RESET}"
+      fi
+
       echo ""
     else
       # ── Normal deploy ──
@@ -327,6 +375,17 @@ ${_k8s_env_lines}" 2>&1
 
       run_skill_hooks "pre-deploy" "$svc"
 
+      # Read git_pull config for this service
+      local _gp_enabled=""
+      _gp_enabled=$(config_get ".services.${svc}.git_pull.enabled")
+      local _gp_remote="" _gp_branch=""
+      if [[ "$_gp_enabled" == "true" ]]; then
+        _gp_remote=$(config_get ".services.${svc}.git_pull.remote")
+        _gp_branch=$(config_get ".services.${svc}.git_pull.branch")
+        [[ "$_gp_remote" == "null" || -z "$_gp_remote" ]] && _gp_remote="origin"
+        [[ "$_gp_branch" == "null" || -z "$_gp_branch" ]] && _gp_branch="main"
+      fi
+
       progress_bar "$current" "$total" "Deploying ${name}..."
       echo ""
 
@@ -342,6 +401,43 @@ ${_k8s_env_lines}" 2>&1
 
       while true; do
         local log_file="${log_dir}/${svc}-deploy-$(date +%Y%m%d-%H%M%S).log"
+
+        # Auto git pull before deploy hook
+        if [[ "$_gp_enabled" == "true" ]]; then
+          local _gp_output="" _gp_rc=0
+          if remote_is_enabled "$svc"; then
+            start_spinner "Pulling ${_gp_remote}/${_gp_branch} on $(remote_desc "$svc")"
+            _remote_load_config "$svc"
+            _remote_build_opts
+            local _gp_cmd="cd ${_REMOTE_PROJECT_DIR:-.} && git pull ${_gp_remote} ${_gp_branch}"
+            _gp_output=$(ssh $_SSH_OPTS "${_REMOTE_USER}@${_REMOTE_HOST}" "$_gp_cmd" 2>&1) || _gp_rc=$?
+          else
+            start_spinner "Pulling ${_gp_remote}/${_gp_branch}"
+            _gp_output=$(git pull "$_gp_remote" "$_gp_branch" 2>&1) || _gp_rc=$?
+          fi
+          stop_spinner
+
+          if (( _gp_rc != 0 )); then
+            err "git pull failed for ${name}"
+            echo -e "  ${DIM}${_gp_output}${RESET}"
+            echo ""
+            menu_select "Git pull failed. What do you want to do?" "Retry" "Skip git pull" "Abort"
+            case "$MENU_RESULT" in
+              "Retry")
+                continue
+                ;;
+              "Skip git pull")
+                warn "Skipping git pull, deploying with current code"
+                ;;
+              "Abort")
+                _unload_env_file
+                return 1
+                ;;
+            esac
+          else
+            ok "Pulled ${_gp_remote}/${_gp_branch}"
+          fi
+        fi
 
         if remote_is_enabled "$svc"; then
           # ── Remote deploy via SSH ──

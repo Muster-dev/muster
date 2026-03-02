@@ -47,7 +47,12 @@ cmd_rollback() {
       return 1
     fi
 
+    rollback_services[${#rollback_services[@]}]="Back"
     menu_select "Rollback which service?" "${rollback_services[@]}"
+    if [[ "$MENU_RESULT" == "Back" || "$MENU_RESULT" == "__back__" ]]; then
+      _unload_env_file
+      return 2
+    fi
     target="$MENU_RESULT"
   fi
 

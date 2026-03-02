@@ -87,13 +87,15 @@ K8s infra services use `kubectl rollout restart` (not `kubectl set image`) — t
 
 Remote deployment: per-service `"remote": {"enabled": true, "host": "...", "user": "...", "port": 22, "identity_file": "~/.ssh/key", "project_dir": "/opt/app"}`. Hooks are piped via `ssh user@host "bash -s"` with credential + k8s env vars exported remotely.
 
+Git pull: per-service `"git_pull": {"enabled": true, "remote": "origin", "branch": "main"}`. Runs `git pull <remote> <branch>` automatically before the deploy hook. For remote deploys, runs via SSH on the target machine. Defaults: remote=origin, branch=main. Configurable via `muster setup --git-pull svc[=remote:branch]` or `muster settings`.
+
 .env auto-loading: `_load_env_file` in `lib/core/utils.sh` reads `.env` from the project root before deploy/rollback/dev. Exports `KEY=VALUE` pairs without overriding existing env vars. `_unload_env_file` cleans up after.
 
 ## Setup Wizard
 
 **Interactive (no flags):** Scan-first TUI wizard. Detects project files (including subdirectories: `docker/`, `k8s/`, `deploy/`, `infra/`), identifies stack and services. User confirms/overrides, sets deploy order, configures health + credentials per service. Falls back to manual questions if nothing detected. Warns if deploy.json already exists. Requires a TTY — errors cleanly if stdin is not interactive.
 
-**Non-interactive (flags):** `muster setup --scan` or `muster setup --services api,redis --stack k8s`. Flags: `--path/-p`, `--scan`, `--stack/-s`, `--services`, `--order`, `--health` (repeatable), `--creds` (repeatable), `--remote` (repeatable, `svc=user@host[:port][:path]`), `--namespace`, `--name/-n`, `--force/-f` (overwrite existing config). See `muster setup --help`.
+**Non-interactive (flags):** `muster setup --scan` or `muster setup --services api,redis --stack k8s`. Flags: `--path/-p`, `--scan`, `--stack/-s`, `--services`, `--order`, `--health` (repeatable), `--creds` (repeatable), `--remote` (repeatable, `svc=user@host[:port][:path]`), `--git-pull` (repeatable, `svc[=remote:branch]`), `--namespace`, `--name/-n`, `--force/-f` (overwrite existing config). See `muster setup --help`.
 
 Both modes generate real hooks from stack templates. Infrastructure services (redis, postgres, etc.) get pull-only templates (no docker build). Scanner uses `.musterignore` and auto-skips `archived/deprecated/old/backup` directories.
 

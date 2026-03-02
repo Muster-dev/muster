@@ -885,6 +885,27 @@ _settings_service_toggles() {
     esac
   fi
 
+  # Git pull — ON/OFF toggle
+  local gp_enabled
+  gp_enabled=$(config_get ".services.${svc}.git_pull.enabled")
+  local gp_label="Git pull"
+  if [[ "$gp_enabled" == "true" ]]; then
+    local _gp_r _gp_b
+    _gp_r=$(config_get ".services.${svc}.git_pull.remote")
+    _gp_b=$(config_get ".services.${svc}.git_pull.branch")
+    [[ "$_gp_r" == "null" || -z "$_gp_r" ]] && _gp_r="origin"
+    [[ "$_gp_b" == "null" || -z "$_gp_b" ]] && _gp_b="main"
+    gp_label="Git pull: ${_gp_r}/${_gp_b}"
+  fi
+  _tog_keys[${#_tog_keys[@]}]="git_pull"
+  _TOG_LABELS[${#_TOG_LABELS[@]}]="$gp_label"
+  _TOG_OPTIONS[${#_TOG_OPTIONS[@]}]="OFF|ON"
+  if [[ "$gp_enabled" == "true" ]]; then
+    _TOG_STATES[${#_TOG_STATES[@]}]=1
+  else
+    _TOG_STATES[${#_TOG_STATES[@]}]=0
+  fi
+
   # Remote — ON/OFF toggle
   local remote_label="Remote: Off"
   if remote_is_enabled "$svc"; then
@@ -944,6 +965,27 @@ _settings_service_toggles() {
           *) _timeout_val=120 ;;
         esac
         config_set ".services.${svc}.deploy_timeout" "$_timeout_val"
+        ;;
+      git_pull)
+        if (( _TOG_STATES[i] >= 1 )); then
+          # Toggling ON — prompt for remote + branch if not already configured
+          local _existing_gp
+          _existing_gp=$(config_get ".services.${svc}.git_pull.enabled")
+          if [[ "$_existing_gp" != "true" ]]; then
+            echo ""
+            printf '  %b>%b Git remote [origin]: ' "${ACCENT}" "${RESET}"
+            local _gp_remote_in=""
+            IFS= read -r _gp_remote_in
+            printf '  %b>%b Git branch [main]: ' "${ACCENT}" "${RESET}"
+            local _gp_branch_in=""
+            IFS= read -r _gp_branch_in
+            [[ -z "$_gp_remote_in" ]] && _gp_remote_in="origin"
+            [[ -z "$_gp_branch_in" ]] && _gp_branch_in="main"
+            config_set ".services.${svc}.git_pull" "{\"enabled\":true,\"remote\":\"${_gp_remote_in}\",\"branch\":\"${_gp_branch_in}\"}"
+          fi
+        else
+          config_set ".services.${svc}.git_pull.enabled" 'false'
+        fi
         ;;
       remote)
         if (( _TOG_STATES[i] >= 1 )); then
