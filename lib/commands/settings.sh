@@ -466,6 +466,92 @@ _settings_muster_global() {
   done
 }
 
+_settings_download_tui() {
+  local bin_dir="${HOME}/.local/bin"
+  local tui_repo="ImJustRicky/muster-tui"
+
+  echo ""
+
+  # Check if already installed
+  local tui_ver=""
+  if command -v muster-tui >/dev/null 2>&1; then
+    tui_ver="$(muster-tui --version 2>/dev/null || true)"
+  elif [[ -x "${bin_dir}/muster-tui" ]]; then
+    tui_ver="$("${bin_dir}/muster-tui" --version 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$tui_ver" ]]; then
+    echo -e "  ${BOLD}${ACCENT_BRIGHT}muster-tui${RESET} ${DIM}already installed (${tui_ver})${RESET}"
+    echo ""
+    menu_select "Reinstall?" "Reinstall / update" "Back"
+    [[ "$MENU_RESULT" == "Back" ]] && return 0
+  fi
+
+  echo -e "  ${DIM}Downloading muster-tui...${RESET}"
+
+  local _os _arch
+  _os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  _arch="$(uname -m)"
+  case "$_arch" in
+    x86_64)       _arch="amd64" ;;
+    aarch64|arm64) _arch="arm64" ;;
+  esac
+
+  local tui_url="https://github.com/${tui_repo}/releases/latest/download/muster-tui-${_os}-${_arch}"
+  mkdir -p "$bin_dir"
+
+  local tui_ok=false
+  if has_cmd curl; then
+    if curl -fsSL "$tui_url" -o "${bin_dir}/muster-tui" 2>/dev/null; then
+      chmod +x "${bin_dir}/muster-tui"
+      tui_ok=true
+    fi
+  elif has_cmd wget; then
+    if wget -q "$tui_url" -O "${bin_dir}/muster-tui" 2>/dev/null; then
+      chmod +x "${bin_dir}/muster-tui"
+      tui_ok=true
+    fi
+  fi
+
+  if [[ "$tui_ok" = true ]]; then
+    local new_ver
+    new_ver="$("${bin_dir}/muster-tui" --version 2>/dev/null || echo "unknown")"
+    echo ""
+    ok "muster-tui installed! (${new_ver})"
+
+    # Auto-create auth token if needed
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    local has_tui_token=false
+    if [[ -f "$MUSTER_TOKENS_FILE" ]] && has_cmd jq; then
+      local existing_tui
+      existing_tui=$(jq -r '.tokens[] | select(.name == "muster-tui") | .name' "$MUSTER_TOKENS_FILE" 2>/dev/null)
+      [[ -n "$existing_tui" ]] && has_tui_token=true
+    fi
+
+    if [[ "$has_tui_token" = false ]]; then
+      local tui_token=""
+      if tui_token=$(auth_create_token "muster-tui" "admin" 2>/dev/null) && [[ -n "$tui_token" ]]; then
+        if "${bin_dir}/muster-tui" --set-token "$tui_token" >/dev/null 2>&1; then
+          ok "Auth token created and linked."
+        else
+          echo -e "  ${YELLOW}!${RESET} ${DIM}Token created. Connect manually:${RESET}"
+          echo -e "  ${DIM}  muster-tui --set-token ${tui_token}${RESET}"
+        fi
+      fi
+    fi
+  else
+    err "Could not download muster-tui binary."
+    echo -e "  ${DIM}No pre-built release for ${_os}/${_arch}.${RESET}"
+    echo ""
+    echo -e "  ${DIM}Build from source:${RESET}"
+    echo -e "  ${DIM}  go install github.com/${tui_repo}@latest${RESET}"
+  fi
+
+  echo ""
+  echo -e "  ${DIM}Press any key to continue...${RESET}"
+  IFS= read -rsn1 || true
+}
+
 cmd_settings() {
   # Handle --help flag
   case "${1:-}" in
@@ -515,9 +601,9 @@ cmd_settings() {
     echo ""
 
     if [[ "$_has_project" == "true" ]]; then
-      menu_select "Settings" "Project Settings" "Muster Settings" "Back"
+      menu_select "Settings" "Project Settings" "Muster Settings" "Download muster-tui (Go)" "Back"
     else
-      menu_select "Settings" "Muster Settings" "Back"
+      menu_select "Settings" "Muster Settings" "Download muster-tui (Go)" "Back"
     fi
 
     case "$MENU_RESULT" in
@@ -526,6 +612,9 @@ cmd_settings() {
         ;;
       "Muster Settings")
         _settings_muster_global
+        ;;
+      "Download muster-tui (Go)")
+        _settings_download_tui
         ;;
       Back)
         return 0
