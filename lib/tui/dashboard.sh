@@ -184,19 +184,55 @@ _dashboard_home() {
 
     local actions=()
 
+    local w=$(( TERM_COLS - 4 ))
+    (( w > 50 )) && w=50
+    (( w < 10 )) && w=10
+    local inner=$(( w - 2 ))
+
     if (( _count > 0 )); then
-      echo -e "  ${DIM}Projects${RESET}"
-      echo ""
+      # Top border with "Projects" label
+      local label="Projects"
+      local label_pad_len=$(( w - ${#label} - 3 ))
+      (( label_pad_len < 1 )) && label_pad_len=1
+      local label_pad
+      label_pad=$(printf '%*s' "$label_pad_len" "" | sed 's/ /─/g')
+      printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$label" "${RESET}${ACCENT}" "$label_pad" "${RESET}"
+
       local _pi=0
       while (( _pi < _count )); do
         local _display_path="${_project_paths[$_pi]}"
-        # Shorten home prefix
         _display_path="${_display_path/#$HOME/~}"
-        actions[${#actions[@]}]="${_project_names[$_pi]}  ${_display_path}"
+        local _pname="${_project_names[$_pi]}"
+
+        # Truncate path to fit
+        local max_path=$(( inner - ${#_pname} - 5 ))
+        (( max_path < 5 )) && max_path=5
+        if (( ${#_display_path} > max_path )); then
+          _display_path="...${_display_path: -$((max_path - 3))}"
+        fi
+
+        local content_len=$(( 4 + ${#_pname} + 1 + ${#_display_path} ))
+        local pad_len=$(( inner - content_len ))
+        (( pad_len < 0 )) && pad_len=0
+        local pad
+        pad=$(printf '%*s' "$pad_len" "")
+
+        printf '  %b│%b  %b●%b %b%s%b %b%s%b%s%b│%b\n' \
+          "${ACCENT}" "${RESET}" "${GREEN}" "${RESET}" \
+          "${WHITE}" "$_pname" "${RESET}" \
+          "${DIM}" "$_display_path" "${RESET}" \
+          "$pad" "${ACCENT}" "${RESET}"
+
+        actions[${#actions[@]}]="${_pname}"
         _pi=$(( _pi + 1 ))
       done
+
+      local bottom
+      bottom=$(printf '%*s' "$w" "" | sed 's/ /─/g')
+      printf '  %b└%s┘%b\n' "${ACCENT}" "$bottom" "${RESET}"
     else
       echo -e "  ${DIM}No projects registered yet.${RESET}"
+      echo -e "  ${DIM}Run 'muster setup' in a project directory.${RESET}"
     fi
 
     echo ""
@@ -207,7 +243,7 @@ _dashboard_home() {
     fi
     actions[${#actions[@]}]="Quit"
 
-    menu_select "" "${actions[@]}"
+    menu_select "Actions" "${actions[@]}"
 
     case "$MENU_RESULT" in
       "Update muster")
@@ -231,11 +267,10 @@ _dashboard_home() {
         exit 0
         ;;
       *)
-        # Must be a project selection — find matching path
+        # Must be a project selection — find matching name
         local _si=0
         while (( _si < _count )); do
-          local _match="${_project_names[$_si]}  ${_project_paths[$_si]/#$HOME/~}"
-          if [[ "$MENU_RESULT" == "$_match" ]]; then
+          if [[ "$MENU_RESULT" == "${_project_names[$_si]}" ]]; then
             local _target="${_project_paths[$_si]}"
             if [[ -d "$_target" ]]; then
               cd "$_target"
