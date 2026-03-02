@@ -30,6 +30,7 @@ source "$MUSTER_ROOT/lib/core/logger.sh"
 source "$MUSTER_ROOT/lib/core/utils.sh"
 source "$MUSTER_ROOT/lib/core/config.sh"
 source "$MUSTER_ROOT/lib/core/platform.sh"
+source "$MUSTER_ROOT/lib/core/registry.sh"
 
 # ── Route commands ──
 case "${1:-}" in
@@ -42,8 +43,10 @@ case "${1:-}" in
     shift
     source "$MUSTER_ROOT/lib/commands/deploy.sh"
     cmd_deploy "$@"
-    # Return to dashboard if interactive
-    if [[ -t 0 ]]; then
+    # Return to dashboard if interactive (skip in JSON mode)
+    _has_json=false
+    for _arg in "$@"; do [[ "$_arg" == "--json" ]] && _has_json=true; done
+    if [[ "$_has_json" == "false" && -t 0 ]]; then
       echo ""
       echo -e "  ${DIM}Press any key to continue...${RESET}"
       IFS= read -rsn1 || true
@@ -52,8 +55,9 @@ case "${1:-}" in
     fi
     ;;
   status)
+    shift
     source "$MUSTER_ROOT/lib/commands/status.sh"
-    cmd_status
+    cmd_status "$@"
     ;;
   logs)
     shift
@@ -98,6 +102,17 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/skills/manager.sh"
     cmd_skill "$@"
     ;;
+  projects)
+    shift
+    source "$MUSTER_ROOT/lib/commands/projects.sh"
+    cmd_projects "$@"
+    ;;
+  auth)
+    shift
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    source "$MUSTER_ROOT/lib/commands/auth.sh"
+    cmd_auth "$@"
+    ;;
   --help|-h)
     echo -e "${BOLD}muster${RESET} — Universal deploy framework"
     echo ""
@@ -117,6 +132,8 @@ case "${1:-}" in
     echo "  settings    View and edit project/global settings"
     echo "  uninstall   Remove muster from project"
     echo "  skill       Manage addon skills (add, create, remove, list, run)"
+    echo "  projects    List registered projects (--prune to clean stale)"
+    echo "  auth        Manage API tokens (create, list, revoke, verify)"
     echo ""
     echo "Options:"
     echo "  -v, --version   Show version"

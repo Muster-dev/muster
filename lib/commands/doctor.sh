@@ -3,6 +3,7 @@
 
 cmd_doctor() {
   local fix=false
+  local _json_mode=false
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --help|-h)
@@ -12,10 +13,12 @@ cmd_doctor() {
         echo ""
         echo "Flags:"
         echo "  --fix           Auto-fix issues where possible"
+        echo "  --json          Output as JSON"
         echo "  -h, --help      Show this help"
         return 0
         ;;
       --fix) fix=true; shift ;;
+      --json) _json_mode=true; shift ;;
       *)
         err "Unknown flag: $1"
         echo "Run 'muster doctor --help' for usage."
@@ -26,6 +29,12 @@ cmd_doctor() {
 
   load_config
 
+  # Auth gate: JSON mode requires valid token
+  if [[ "$_json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
+  fi
+
   local project_dir
   project_dir="$(dirname "$CONFIG_FILE")"
 
@@ -33,16 +42,50 @@ cmd_doctor() {
   local warnings=0
   local failures=0
 
-  echo ""
-  echo -e "  ${BOLD}Doctor${RESET}"
-  echo ""
+  # JSON mode: collect checks in a string
+  local _json_checks=""
+  local _json_first=true
+
+  _doc_json_add() {
+    local _name="$1" _status="$2" _detail="$3"
+    $_json_first || _json_checks="${_json_checks},"
+    _json_first=false
+    _json_checks="${_json_checks}{\"name\":\"${_name}\",\"status\":\"${_status}\",\"detail\":\"${_detail}\"}"
+  }
+
+  if [[ "$_json_mode" == "false" ]]; then
+    echo ""
+    echo -e "  ${BOLD}Doctor${RESET}"
+    echo ""
+  fi
 
   # Helper: print pass/warn/fail lines and bump counters
-  _doc_pass() { echo -e "  ${GREEN}✓${RESET} $1"; pass=$(( pass + 1 )); }
-  _doc_warn() { echo -e "  ${YELLOW}!${RESET} $1"; warnings=$(( warnings + 1 )); }
-  _doc_fail() { echo -e "  ${RED}✗${RESET} $1"; failures=$(( failures + 1 )); }
+  _doc_pass() {
+    if [[ "$_json_mode" == "true" ]]; then
+      _doc_json_add "$1" "pass" "$1"
+    else
+      echo -e "  ${GREEN}✓${RESET} $1"
+    fi
+    pass=$(( pass + 1 ))
+  }
+  _doc_warn() {
+    if [[ "$_json_mode" == "true" ]]; then
+      _doc_json_add "$1" "warn" "$1"
+    else
+      echo -e "  ${YELLOW}!${RESET} $1"
+    fi
+    warnings=$(( warnings + 1 ))
+  }
+  _doc_fail() {
+    if [[ "$_json_mode" == "true" ]]; then
+      _doc_json_add "$1" "fail" "$1"
+    else
+      echo -e "  ${RED}✗${RESET} $1"
+    fi
+    failures=$(( failures + 1 ))
+  }
 
-  # ── (a) deploy.json exists and is valid JSON ──
+  # ── (a) muster.json exists and is valid JSON ──
   if [[ -f "$CONFIG_FILE" ]]; then
     local json_valid=false
     if has_cmd jq; then
@@ -52,13 +95,15 @@ cmd_doctor() {
     else
       json_valid=true  # can't validate, assume ok
     fi
+    local _config_name
+    _config_name="$(basename "$CONFIG_FILE")"
     if [[ "$json_valid" == "true" ]]; then
-      _doc_pass "deploy.json valid"
+      _doc_pass "${_config_name} valid"
     else
-      _doc_fail "deploy.json has invalid JSON"
+      _doc_fail "${_config_name} has invalid JSON"
     fi
   else
-    _doc_fail "deploy.json not found"
+    _doc_fail "muster.json not found"
   fi
 
   # ── (b) .muster/hooks/ directory exists ──
@@ -273,14 +318,19 @@ $(cat "$hf" 2>/dev/null)"
   fi
 
   # ── Summary ──
-  echo ""
-  local summary="  ${pass} checks passed"
-  if (( warnings > 0 )); then
-    summary="${summary}, ${YELLOW}${warnings} warnings${RESET}"
+  if [[ "$_json_mode" == "true" ]]; then
+    printf '{"pass":%d,"warnings":%d,"failures":%d,"checks":[%s]}\n' \
+      "$pass" "$warnings" "$failures" "$_json_checks"
+  else
+    echo ""
+    local summary="  ${pass} checks passed"
+    if (( warnings > 0 )); then
+      summary="${summary}, ${YELLOW}${warnings} warnings${RESET}"
+    fi
+    if (( failures > 0 )); then
+      summary="${summary}, ${RED}${failures} failures${RESET}"
+    fi
+    echo -e "  ${summary}"
+    echo ""
   fi
-  if (( failures > 0 )); then
-    summary="${summary}, ${RED}${failures} failures${RESET}"
-  fi
-  echo -e "  ${summary}"
-  echo ""
 }

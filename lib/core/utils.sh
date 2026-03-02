@@ -126,6 +126,11 @@ _unload_env_file() {
 find_config() {
   local dir="$PWD"
   while [[ "$dir" != "/" ]]; do
+    # Prefer muster.json, fall back to deploy.json
+    if [[ -f "$dir/muster.json" ]]; then
+      echo "$dir/muster.json"
+      return 0
+    fi
     if [[ -f "$dir/deploy.json" ]]; then
       echo "$dir/deploy.json"
       return 0

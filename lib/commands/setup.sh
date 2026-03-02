@@ -335,10 +335,9 @@ _setup_noninteractive() {
     return 1
   }
 
-  # ── Check for existing deploy.json ──
-  if [[ -f "${project_path}/deploy.json" && "$flag_force" != "true" ]]; then
-    err "deploy.json already exists at ${project_path}/deploy.json"
-    echo "  Use --force to overwrite."
+  # ── Check for existing config ──
+  if [[ ( -f "${project_path}/muster.json" || -f "${project_path}/deploy.json" ) && "$flag_force" != "true" ]]; then
+    err "Config already exists. Use --force to overwrite."
     return 1
   fi
 
@@ -646,7 +645,7 @@ _setup_noninteractive() {
   deploy_order_json="${deploy_order_json%,}]"
 
   # ── Generate files ──
-  local config_path="${project_path}/deploy.json"
+  local config_path="${project_path}/muster.json"
   local muster_dir="${project_path}/.muster"
 
   mkdir -p "${muster_dir}/hooks"
@@ -753,6 +752,9 @@ print(json.dumps(data, indent=2))
     dev)     stack_display="Local dev" ;;
   esac
 
+  # Register project in global registry
+  _registry_touch "$project_path"
+
   ok "Setup complete"
   echo ""
   echo "  Project:  ${project_name}"
@@ -827,7 +829,7 @@ cmd_setup() {
         echo "  --remote <spec>       Per-service remote: svc=user@host[:port][:path] (repeatable)"
         echo "  --namespace <ns>      Kubernetes namespace (default: default)"
         echo "  --name, -n <name>     Project name (default: directory basename)"
-        echo "  --force, -f           Overwrite existing deploy.json without prompting"
+        echo "  --force, -f           Overwrite existing muster.json without prompting"
         echo ""
         echo "Health spec examples:"
         echo "  --health api=http:/health:8080"
@@ -908,11 +910,11 @@ cmd_setup() {
     return 1
   }
 
-  # ── Check for existing deploy.json ──
-  if [[ -f "${project_path}/deploy.json" ]]; then
+  # ── Check for existing config ──
+  if [[ -f "${project_path}/muster.json" || -f "${project_path}/deploy.json" ]]; then
     _SETUP_CUR_SUMMARY=("")
     _setup_screen 1 "Existing config found"
-    menu_select "deploy.json already exists at ${project_path}. Overwrite?" "Overwrite" "Cancel"
+    menu_select "Config already exists at ${project_path}. Overwrite?" "Overwrite" "Cancel"
     if [[ "$MENU_RESULT" == "Cancel" ]]; then
       info "Setup cancelled."
       return 0
@@ -1104,7 +1106,7 @@ cmd_setup() {
     project_name="${custom_name:-$project_name}"
 
     # ── Step 7: Generate ──
-    local config_path="${project_path}/deploy.json"
+    local config_path="${project_path}/muster.json"
     local muster_dir="${project_path}/.muster"
 
     mkdir -p "${muster_dir}/hooks"
@@ -1184,7 +1186,7 @@ print(json.dumps(data, indent=2))
       "  ${GREEN}*${RESET} Config:  ${config_path}"
       ""
       "  ${BOLD}Generated:${RESET}"
-      "    deploy.json"
+      "    muster.json"
     )
 
     for h in "${generated_hooks[@]}"; do
@@ -1203,6 +1205,9 @@ print(json.dumps(data, indent=2))
     _SETUP_CUR_SUMMARY[${#_SETUP_CUR_SUMMARY[@]}]=""
     _SETUP_CUR_SUMMARY[${#_SETUP_CUR_SUMMARY[@]}]="  ${DIM}Press enter to exit${RESET}"
     _SETUP_CUR_SUMMARY[${#_SETUP_CUR_SUMMARY[@]}]=""
+
+    # Register project in global registry
+    _registry_touch "$project_path"
 
     _SETUP_CUR_PROMPT="false"
     _setup_screen 7 "Setup complete"
@@ -1384,7 +1389,7 @@ _setup_manual_flow() {
   project_name="${custom_name:-$project_name}"
 
   # ── Step 7: Generate ──
-  local config_path="${project_path}/deploy.json"
+  local config_path="${project_path}/muster.json"
   local muster_dir="${project_path}/.muster"
 
   mkdir -p "${muster_dir}/hooks"
@@ -1448,6 +1453,9 @@ print(json.dumps(data, indent=2))
     "  ${DIM}Press enter to exit${RESET}"
     ""
   )
+
+  # Register project in global registry
+  _registry_touch "$project_path"
 
   _SETUP_CUR_PROMPT="false"
   _setup_screen 7 "Setup complete"

@@ -77,7 +77,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         }
       },
       "required": ["project_dir"]
@@ -91,7 +91,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         }
       },
       "required": ["project_dir"]
@@ -105,7 +105,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         },
         "service": {
           "type": "string",
@@ -123,7 +123,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         },
         "service": {
           "type": "string",
@@ -141,7 +141,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         },
         "service": {
           "type": "string",
@@ -163,7 +163,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         }
       },
       "required": ["project_dir"]
@@ -171,13 +171,13 @@ TOOLS_JSON='[
   },
   {
     "name": "muster_config",
-    "description": "Get the full deploy.json configuration for the project.",
+    "description": "Get the full muster.json configuration for the project.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         }
       },
       "required": ["project_dir"]
@@ -199,7 +199,7 @@ TOOLS_JSON='[
   },
   {
     "name": "muster_init_project",
-    "description": "Create or update deploy.json for a project. Provide the full JSON config as a string. Also creates .muster/hooks/<service>/ directories and .muster/logs/. Updates .gitignore to exclude .muster/logs/.",
+    "description": "Create or update muster.json for a project. Provide the full JSON config as a string. Also creates .muster/hooks/<service>/ directories and .muster/logs/. Updates .gitignore to exclude .muster/logs/.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -209,7 +209,7 @@ TOOLS_JSON='[
         },
         "config": {
           "type": "string",
-          "description": "The full deploy.json content as a JSON string"
+          "description": "The full muster.json content as a JSON string"
         }
       },
       "required": ["project_dir", "config"]
@@ -223,7 +223,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         },
         "service": {
           "type": "string",
@@ -249,7 +249,7 @@ TOOLS_JSON='[
       "properties": {
         "project_dir": {
           "type": "string",
-          "description": "Path to the project directory containing deploy.json"
+          "description": "Path to the project directory containing muster.json"
         },
         "service": {
           "type": "string",
@@ -322,18 +322,22 @@ TOOLS_JSON='[
 # ── Load config for a project dir ──
 load_project_config() {
   local dir="$1"
-  if [[ ! -f "${dir}/deploy.json" ]]; then
-    return 1
+  if [[ -f "${dir}/muster.json" ]]; then
+    CONFIG_FILE="${dir}/muster.json"
+    return 0
   fi
-  CONFIG_FILE="${dir}/deploy.json"
-  return 0
+  if [[ -f "${dir}/deploy.json" ]]; then
+    CONFIG_FILE="${dir}/deploy.json"
+    return 0
+  fi
+  return 1
 }
 
 # ── Tool implementations ──
 
 tool_list_services() {
   local dir="$1"
-  load_project_config "$dir" || { echo "No deploy.json found in ${dir}"; return 1; }
+  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
 
   local output=""
   local services
@@ -363,7 +367,7 @@ tool_list_services() {
 
 tool_status() {
   local dir="$1"
-  load_project_config "$dir" || { echo "No deploy.json found in ${dir}"; return 1; }
+  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
 
   local output=""
   local services
@@ -391,7 +395,7 @@ tool_status() {
 
 tool_deploy() {
   local dir="$1" target="${2:-all}"
-  load_project_config "$dir" || { echo "No deploy.json found in ${dir}"; return 1; }
+  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
 
   local log_dir="${dir}/.muster/logs"
   mkdir -p "$log_dir"
@@ -446,7 +450,7 @@ tool_deploy() {
 
 tool_rollback() {
   local dir="$1" target="$2"
-  load_project_config "$dir" || { echo "No deploy.json found in ${dir}"; return 1; }
+  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
 
   local hook="${dir}/.muster/hooks/${target}/rollback.sh"
   if [[ ! -x "$hook" ]]; then
@@ -471,7 +475,7 @@ tool_rollback() {
 
 tool_logs() {
   local dir="$1" target="$2" lines="${3:-50}"
-  load_project_config "$dir" || { echo "No deploy.json found in ${dir}"; return 1; }
+  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
 
   local log_dir="${dir}/.muster/logs"
   local latest
@@ -487,7 +491,7 @@ tool_logs() {
 
 tool_cleanup() {
   local dir="$1"
-  load_project_config "$dir" || { echo "No deploy.json found in ${dir}"; return 1; }
+  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
 
   local output=""
   local services
@@ -520,7 +524,7 @@ tool_cleanup() {
 
 tool_config() {
   local dir="$1"
-  load_project_config "$dir" || { echo "No deploy.json found in ${dir}"; return 1; }
+  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
   cat "$CONFIG_FILE"
 }
 
@@ -612,8 +616,8 @@ tool_init_project() {
     return 1
   fi
 
-  # Write deploy.json
-  printf '%s\n' "$config" | jq . > "${dir}/deploy.json"
+  # Write muster.json
+  printf '%s\n' "$config" | jq . > "${dir}/muster.json"
 
   # Create .muster structure
   mkdir -p "${dir}/.muster/logs"
@@ -636,7 +640,7 @@ tool_init_project() {
     printf '# muster deploy logs\n.muster/logs/\n' > "$gitignore"
   fi
 
-  local output="Created deploy.json\nCreated .muster/logs/\n"
+  local output="Created muster.json\nCreated .muster/logs/\n"
   while IFS= read -r svc; do
     [[ -z "$svc" ]] && continue
     output="${output}Created .muster/hooks/${svc}/\n"

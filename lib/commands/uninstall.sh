@@ -9,7 +9,7 @@ cmd_uninstall() {
       echo "Usage: muster uninstall"
       echo ""
       echo "Remove muster configuration from the current project."
-      echo "Deletes deploy.json and .muster/ directory."
+      echo "Deletes muster.json (or deploy.json) and .muster/ directory."
       return 0
       ;;
     --*)

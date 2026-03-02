@@ -14,6 +14,7 @@ source "$MUSTER_ROOT/lib/commands/history.sh"
 
 cmd_deploy() {
   local dry_run=false
+  local _json_mode=false
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --help|-h)
@@ -23,15 +24,18 @@ cmd_deploy() {
         echo ""
         echo "Flags:"
         echo "  --dry-run       Preview deploy plan without executing"
+        echo "  --json          Output as NDJSON (one JSON object per line)"
         echo "  -h, --help      Show this help"
         echo ""
         echo "Examples:"
         echo "  muster deploy              Interactive: pick all or select services"
         echo "  muster deploy api          Deploy just the api service"
         echo "  muster deploy --dry-run    Preview all services"
+        echo "  muster deploy --json       Stream deploy events as NDJSON"
         return 0
         ;;
       --dry-run) dry_run=true; shift ;;
+      --json) _json_mode=true; shift ;;
       *)
         err "Unknown flag: $1"
         echo "Run 'muster deploy --help' for usage."
@@ -52,9 +56,17 @@ cmd_deploy() {
   local project
   project=$(config_get '.project')
 
-  echo ""
-  echo -e "  ${BOLD}${ACCENT_BRIGHT}Deploying${RESET} ${WHITE}${project}${RESET}"
-  echo ""
+  # Auth gate: JSON mode requires valid token
+  if [[ "$_json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "deploy" || return 1
+  fi
+
+  if [[ "$_json_mode" == "false" ]]; then
+    echo ""
+    echo -e "  ${BOLD}${ACCENT_BRIGHT}Deploying${RESET} ${WHITE}${project}${RESET}"
+    echo ""
+  fi
 
   # Get deploy order
   local services=()
@@ -68,8 +80,8 @@ cmd_deploy() {
       all_services[${#all_services[@]}]="$svc"
     done < <(config_get '.deploy_order[]' 2>/dev/null || config_services)
 
-    # Interactive: let user choose all or specific services
-    if [[ -t 0 ]] && (( ${#all_services[@]} > 1 )); then
+    # Interactive: let user choose all or specific services (skip in JSON mode)
+    if [[ "$_json_mode" == "false" && -t 0 ]] && (( ${#all_services[@]} > 1 )); then
       menu_select "Deploy which services?" "All services" "Select services"
       if [[ "$MENU_RESULT" == "Select services" ]]; then
         checklist_select "Select services to deploy:" "${all_services[@]}"
@@ -114,7 +126,110 @@ cmd_deploy() {
       continue
     fi
 
-    if [[ "$dry_run" == "true" ]]; then
+    if [[ "$_json_mode" == "true" && "$dry_run" == "true" ]]; then
+      # ── JSON dry-run ──
+      local _hook_lines
+      _hook_lines=$(wc -l < "$hook" | tr -d ' ')
+      printf '{"event":"dry_run","service":"%s","name":"%s","index":%d,"total":%d,"hook":"%s","hook_lines":%s}\n' \
+        "$svc" "$name" "$current" "$total" "$hook" "$_hook_lines"
+      continue
+
+    elif [[ "$_json_mode" == "true" ]]; then
+      # ── JSON deploy mode — stream NDJSON events ──
+
+      # Gather credentials
+      local _cred_env_lines=""
+      _cred_env_lines=$(cred_env_for_service "$svc")
+
+      # Export k8s config
+      local _k8s_env_lines=""
+      _k8s_env_lines=$(k8s_env_for_service "$svc")
+      if [[ -n "$_k8s_env_lines" ]]; then
+        while IFS='=' read -r _ek _ev; do
+          [[ -z "$_ek" ]] && continue
+          export "$_ek=$_ev"
+        done <<< "$_k8s_env_lines"
+      fi
+
+      export MUSTER_DEPLOY_STATUS=""
+      export MUSTER_SERVICE_NAME="$name"
+
+      local log_file="${log_dir}/${svc}-deploy-$(date +%Y%m%d-%H%M%S).log"
+
+      printf '{"event":"start","service":"%s","name":"%s","index":%d,"total":%d,"log_file":"%s"}\n' \
+        "$svc" "$name" "$current" "$total" "$log_file"
+
+      # Run the hook, tee to log file, and stream each line as NDJSON
+      local _deploy_rc=0
+      if [[ -n "$_cred_env_lines" ]]; then
+        while IFS='=' read -r _ck _cv; do
+          [[ -z "$_ck" ]] && continue
+          export "$_ck=$_cv"
+        done <<< "$_cred_env_lines"
+      fi
+
+      {
+        if remote_is_enabled "$svc"; then
+          remote_exec_stdout "$svc" "$hook" "${_cred_env_lines}
+${_k8s_env_lines}" 2>&1
+        else
+          "$hook" 2>&1
+        fi
+      } | while IFS= read -r _jline; do
+        printf '%s\n' "$_jline" >> "$log_file"
+        # Escape backslashes and double quotes for JSON
+        _jline=$(printf '%s' "$_jline" | sed 's/\\/\\\\/g;s/"/\\"/g' | tr -d '\r')
+        printf '{"event":"log","service":"%s","line":"%s"}\n' "$svc" "$_jline"
+      done
+      _deploy_rc=${PIPESTATUS[0]}
+
+      if (( _deploy_rc == 0 )); then
+        printf '{"event":"done","service":"%s","status":"success"}\n' "$svc"
+        _history_log_event "$svc" "deploy" "ok" ""
+        export MUSTER_DEPLOY_STATUS="success"
+        run_skill_hooks "post-deploy" "$svc" 2>/dev/null
+
+        # Health check
+        local health_hook="${project_dir}/.muster/hooks/${svc}/health.sh"
+        local health_enabled
+        health_enabled=$(config_get ".services.${svc}.health.enabled")
+        if [[ "$health_enabled" != "false" && -x "$health_hook" ]]; then
+          printf '{"event":"health","service":"%s","status":"checking"}\n' "$svc"
+          local _health_ok=false
+          if remote_is_enabled "$svc"; then
+            remote_exec_stdout "$svc" "$health_hook" "" &>/dev/null && _health_ok=true
+          else
+            "$health_hook" &>/dev/null && _health_ok=true
+          fi
+          if [[ "$_health_ok" == "true" ]]; then
+            printf '{"event":"health","service":"%s","status":"healthy"}\n' "$svc"
+          else
+            printf '{"event":"health","service":"%s","status":"unhealthy"}\n' "$svc"
+          fi
+        fi
+      else
+        printf '{"event":"done","service":"%s","status":"failed","exit_code":%d}\n' "$svc" "$_deploy_rc"
+        _history_log_event "$svc" "deploy" "failed" ""
+        export MUSTER_DEPLOY_STATUS="failed"
+        run_skill_hooks "post-deploy" "$svc" 2>/dev/null
+      fi
+
+      # Clean up env vars
+      if [[ -n "$_cred_env_lines" ]]; then
+        while IFS='=' read -r _ck _cv; do
+          [[ -z "$_ck" ]] && continue
+          unset "$_ck"
+        done <<< "$_cred_env_lines"
+      fi
+      if [[ -n "$_k8s_env_lines" ]]; then
+        while IFS='=' read -r _ek _ev; do
+          [[ -z "$_ek" ]] && continue
+          unset "$_ek"
+        done <<< "$_k8s_env_lines"
+      fi
+      continue
+
+    elif [[ "$dry_run" == "true" ]]; then
       # ── Dry-run: show plan without executing anything ──
       progress_bar "$current" "$total" "Deploying ${name}..."
       echo ""
@@ -442,15 +557,19 @@ ${_k8s_env_lines}"
     fi
   done
 
-  progress_bar "$total" "$total" "Complete"
-  echo ""
-  echo ""
-  if [[ "$dry_run" == "true" ]]; then
-    info "[DRY-RUN] Deploy plan complete — no changes made"
+  if [[ "$_json_mode" == "true" ]]; then
+    printf '{"event":"complete","total":%d,"dry_run":%s}\n' "$total" "$dry_run"
   else
-    ok "Deploy complete"
+    progress_bar "$total" "$total" "Complete"
+    echo ""
+    echo ""
+    if [[ "$dry_run" == "true" ]]; then
+      info "[DRY-RUN] Deploy plan complete — no changes made"
+    else
+      ok "Deploy complete"
+    fi
+    echo ""
   fi
-  echo ""
 
   _unload_env_file
 }

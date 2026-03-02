@@ -23,6 +23,7 @@ cmd_history() {
 
   local show_all=false
   local filter=""
+  local _json_mode=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,15 +34,18 @@ cmd_history() {
         echo ""
         echo "Flags:"
         echo "  --all, -a       Show full history (not just recent)"
+        echo "  --json          Output as JSON"
         echo "  -h, --help      Show this help"
         echo ""
         echo "Examples:"
         echo "  muster history             Recent events"
         echo "  muster history --all       Full history"
         echo "  muster history api         Events for api only"
+        echo "  muster history --json      JSON output"
         return 0
         ;;
       --all|-a) show_all=true; shift ;;
+      --json) _json_mode=true; shift ;;
       --*)
         err "Unknown flag: $1"
         echo "Run 'muster history --help' for usage."
@@ -54,11 +58,21 @@ cmd_history() {
     esac
   done
 
+  # Auth gate: JSON mode requires valid token
+  if [[ "$_json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
+  fi
+
   local project_dir
   project_dir="$(dirname "$CONFIG_FILE")"
   local log_file="${project_dir}/.muster/logs/deploy-events.log"
 
   if [[ ! -f "$log_file" ]]; then
+    if [[ "$_json_mode" == "true" ]]; then
+      printf '[]\n'
+      return 0
+    fi
     info "No deploy history found."
     return 0
   fi
@@ -123,6 +137,10 @@ cmd_history() {
   local count=${#timestamps[@]}
 
   if (( count == 0 )); then
+    if [[ "$_json_mode" == "true" ]]; then
+      printf '[]\n'
+      return 0
+    fi
     if [[ -n "$filter" ]]; then
       info "No history found for '${filter}'."
     else
@@ -137,6 +155,28 @@ cmd_history() {
     start=$(( count - 20 ))
   fi
 
+  # ── JSON output ──
+  if [[ "$_json_mode" == "true" ]]; then
+    printf '['
+    local _jfirst=true
+    local i
+    for (( i = start; i < count; i++ )); do
+      $_jfirst || printf ','
+      _jfirst=false
+      # Escape values for JSON safety
+      local _jts="${timestamps[$i]}"
+      local _jsvc="${services[$i]}"
+      local _jact="${actions[$i]}"
+      local _jst="${statuses[$i]}"
+      local _jcm="${commits[$i]}"
+      printf '{"timestamp":"%s","service":"%s","action":"%s","status":"%s","commit":"%s"}' \
+        "$_jts" "$_jsvc" "$_jact" "$_jst" "$_jcm"
+    done
+    printf ']\n'
+    return 0
+  fi
+
+  # ── TUI output ──
   local project
   project=$(config_get '.project')
 

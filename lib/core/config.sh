@@ -85,12 +85,14 @@ with open('$GLOBAL_CONFIG_FILE') as f:
   fi
 }
 
-# Load config from deploy.json
+# Load config from muster.json (or deploy.json fallback)
 load_config() {
   CONFIG_FILE=$(find_config) || {
-    err "No deploy.json found. Run 'muster setup' first."
+    err "No muster.json found. Run 'muster setup' first."
     exit 1
   }
+  # Auto-register project in the global registry
+  _registry_touch "$(dirname "$CONFIG_FILE")"
 }
 
 # Quote path segments containing hyphens for jq

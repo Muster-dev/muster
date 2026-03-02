@@ -175,7 +175,7 @@ SKILLJSON
 #
 # Environment variables available:
 #   MUSTER_PROJECT_DIR   — path to the project root
-#   MUSTER_CONFIG_FILE   — path to deploy.json
+#   MUSTER_CONFIG_FILE   — path to muster.json
 #   MUSTER_SERVICE       — current service name (if run per-service)
 #   MUSTER_HOOK          — which hook triggered this (e.g. "post-deploy")
 
