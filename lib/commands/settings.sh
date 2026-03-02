@@ -392,11 +392,33 @@ _settings_muster_global() {
       *)       _TOG_STATES[3]=0 ;;
     esac
 
+    # Log retention days: 3 / 7 / 14 / 30 / 90
+    _TOG_LABELS[4]="Log retention (days)"
+    _TOG_OPTIONS[4]="3|7|14|30|90"
+    case "$log_retention" in
+      3)  _TOG_STATES[4]=0 ;;
+      14) _TOG_STATES[4]=2 ;;
+      30) _TOG_STATES[4]=3 ;;
+      90) _TOG_STATES[4]=4 ;;
+      *)  _TOG_STATES[4]=1 ;;
+    esac
+
+    # Health timeout: 5 / 10 / 15 / 30 / 60
+    _TOG_LABELS[5]="Health timeout (s)"
+    _TOG_OPTIONS[5]="5|10|15|30|60"
+    case "$health_timeout" in
+      5)  _TOG_STATES[5]=0 ;;
+      15) _TOG_STATES[5]=2 ;;
+      30) _TOG_STATES[5]=3 ;;
+      60) _TOG_STATES[5]=4 ;;
+      *)  _TOG_STATES[5]=1 ;;
+    esac
+
     echo ""
     _toggle_select "Muster Settings"
 
     # Read back chosen values
-    local new_color new_log_color new_update new_stack
+    local new_color new_log_color new_update new_stack new_retention new_timeout
     case $(( _TOG_STATES[0] )) in
       1) new_color="always" ;;
       2) new_color="never" ;;
@@ -417,12 +439,28 @@ _settings_muster_global() {
       3) new_stack="k8s" ;;
       *) new_stack="bare" ;;
     esac
+    case $(( _TOG_STATES[4] )) in
+      0) new_retention=3 ;;
+      2) new_retention=14 ;;
+      3) new_retention=30 ;;
+      4) new_retention=90 ;;
+      *) new_retention=7 ;;
+    esac
+    case $(( _TOG_STATES[5] )) in
+      0) new_timeout=5 ;;
+      2) new_timeout=15 ;;
+      3) new_timeout=30 ;;
+      4) new_timeout=60 ;;
+      *) new_timeout=10 ;;
+    esac
 
-    # Save toggleable settings
+    # Save all settings
     global_config_set "color_mode" "\"$new_color\""
     global_config_set "log_color_mode" "\"$new_log_color\""
     global_config_set "update_check" "\"$new_update\""
     global_config_set "default_stack" "\"$new_stack\""
+    global_config_set "log_retention_days" "$new_retention"
+    global_config_set "default_health_timeout" "$new_timeout"
 
     return 0
   done
