@@ -1,14 +1,44 @@
 #!/usr/bin/env bash
 # muster/lib/skills/manager.sh — Skill management
+# Skills are per-project (.muster/skills/) with global fallback (~/.muster/skills/).
+
+GLOBAL_SKILLS_DIR="${HOME}/.muster/skills"
+
+# Resolve the active skills directory:
+# - Inside a project: .muster/skills/ (per-project)
+# - Outside a project: ~/.muster/skills/ (global)
+_skills_resolve_dir() {
+  # If CONFIG_FILE is set, use that project
+  if [[ -n "${CONFIG_FILE:-}" ]]; then
+    echo "$(dirname "$CONFIG_FILE")/.muster/skills"
+    return
+  fi
+  # Try to find a config file without erroring
+  local _cfg
+  _cfg=$(find_config 2>/dev/null) || true
+  if [[ -n "$_cfg" ]]; then
+    echo "$(dirname "$_cfg")/.muster/skills"
+    return
+  fi
+  echo "$GLOBAL_SKILLS_DIR"
+}
+
+# Set SKILLS_DIR based on context (called at the start of commands)
+_skills_set_dir() {
+  SKILLS_DIR="$(_skills_resolve_dir)"
+}
 
 SKILLS_DIR="${HOME}/.muster/skills"
 
 cmd_skill() {
   case "${1:-}" in
     --help|-h)
-      echo "Usage: muster skill <command> [args]"
+      echo "Usage: muster skill [--global] <command> [args]"
       echo ""
       echo "Manage addon skills."
+      echo ""
+      echo "Skills are per-project by default (stored in .muster/skills/)."
+      echo "Use --global to manage skills in ~/.muster/skills/ (shared across projects)."
       echo ""
       echo "Commands:"
       echo "  add <url>            Install a skill from a git URL or local path"
@@ -20,44 +50,72 @@ cmd_skill() {
       echo "  enable <name>        Enable auto-run on deploy/rollback hooks"
       echo "  disable <name>       Disable auto-run (manual only)"
       echo "  marketplace [query]  Browse and install skills from the official registry"
+      echo ""
+      echo "Options:"
+      echo "  --global             Operate on global skills (~/.muster/skills/)"
       return 0
       ;;
   esac
 
+  # Check for --global flag before action
+  local _use_global=false
+  if [[ "${1:-}" == "--global" ]]; then
+    _use_global=true
+    shift
+  fi
+
   local action="${1:-list}"
   shift 2>/dev/null || true
 
+  # Check for --global after action too (muster skill add --global <url>)
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--global" ]]; then
+      _use_global=true
+    else
+      args[${#args[@]}]="$1"
+    fi
+    shift
+  done
+
+  # Set SKILLS_DIR based on scope
+  if [[ "$_use_global" == "true" ]]; then
+    SKILLS_DIR="$GLOBAL_SKILLS_DIR"
+  else
+    _skills_set_dir
+  fi
+
   case "$action" in
     add|install)
-      skill_add "$@"
+      skill_add "${args[@]}"
       ;;
     create|new)
-      skill_create "$@"
+      skill_create "${args[@]}"
       ;;
     remove|uninstall)
-      skill_remove "$@"
+      skill_remove "${args[@]}"
       ;;
     list|ls)
       skill_list
       ;;
     run)
-      skill_run "$@"
+      skill_run "${args[@]}"
       ;;
     configure|config)
-      skill_configure "$@"
+      skill_configure "${args[@]}"
       ;;
     enable)
-      skill_enable "$@"
+      skill_enable "${args[@]}"
       ;;
     disable)
-      skill_disable "$@"
+      skill_disable "${args[@]}"
       ;;
     marketplace|browse|search)
-      skill_marketplace "$@"
+      skill_marketplace "${args[@]}"
       ;;
     *)
       err "Unknown skill command: ${action}"
-      echo "Usage: muster skill [add|create|remove|list|run|configure|enable|disable|marketplace]"
+      echo "Usage: muster skill [--global] [add|create|remove|list|run|configure|enable|disable|marketplace]"
       exit 1
       ;;
   esac
@@ -220,14 +278,46 @@ skill_list() {
   echo -e "  ${BOLD}Installed Skills${RESET}"
   echo ""
 
-  if [[ ! -d "$SKILLS_DIR" ]] || [[ -z "$(ls -A "$SKILLS_DIR" 2>/dev/null)" ]]; then
-    info "No skills installed"
-    echo -e "  ${DIM}Run 'muster skill add <git-url>' to install one${RESET}"
-    echo ""
-    return
+  local _found=false
+  local _project_dir=""
+  if [[ -n "${CONFIG_FILE:-}" ]]; then
+    _project_dir="$(dirname "$CONFIG_FILE")/.muster/skills"
+  else
+    local _cfg
+    _cfg=$(find_config 2>/dev/null) || true
+    if [[ -n "$_cfg" ]]; then
+      _project_dir="$(dirname "$_cfg")/.muster/skills"
+    fi
   fi
 
-  for skill_dir in "${SKILLS_DIR}"/*/; do
+  # List project skills
+  if [[ -n "$_project_dir" && -d "$_project_dir" ]] && [[ -n "$(ls -A "$_project_dir" 2>/dev/null)" ]]; then
+    echo -e "  ${DIM}Project skills:${RESET}"
+    _skill_list_dir "$_project_dir"
+    _found=true
+  fi
+
+  # List global skills
+  if [[ -d "$GLOBAL_SKILLS_DIR" ]] && [[ -n "$(ls -A "$GLOBAL_SKILLS_DIR" 2>/dev/null)" ]]; then
+    if [[ "$_found" == "true" ]]; then
+      echo ""
+    fi
+    echo -e "  ${DIM}Global skills:${RESET}"
+    _skill_list_dir "$GLOBAL_SKILLS_DIR"
+    _found=true
+  fi
+
+  if [[ "$_found" == "false" ]]; then
+    info "No skills installed"
+    echo -e "  ${DIM}Run 'muster skill add <git-url>' to install one${RESET}"
+  fi
+  echo ""
+}
+
+# Helper: list skills in a given directory
+_skill_list_dir() {
+  local dir="$1"
+  for skill_dir in "${dir}"/*/; do
     [[ ! -d "$skill_dir" ]] && continue
     local name
     name=$(basename "$skill_dir")
@@ -244,7 +334,6 @@ skill_list() {
     if [[ -z "$hooks_raw" ]]; then
       _mode_tag="${DIM}manual only${RESET}"
     elif [[ -f "${skill_dir}/.enabled" ]]; then
-      # Shorten hook names for display
       local _hooks_short
       _hooks_short=$(printf '%s' "$hooks_raw" | sed 's/post-//g; s/pre-/pre-/g')
       _mode_tag="${GREEN}on ${_hooks_short}${RESET}"
@@ -254,15 +343,20 @@ skill_list() {
 
     echo -e "  ${ACCENT}*${RESET} ${BOLD}${name}${RESET}  ${_mode_tag}  ${DIM}${desc}${RESET}"
   done
-  echo ""
 }
 
 # Load a skill's config.env into the environment
-# Usage: _skill_load_config "slack"
+# Usage: _skill_load_config "slack"           (resolves via SKILLS_DIR)
+#        _skill_load_config "/full/path/slack" (absolute path)
 _SKILL_CONFIG_KEYS=""
 _skill_load_config() {
   local name="$1"
-  local config_file="${SKILLS_DIR}/${name}/config.env"
+  local config_file
+  if [[ "$name" == /* ]]; then
+    config_file="${name}/config.env"
+  else
+    config_file="${SKILLS_DIR}/${name}/config.env"
+  fi
   _SKILL_CONFIG_KEYS=""
   [[ ! -f "$config_file" ]] && return 0
   while IFS='=' read -r _ck _cv; do
@@ -433,7 +527,15 @@ skill_run() {
     exit 1
   fi
 
+  # Find skill: check SKILLS_DIR first, then fall back to global
   local run_script="${SKILLS_DIR}/${name}/run.sh"
+  local _skill_base="${SKILLS_DIR}/${name}"
+  if [[ ! -x "$run_script" && "$SKILLS_DIR" != "$GLOBAL_SKILLS_DIR" ]]; then
+    if [[ -x "${GLOBAL_SKILLS_DIR}/${name}/run.sh" ]]; then
+      run_script="${GLOBAL_SKILLS_DIR}/${name}/run.sh"
+      _skill_base="${GLOBAL_SKILLS_DIR}/${name}"
+    fi
+  fi
 
   if [[ ! -x "$run_script" ]]; then
     err "Skill '${name}' not found or not executable"
@@ -447,7 +549,7 @@ skill_run() {
   fi
 
   _load_env_file
-  _skill_load_config "$name"
+  _skill_load_config "$_skill_base"
 
   "$run_script" "$@"
   local rc=$?
@@ -459,63 +561,97 @@ skill_run() {
 }
 
 # Run all skills that declare a given hook
+# Checks project skills first, then global skills (skipping duplicates).
 # Usage: run_skill_hooks "post-deploy" "api"
 # Non-fatal: warns on failure, never blocks deploy/rollback
 run_skill_hooks() {
   local hook_name="${1:-}" svc_name="${2:-}"
 
-  # Guard: no skills dir
-  [[ ! -d "$SKILLS_DIR" ]] && return 0
+  # Build list of skill dirs to check: project first, then global
+  local _skill_dirs=""
+  local _project_skills_dir=""
+  if [[ -n "${CONFIG_FILE:-}" ]]; then
+    _project_skills_dir="$(dirname "$CONFIG_FILE")/.muster/skills"
+    if [[ -d "$_project_skills_dir" ]]; then
+      _skill_dirs="$_project_skills_dir"
+    fi
+  fi
+  if [[ -d "$GLOBAL_SKILLS_DIR" ]]; then
+    if [[ -n "$_skill_dirs" ]]; then
+      _skill_dirs="${_skill_dirs}:${GLOBAL_SKILLS_DIR}"
+    else
+      _skill_dirs="$GLOBAL_SKILLS_DIR"
+    fi
+  fi
 
-  local skill_dir
-  for skill_dir in "${SKILLS_DIR}"/*/; do
-    [[ ! -d "$skill_dir" ]] && continue
-    [[ ! -f "${skill_dir}/skill.json" ]] && continue
-    [[ ! -x "${skill_dir}/run.sh" ]] && continue
+  [[ -z "$_skill_dirs" ]] && return 0
 
-    # Only auto-run skills that are enabled
-    [[ ! -f "${skill_dir}/.enabled" ]] && continue
+  # Track which skill names have already run (project takes priority)
+  local _ran_skills=""
 
-    # Check if this skill declares the hook
-    local has_hook="false"
-    if has_cmd jq; then
-      local match=""
-      match=$(jq -r --arg h "$hook_name" '.hooks // [] | map(select(. == $h)) | length' "${skill_dir}/skill.json" 2>/dev/null)
-      [[ "$match" != "0" && -n "$match" ]] && has_hook="true"
-    elif has_cmd python3; then
-      local match=""
-      match=$(python3 -c "
+  local IFS_SAVE="$IFS"
+  IFS=':'
+  local _sdir
+  for _sdir in $_skill_dirs; do
+    IFS="$IFS_SAVE"
+    local skill_dir
+    for skill_dir in "${_sdir}"/*/; do
+      [[ ! -d "$skill_dir" ]] && continue
+      [[ ! -f "${skill_dir}/skill.json" ]] && continue
+      [[ ! -x "${skill_dir}/run.sh" ]] && continue
+
+      # Only auto-run skills that are enabled
+      [[ ! -f "${skill_dir}/.enabled" ]] && continue
+
+      local skill_name
+      skill_name=$(basename "$skill_dir")
+
+      # Skip if already ran (project version takes priority over global)
+      case " $_ran_skills " in
+        *" $skill_name "*) continue ;;
+      esac
+
+      # Check if this skill declares the hook
+      local has_hook="false"
+      if has_cmd jq; then
+        local match=""
+        match=$(jq -r --arg h "$hook_name" '.hooks // [] | map(select(. == $h)) | length' "${skill_dir}/skill.json" 2>/dev/null)
+        [[ "$match" != "0" && -n "$match" ]] && has_hook="true"
+      elif has_cmd python3; then
+        local match=""
+        match=$(python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
 print('yes' if sys.argv[2] in d.get('hooks',[]) else 'no')
 " "${skill_dir}/skill.json" "$hook_name" 2>/dev/null)
-      [[ "$match" == "yes" ]] && has_hook="true"
-    fi
-
-    if [[ "$has_hook" == "true" ]]; then
-      local skill_name
-      skill_name=$(basename "$skill_dir")
-
-      # Export context
-      if [[ -n "${CONFIG_FILE:-}" ]]; then
-        export MUSTER_PROJECT_DIR="$(dirname "$CONFIG_FILE")"
-        export MUSTER_CONFIG_FILE="$CONFIG_FILE"
+        [[ "$match" == "yes" ]] && has_hook="true"
       fi
-      export MUSTER_SERVICE="$svc_name"
-      export MUSTER_HOOK="$hook_name"
 
-      _load_env_file
-      _skill_load_config "$skill_name"
+      if [[ "$has_hook" == "true" ]]; then
+        _ran_skills="${_ran_skills} ${skill_name}"
 
-      "${skill_dir}/run.sh" 2>&1 || {
-        warn "Skill '${skill_name}' failed on ${hook_name} (non-fatal)"
-      }
+        # Export context
+        if [[ -n "${CONFIG_FILE:-}" ]]; then
+          export MUSTER_PROJECT_DIR="$(dirname "$CONFIG_FILE")"
+          export MUSTER_CONFIG_FILE="$CONFIG_FILE"
+        fi
+        export MUSTER_SERVICE="$svc_name"
+        export MUSTER_HOOK="$hook_name"
 
-      _skill_unload_config
-      _unload_env_file
-      unset MUSTER_PROJECT_DIR MUSTER_CONFIG_FILE MUSTER_SERVICE MUSTER_HOOK 2>/dev/null
-    fi
+        _load_env_file
+        _skill_load_config "${skill_dir%/}"
+
+        "${skill_dir}/run.sh" 2>&1 || {
+          warn "Skill '${skill_name}' failed on ${hook_name} (non-fatal)"
+        }
+
+        _skill_unload_config
+        _unload_env_file
+        unset MUSTER_PROJECT_DIR MUSTER_CONFIG_FILE MUSTER_SERVICE MUSTER_HOOK 2>/dev/null
+      fi
+    done
   done
+  IFS="$IFS_SAVE"
 }
 
 # ---------------------------------------------------------------------------

@@ -650,6 +650,7 @@ _setup_noninteractive() {
 
   mkdir -p "${muster_dir}/hooks"
   mkdir -p "${muster_dir}/logs"
+  mkdir -p "${muster_dir}/skills"
 
   # Resolve detected paths for template generation
   local _detected_compose _detected_dockerfile _detected_k8s
@@ -1111,6 +1112,7 @@ cmd_setup() {
 
     mkdir -p "${muster_dir}/hooks"
     mkdir -p "${muster_dir}/logs"
+    mkdir -p "${muster_dir}/skills"
     [[ "$stack" == "dev" ]] && mkdir -p "${muster_dir}/pids"
 
     # Dev stack: detect start commands
@@ -1394,6 +1396,7 @@ _setup_manual_flow() {
 
   mkdir -p "${muster_dir}/hooks"
   mkdir -p "${muster_dir}/logs"
+  mkdir -p "${muster_dir}/skills"
   [[ "$stack" == "dev" ]] && mkdir -p "${muster_dir}/pids"
 
   # Dev stack: detect start commands

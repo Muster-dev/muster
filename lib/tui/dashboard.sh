@@ -185,8 +185,12 @@ cmd_dashboard() {
     actions[${#actions[@]}]="Cleanup"
     actions[${#actions[@]}]="Settings"
 
-    # Add installed skills (check for updates via cached registry)
-    local _skills_dir="${HOME}/.muster/skills"
+    # Add installed skills from project and global dirs (check for updates via cached registry)
+    local _project_skills_dir=""
+    if [[ -n "${CONFIG_FILE:-}" ]]; then
+      _project_skills_dir="$(dirname "$CONFIG_FILE")/.muster/skills"
+    fi
+    local _global_skills_dir="${HOME}/.muster/skills"
     local _registry_cache="${HOME}/.muster/.registry_cache.json"
     local _registry_stale="true"
 
@@ -208,11 +212,24 @@ cmd_dashboard() {
         -o "$_registry_cache" 2>/dev/null || true
     fi
 
-    if [[ -d "$_skills_dir" ]]; then
-      for _skill_dir in "${_skills_dir}"/*/; do
+    # Track skill names to skip global duplicates
+    local _seen_skills=""
+
+    # Helper: add skills from a directory to the actions menu
+    _dashboard_add_skills_from() {
+      local _sdir="$1"
+      [[ ! -d "$_sdir" ]] && return
+      for _skill_dir in "${_sdir}"/*/; do
         [[ ! -d "$_skill_dir" ]] && continue
         local _sname _sdisplay
         _sname=$(basename "$_skill_dir")
+
+        # Skip if already seen (project takes priority)
+        case " $_seen_skills " in
+          *" $_sname "*) continue ;;
+        esac
+        _seen_skills="${_seen_skills} ${_sname}"
+
         _sdisplay="$_sname"
         local _local_ver=""
         if [[ -f "${_skill_dir}/skill.json" ]]; then
@@ -256,7 +273,11 @@ cmd_dashboard() {
 
         actions[${#actions[@]}]="Skill: ${_sdisplay}${_mode_tag}${_update_tag}"
       done
-    fi
+    }
+
+    # Project skills first, then global (duplicates skipped)
+    [[ -n "$_project_skills_dir" ]] && _dashboard_add_skills_from "$_project_skills_dir"
+    _dashboard_add_skills_from "$_global_skills_dir"
 
     actions[${#actions[@]}]="Skill Marketplace"
 
@@ -310,36 +331,53 @@ cmd_dashboard() {
         local _has_update="false"
         [[ "$MENU_RESULT" == *"<- update"* ]] && _has_update="true"
 
-        local _run_name=""
-        for _skill_dir in "${_skills_dir}"/*/; do
-          [[ ! -d "$_skill_dir" ]] && continue
-          local _cname _cdisplay
-          _cname=$(basename "$_skill_dir")
-          _cdisplay="$_cname"
-          if [[ -f "${_skill_dir}/skill.json" ]]; then
-            local _cjname=""
-            if has_cmd jq; then
-              _cjname=$(jq -r '.name // ""' "${_skill_dir}/skill.json")
-            elif has_cmd python3; then
-              _cjname=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('name',''))" "${_skill_dir}/skill.json" 2>/dev/null)
+        # Find skill in project dir first, then global
+        local _run_name="" _found_skills_dir=""
+        local _search_dirs=""
+        [[ -n "$_project_skills_dir" && -d "$_project_skills_dir" ]] && _search_dirs="$_project_skills_dir"
+        if [[ -n "$_search_dirs" ]]; then
+          _search_dirs="${_search_dirs}:${_global_skills_dir}"
+        else
+          _search_dirs="$_global_skills_dir"
+        fi
+        local _IFS_SAVE="$IFS"
+        IFS=':'
+        local _sd
+        for _sd in $_search_dirs; do
+          IFS="$_IFS_SAVE"
+          for _skill_dir in "${_sd}"/*/; do
+            [[ ! -d "$_skill_dir" ]] && continue
+            local _cname _cdisplay
+            _cname=$(basename "$_skill_dir")
+            _cdisplay="$_cname"
+            if [[ -f "${_skill_dir}/skill.json" ]]; then
+              local _cjname=""
+              if has_cmd jq; then
+                _cjname=$(jq -r '.name // ""' "${_skill_dir}/skill.json")
+              elif has_cmd python3; then
+                _cjname=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('name',''))" "${_skill_dir}/skill.json" 2>/dev/null)
+              fi
+              if [[ -n "$_cjname" ]]; then
+                _cdisplay="$_cjname"
+              fi
             fi
-            if [[ -n "$_cjname" ]]; then
-              _cdisplay="$_cjname"
+            if [[ "$_cdisplay" == "$_selected_display" ]]; then
+              _run_name="$_cname"
+              _found_skills_dir="$_sd"
+              break 2
             fi
-          fi
-          if [[ "$_cdisplay" == "$_selected_display" ]]; then
-            _run_name="$_cname"
-            break
-          fi
+          done
         done
+        IFS="$_IFS_SAVE"
 
         if [[ -n "$_run_name" ]]; then
           source "$MUSTER_ROOT/lib/skills/manager.sh"
+          SKILLS_DIR="$_found_skills_dir"
           # Build submenu
           local _skill_opts=()
           _skill_opts[0]="Run"
           _skill_opts[${#_skill_opts[@]}]="Configure"
-          if [[ -f "${_skills_dir}/${_run_name}/.enabled" ]]; then
+          if [[ -f "${_found_skills_dir}/${_run_name}/.enabled" ]]; then
             _skill_opts[${#_skill_opts[@]}]="Disable"
           else
             _skill_opts[${#_skill_opts[@]}]="Enable"
