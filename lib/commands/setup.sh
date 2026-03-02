@@ -896,7 +896,7 @@ cmd_setup() {
     "  ${DIM}keychain: ${_plat_kc}${RESET}"
     ""
     "  ${BOLD}Where is your project?${RESET}"
-    "  ${DIM}Enter path or press enter for parent directory${RESET}"
+    "  ${DIM}Enter path, or type 'back' to return${RESET}"
     ""
     "  ${ACCENT}>${RESET} "
   )
@@ -912,10 +912,14 @@ cmd_setup() {
   esac
 
   project_path="${project_path:-..}"
-  project_path="$(cd "$project_path" 2>/dev/null && pwd)" || {
+  local _resolved_path
+  _resolved_path="$(cd "$project_path" 2>/dev/null && pwd)" || {
     err "Path does not exist: $project_path"
-    return 1
+    echo -e "  ${DIM}Press any key to continue...${RESET}"
+    IFS= read -rsn1 || true
+    return 0
   }
+  project_path="$_resolved_path"
 
   # ── Check for existing config ──
   if [[ -f "${project_path}/muster.json" || -f "${project_path}/deploy.json" ]]; then
