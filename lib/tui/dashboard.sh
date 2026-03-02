@@ -346,7 +346,9 @@ _dashboard_home() {
     echo ""
     actions[${#actions[@]}]="Setup new project"
     actions[${#actions[@]}]="Settings"
-    actions[${#actions[@]}]="Update muster"
+    if [[ "$MUSTER_UPDATE_AVAILABLE" == "true" ]]; then
+      actions[${#actions[@]}]="Update muster"
+    fi
     actions[${#actions[@]}]="Quit"
 
     menu_select "Actions" "${actions[@]}"
