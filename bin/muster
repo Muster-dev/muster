@@ -114,6 +114,11 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/auth.sh"
     cmd_auth "$@"
     ;;
+  fleet)
+    shift
+    source "$MUSTER_ROOT/lib/commands/fleet.sh"
+    cmd_fleet "$@"
+    ;;
   update|--update)
     source "$MUSTER_ROOT/lib/core/updater.sh"
     update_apply
@@ -139,6 +144,7 @@ case "${1:-}" in
     echo "  skill       Manage addon skills (add, create, remove, list, run)"
     echo "  projects    List registered projects (--prune to clean stale)"
     echo "  auth        Manage API tokens (create, list, revoke, verify)"
+    echo "  fleet       Manage fleet deployments across machines"
     echo "  update      Update muster to latest version"
     echo ""
     echo "Options:"
