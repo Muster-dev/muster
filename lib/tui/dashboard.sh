@@ -145,11 +145,21 @@ _dashboard_header() {
 _dashboard_home() {
   source "$MUSTER_ROOT/lib/core/registry.sh"
 
+  # Kick off background update check (non-blocking)
+  update_check_start
+
   while true; do
     muster_tui_fullscreen
     clear
     echo -e "\n  ${BOLD}${ACCENT_BRIGHT}muster${RESET} ${DIM}v${MUSTER_VERSION}${RESET}"
     echo ""
+
+    # Collect background update check result
+    update_check_collect
+    if [[ "$MUSTER_UPDATE_AVAILABLE" == "true" ]]; then
+      echo -e "  ${YELLOW}!${RESET} ${DIM}A new version of muster is available${RESET}"
+      echo ""
+    fi
 
     # Load registered projects
     _registry_ensure_file
@@ -192,11 +202,17 @@ _dashboard_home() {
     echo ""
     actions[${#actions[@]}]="Setup new project"
     actions[${#actions[@]}]="Settings"
+    if [[ "$MUSTER_UPDATE_AVAILABLE" == "true" ]]; then
+      actions[${#actions[@]}]="Update muster"
+    fi
     actions[${#actions[@]}]="Quit"
 
     menu_select "" "${actions[@]}"
 
     case "$MENU_RESULT" in
+      "Update muster")
+        update_apply
+        ;;
       "Setup new project")
         source "$MUSTER_ROOT/lib/commands/setup.sh"
         cmd_setup
