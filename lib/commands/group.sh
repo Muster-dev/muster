@@ -757,7 +757,7 @@ _group_cmd_deploy() {
       '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
     _pname=$(groups_project_name "$group_name" "$i")
 
-    progress_bar "$current" "$total" "${_pname}"
+    progress_bar "$i" "$total" "${_pname}"
 
     local log_file="${log_dir}/group-${group_name}-${_pname}-$(date +%Y%m%d-%H%M%S).log"
     local rc=0
@@ -772,6 +772,8 @@ _group_cmd_deploy() {
       fi
 
       if (( rc == 0 )); then
+        progress_bar "$current" "$total" "${_pname}"
+        echo ""
         ok "${_pname} deployed"
         succeeded=$(( succeeded + 1 ))
         break

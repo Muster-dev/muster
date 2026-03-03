@@ -388,7 +388,7 @@ ${_k8s_env_lines}"
 
     elif [[ "$dry_run" == "true" ]]; then
       # ── Dry-run: show plan without executing anything ──
-      progress_bar "$current" "$total" "Deploying ${name}..."
+      progress_bar "$(( current - 1 ))" "$total" "Deploying ${name}..."
       echo ""
       echo ""
       printf '  %b[DRY-RUN]%b %bDeploying %s%b (%s/%s)\n' "${ACCENT}" "${RESET}" "${BOLD}" "$name" "${RESET}" "$current" "$total"
@@ -521,7 +521,7 @@ ${_k8s_env_lines}"
         [[ "$_gp_branch" == "null" || -z "$_gp_branch" ]] && _gp_branch="main"
       fi
 
-      progress_bar "$current" "$total" "Deploying ${name}..."
+      progress_bar "$(( current - 1 ))" "$total" "Deploying ${name}..."
       echo ""
 
       # Preamble callback for stream_in_box to redraw context after viewer
@@ -529,7 +529,7 @@ ${_k8s_env_lines}"
         echo ""
         printf '  %b%bDeploying%b %b%s%b\n' "${BOLD}" "${ACCENT_BRIGHT}" "${RESET}" "${WHITE}" "$project" "${RESET}"
         echo ""
-        progress_bar "$current" "$total" "Deploying ${name}..."
+        progress_bar "$(( current - 1 ))" "$total" "Deploying ${name}..."
         echo ""
       }
       _SIB_REDRAW_FN="_deploy_redraw_preamble"
@@ -611,6 +611,8 @@ ${_k8s_env_lines}"
         unset _SIB_REDRAW_FN
 
         if (( rc == 0 )); then
+          progress_bar "$current" "$total" "Deploying ${name}..."
+          echo ""
           ok "${name} deployed"
           _deploy_verify "$log_file" "$svc" "$_deploy_start_time"
 
