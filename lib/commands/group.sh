@@ -6,6 +6,58 @@ source "$MUSTER_ROOT/lib/tui/menu.sh"
 source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/tui/progress.sh"
 
+# ── Input validation helpers ──
+
+_group_validate_port() {
+  local port="$1"
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+    err "Port must be 1-65535, got: ${port}"
+    return 1
+  fi
+}
+
+_group_validate_host() {
+  local host="$1"
+  if [[ -z "$host" ]]; then
+    err "Host cannot be empty"
+    return 1
+  fi
+  # Reject shell metacharacters
+  case "$host" in
+    *[\;\|\&\$\`\(\)\{\}\<\>\!]*)
+      err "Invalid characters in host: ${host}"
+      return 1
+      ;;
+  esac
+}
+
+_group_validate_user() {
+  local user="$1"
+  if [[ -z "$user" ]]; then
+    err "User cannot be empty"
+    return 1
+  fi
+  case "$user" in
+    *[\;\|\&\$\`\(\)\{\}\<\>\!\@\ ]*)
+      err "Invalid characters in user: ${user}"
+      return 1
+      ;;
+  esac
+}
+
+_group_validate_ssh_key() {
+  local key="$1"
+  [[ -z "$key" ]] && return 0
+  # Expand ~
+  local resolved="$key"
+  case "$resolved" in
+    "~"/*) resolved="${HOME}/${resolved#\~/}" ;;
+  esac
+  if [[ ! -f "$resolved" ]]; then
+    warn "SSH key not found: ${key}"
+  fi
+}
+
 # ── Main entry ──
 
 cmd_group() {
@@ -87,6 +139,8 @@ _group_cmd_list() {
   _groups_ensure_file
 
   if [[ "$json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
     jq '.' "$GROUPS_CONFIG_FILE"
     return 0
   fi
@@ -325,6 +379,12 @@ _group_cmd_add() {
     user="${target%%@*}"
     host="${target#*@}"
 
+    # Validate inputs
+    _group_validate_user "$user" || return 1
+    _group_validate_host "$host" || return 1
+    _group_validate_port "$port" || return 1
+    _group_validate_ssh_key "$key"
+
     echo ""
     groups_add_remote "$group_name" "$host" "$user" "$port" "$key" "$remote_path" || return 1
 
@@ -560,6 +620,12 @@ _group_cmd_edit_cli() {
     return 1
   fi
 
+  # Validate provided fields
+  [[ -n "$new_host" ]] && { _group_validate_host "$new_host" || return 1; }
+  [[ -n "$new_user" ]] && { _group_validate_user "$new_user" || return 1; }
+  [[ -n "$new_port" ]] && { _group_validate_port "$new_port" || return 1; }
+  [[ -n "$new_key" ]]  && _group_validate_ssh_key "$new_key"
+
   # Apply only specified fields
   local tmp="${GROUPS_CONFIG_FILE}.tmp"
   local jq_expr=""
@@ -773,7 +839,9 @@ _group_deploy_remote() {
 
   local cmd="muster deploy --quiet"
   if [[ -n "$_GP_PROJECT_DIR" ]]; then
-    cmd="cd ${_GP_PROJECT_DIR} && ${cmd}"
+    local _escaped_dir
+    printf -v _escaped_dir '%q' "$_GP_PROJECT_DIR"
+    cmd="cd ${_escaped_dir} && ${cmd}"
   fi
 
   ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" >> "$log_file" 2>&1
@@ -893,6 +961,8 @@ _group_cmd_status() {
 
   # JSON mode
   if [[ "$json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
     _group_status_json "$group_name" "$total"
     return 0
   fi
@@ -952,7 +1022,11 @@ _group_cmd_status() {
 
       if ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "echo ok" &>/dev/null; then
         local cmd="muster status --json"
-        [[ -n "$_GP_PROJECT_DIR" ]] && cmd="cd ${_GP_PROJECT_DIR} && ${cmd}"
+        if [[ -n "$_GP_PROJECT_DIR" ]]; then
+          local _escaped_dir
+          printf -v _escaped_dir '%q' "$_GP_PROJECT_DIR"
+          cmd="cd ${_escaped_dir} && ${cmd}"
+        fi
         local _result=""
         _result=$(ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" 2>/dev/null) || true
 
@@ -1006,10 +1080,9 @@ _group_cmd_status() {
 
 _group_status_json() {
   local group_name="$1" total="$2"
-  local json_output='{"group":"'"$group_name"'","projects":['
+  local json_output="[]"
   local i=0
   while (( i < total )); do
-    (( i > 0 )) && json_output="${json_output},"
     local _type _pname _desc
     _type=$(jq -r --arg n "$group_name" --argjson idx "$i" \
       '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
@@ -1031,11 +1104,11 @@ _group_status_json() {
       fi
     fi
 
-    json_output="${json_output}{\"name\":\"${_pname}\",\"type\":\"${_type}\",\"status\":\"${_status}\"}"
+    json_output=$(printf '%s' "$json_output" | jq --arg n "$_pname" --arg t "$_type" --arg s "$_status" \
+      '. + [{"name":$n,"type":$t,"status":$s}]')
     i=$(( i + 1 ))
   done
-  json_output="${json_output}]}"
-  printf '%s\n' "$json_output"
+  jq -n --arg g "$group_name" --argjson p "$json_output" '{"group":$g,"projects":$p}'
 }
 
 # ── Interactive Manager ──
@@ -1235,18 +1308,22 @@ _group_edit_remote_fields() {
   printf '  Host [%s]: ' "$cur_host"
   local new_host; IFS= read -r new_host
   [[ -z "$new_host" ]] && new_host="$cur_host"
+  _group_validate_host "$new_host" || return 1
 
   printf '  User [%s]: ' "$cur_user"
   local new_user; IFS= read -r new_user
   [[ -z "$new_user" ]] && new_user="$cur_user"
+  _group_validate_user "$new_user" || return 1
 
   printf '  Port [%s]: ' "$cur_port"
   local new_port; IFS= read -r new_port
   [[ -z "$new_port" ]] && new_port="$cur_port"
+  _group_validate_port "$new_port" || return 1
 
   printf '  SSH key [%s]: ' "${cur_key:-(none)}"
   local new_key; IFS= read -r new_key
   [[ -z "$new_key" ]] && new_key="$cur_key"
+  _group_validate_ssh_key "$new_key"
 
   printf '  Project dir [%s]: ' "${cur_dir:-(none)}"
   local new_dir; IFS= read -r new_dir

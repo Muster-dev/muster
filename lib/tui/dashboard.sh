@@ -246,6 +246,7 @@ _dashboard_header() {
 
 _dashboard_home() {
   source "$MUSTER_ROOT/lib/core/registry.sh"
+  source "$MUSTER_ROOT/lib/core/groups.sh"
 
   # Kick off background update check (non-blocking)
   update_check_start
@@ -294,14 +295,99 @@ _dashboard_home() {
     (( w > 50 )) && w=50
     (( w < 10 )) && w=10
 
-    if (( _count > 0 )); then
+    # Load groups and collect grouped project paths
+    local _group_keys=()
+    local _group_displays=()
+    local _gcount=0
+    local _grouped_paths=""
+
+    if [[ -f "$GROUPS_CONFIG_FILE" ]] && has_cmd jq; then
+      _gcount=$(jq '.groups | length' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+      [[ -z "$_gcount" ]] && _gcount=0
+
+      local _gi=0
+      while (( _gi < _gcount )); do
+        local _gkey _gdisplay _gpcount
+        _gkey=$(jq -r ".groups | keys[$_gi]" "$GROUPS_CONFIG_FILE")
+        _gdisplay=$(jq -r --arg g "$_gkey" '.groups[$g].name // $g' "$GROUPS_CONFIG_FILE")
+        _gpcount=$(jq -r --arg g "$_gkey" '.groups[$g].projects | length' "$GROUPS_CONFIG_FILE")
+        _group_keys[${#_group_keys[@]}]="$_gkey"
+        _group_displays[${#_group_displays[@]}]="$_gdisplay"
+
+        # Collect local project paths from this group
+        local _gpi=0
+        while (( _gpi < _gpcount )); do
+          local _gp_type _gp_path
+          _gp_type=$(jq -r --arg g "$_gkey" --argjson i "$_gpi" \
+            '.groups[$g].projects[$i].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+          if [[ "$_gp_type" == "local" ]]; then
+            _gp_path=$(jq -r --arg g "$_gkey" --argjson i "$_gpi" \
+              '.groups[$g].projects[$i].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+            _grouped_paths="${_grouped_paths}|${_gp_path}|"
+          fi
+          _gpi=$(( _gpi + 1 ))
+        done
+
+        _gi=$(( _gi + 1 ))
+      done
+    fi
+
+    # ── Fleets section ──
+    if (( _gcount > 0 )); then
+      printf '  %b%bFleets%b\n' "${BOLD}" "${WHITE}" "${RESET}"
+
+      local _gi=0
+      while (( _gi < _gcount )); do
+        local _gdisplay="${_group_displays[$_gi]}"
+        local _gkey="${_group_keys[$_gi]}"
+        local _gpcount
+        _gpcount=$(jq -r --arg g "$_gkey" '.groups[$g].projects | length' "$GROUPS_CONFIG_FILE")
+
+        local _right_text="${_gpcount} project$([ "$_gpcount" != "1" ] && echo "s")"
+        local _left_len=$(( ${#_gdisplay} + 4 ))
+        local _right_len=${#_right_text}
+        local _pad_len=$(( w - _left_len - _right_len - 2 ))
+        (( _pad_len < 1 )) && _pad_len=1
+        local _pad
+        _pad=$(printf '%*s' "$_pad_len" "")
+
+        printf '  %b○%b %b%s%b %s%b%s%b\n' \
+          "${ACCENT}" "${RESET}" \
+          "${WHITE}" "$_gdisplay" "${RESET}" \
+          "$_pad" "${DIM}" "$_right_text" "${RESET}"
+
+        actions[${#actions[@]}]="Fleet: ${_gdisplay}"
+        _gi=$(( _gi + 1 ))
+      done
+
+      _dashboard_rule
+      echo ""
+    fi
+
+    # ── Ungrouped projects section ──
+    local _ungrouped_names=()
+    local _ungrouped_paths=()
+    local _ungrouped_count=0
+
+    local _pi=0
+    while (( _pi < _count )); do
+      local _ppath="${_project_paths[$_pi]}"
+      if [[ "$_grouped_paths" != *"|${_ppath}|"* ]]; then
+        _ungrouped_names[${#_ungrouped_names[@]}]="${_project_names[$_pi]}"
+        _ungrouped_paths[${#_ungrouped_paths[@]}]="$_ppath"
+        _ungrouped_count=$(( _ungrouped_count + 1 ))
+      fi
+      _pi=$(( _pi + 1 ))
+    done
+
+    if (( _ungrouped_count > 0 )); then
       printf '  %b%bProjects%b\n' "${BOLD}" "${WHITE}" "${RESET}"
 
-      local _pi=0
-      while (( _pi < _count )); do
-        local _display_path="${_project_paths[$_pi]}"
+      local _ui=0
+      while (( _ui < _ungrouped_count )); do
+        local _display_path="${_ungrouped_paths[$_ui]}"
         _display_path="${_display_path/#$HOME/~}"
-        local _pname="${_project_names[$_pi]}"
+        local _pname="${_ungrouped_names[$_ui]}"
 
         # Truncate path to fit
         local max_path=$(( w - ${#_pname} - 6 ))
@@ -323,45 +409,13 @@ _dashboard_home() {
           "$pad"
 
         actions[${#actions[@]}]="${_pname}"
-        _pi=$(( _pi + 1 ))
+        _ui=$(( _ui + 1 ))
       done
 
       _dashboard_rule
-    else
+    elif (( _gcount == 0 )); then
       printf '  %bNo projects registered yet.%b\n' "${DIM}" "${RESET}"
       printf '  %bRun '\''muster setup'\'' in a project directory.%b\n' "${DIM}" "${RESET}"
-    fi
-
-    # Fleet Groups section
-    local _group_names=()
-    local _gcount=0
-    if [[ -f "$HOME/.muster/groups.json" ]] && has_cmd jq; then
-      _gcount=$(jq '.groups | length' "$HOME/.muster/groups.json" 2>/dev/null)
-      [[ -z "$_gcount" ]] && _gcount=0
-
-      if (( _gcount > 0 )); then
-        echo ""
-        printf '  %b%bGroups%b\n' "${BOLD}" "${WHITE}" "${RESET}"
-
-        local _gi=0
-        while (( _gi < _gcount )); do
-          local _gkey _gdisplay _gpcount
-          _gkey=$(jq -r ".groups | keys[$_gi]" "$HOME/.muster/groups.json")
-          _gdisplay=$(jq -r --arg g "$_gkey" '.groups[$g].name // $g' "$HOME/.muster/groups.json")
-          _gpcount=$(jq -r --arg g "$_gkey" '.groups[$g].projects | length' "$HOME/.muster/groups.json")
-          _group_names[${#_group_names[@]}]="$_gkey"
-
-          printf '  %b○%b %b%s%b %b(%s project%s)%b\n' \
-            "${ACCENT}" "${RESET}" \
-            "${WHITE}" "$_gdisplay" "${RESET}" \
-            "${DIM}" "$_gpcount" "$([ "$_gpcount" != "1" ] && echo "s")" "${RESET}"
-
-          actions[${#actions[@]}]="Group: ${_gdisplay}"
-          _gi=$(( _gi + 1 ))
-        done
-
-        _dashboard_rule
-      fi
     fi
 
     echo ""
@@ -397,28 +451,25 @@ _dashboard_home() {
         echo ""
         exit 0
         ;;
-      Group:\ *)
-        # Group selection — open group detail menu
+      Fleet:\ *)
+        # Fleet selection — open group detail menu
         source "$MUSTER_ROOT/lib/commands/group.sh"
-        local _selected_group="${MENU_RESULT#Group: }"
-        # Find matching group key by display name
+        local _selected_fleet="${MENU_RESULT#Fleet: }"
         local _gsi=0
-        while (( _gsi < ${#_group_names[@]} )); do
-          local _gdn
-          _gdn=$(jq -r --arg g "${_group_names[$_gsi]}" '.groups[$g].name // $g' "$HOME/.muster/groups.json")
-          if [[ "$_selected_group" == "$_gdn" ]]; then
-            _group_detail_menu "${_group_names[$_gsi]}"
+        while (( _gsi < ${#_group_keys[@]} )); do
+          if [[ "$_selected_fleet" == "${_group_displays[$_gsi]}" ]]; then
+            _group_detail_menu "${_group_keys[$_gsi]}"
             break
           fi
           _gsi=$(( _gsi + 1 ))
         done
         ;;
       *)
-        # Must be a project selection — find matching name
+        # Must be a project selection — find matching ungrouped name
         local _si=0
-        while (( _si < _count )); do
-          if [[ "$MENU_RESULT" == "${_project_names[$_si]}" ]]; then
-            local _target="${_project_paths[$_si]}"
+        while (( _si < _ungrouped_count )); do
+          if [[ "$MENU_RESULT" == "${_ungrouped_names[$_si]}" ]]; then
+            local _target="${_ungrouped_paths[$_si]}"
             if [[ -d "$_target" ]]; then
               cd "$_target"
               cmd_dashboard
@@ -452,6 +503,28 @@ cmd_dashboard() {
   # Kick off background update check (non-blocking)
   update_check_start
 
+  # Detect fleet membership for current project
+  source "$MUSTER_ROOT/lib/core/groups.sh"
+  local _fleet_key="" _fleet_display=""
+  local _project_abs
+  _project_abs="$(cd "$(dirname "$CONFIG_FILE")" 2>/dev/null && pwd)"
+  if [[ -f "$GROUPS_CONFIG_FILE" ]] && has_cmd jq; then
+    local _gkeys
+    _gkeys=$(jq -r '.groups | keys[]' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    while IFS= read -r _gk; do
+      [[ -z "$_gk" ]] && continue
+      local _match
+      _match=$(jq -r --arg g "$_gk" --arg p "$_project_abs" \
+        '[.groups[$g].projects[] | select(.type == "local" and .path == $p)] | length' \
+        "$GROUPS_CONFIG_FILE" 2>/dev/null)
+      if [[ "$_match" != "0" && -n "$_match" ]]; then
+        _fleet_key="$_gk"
+        _fleet_display=$(jq -r --arg g "$_gk" '.groups[$g].name // $g' "$GROUPS_CONFIG_FILE")
+        break
+      fi
+    done <<< "$_gkeys"
+  fi
+
   while true; do
     _dashboard_header
 
@@ -472,6 +545,12 @@ cmd_dashboard() {
       printf '  %b!%b %bBuild context overlap — %d issue%s%b\n' \
         "${YELLOW}" "${RESET}" "${DIM}" "$_bc_issue_count" \
         "$( (( _bc_issue_count > 1 )) && echo s)" "${RESET}"
+      echo ""
+    fi
+
+    # Fleet membership info
+    if [[ -n "$_fleet_display" ]]; then
+      printf '  %b○%b %bFleet:%b %s\n' "${ACCENT}" "${RESET}" "${DIM}" "${RESET}" "$_fleet_display"
       echo ""
     fi
 
@@ -508,10 +587,12 @@ cmd_dashboard() {
       actions[${#actions[@]}]="Fleet"
     fi
 
-    # Add Groups action if groups.json has entries
-    if [[ -f "$HOME/.muster/groups.json" ]] && has_cmd jq; then
+    # Fleet action — show fleet this project belongs to, or generic Groups
+    if [[ -n "$_fleet_key" ]]; then
+      actions[${#actions[@]}]="Fleet: ${_fleet_display}"
+    elif [[ -f "$GROUPS_CONFIG_FILE" ]] && has_cmd jq; then
       local _gcount
-      _gcount=$(jq '.groups | length' "$HOME/.muster/groups.json" 2>/dev/null)
+      _gcount=$(jq '.groups | length' "$GROUPS_CONFIG_FILE" 2>/dev/null)
       if [[ -n "$_gcount" && "$_gcount" != "0" ]]; then
         actions[${#actions[@]}]="Groups"
       fi
@@ -673,6 +754,10 @@ cmd_dashboard() {
       Groups)
         source "$MUSTER_ROOT/lib/commands/group.sh"
         cmd_group
+        ;;
+      Fleet:\ *)
+        source "$MUSTER_ROOT/lib/commands/group.sh"
+        _group_detail_menu "$_fleet_key"
         ;;
       Settings)
         source "$MUSTER_ROOT/lib/commands/settings.sh"
