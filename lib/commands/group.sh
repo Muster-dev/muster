@@ -1093,7 +1093,7 @@ _group_cmd_deploy() {
   progress_bar 0 "$_total_steps" "${_first_pname}  ${_first_pdesc}"
   echo ""
   local _result_lines=()
-  local _section_h=2
+  local _section_h=1
   local _bar_state=""
 
   local i=0
@@ -1245,7 +1245,7 @@ _group_cmd_deploy() {
               local _hook_pid=$!
 
               # Full-section redraw: bar + results + spinner + 3 preview
-              _section_h=$(( 2 + ${#_result_lines[@]} + 4 ))
+              _section_h=$(( 1 + ${#_result_lines[@]} + 4 ))
               _bar_state=""
               # Print initial frame
               progress_bar "$_steps_done" "$_total_steps" "${_pname}  ${_pdesc}"
@@ -1313,7 +1313,7 @@ _group_cmd_deploy() {
                 _ri=$(( _ri + 1 ))
               done
               printf '\033[J'
-              _section_h=$(( 2 + ${#_result_lines[@]} ))
+              _section_h=$(( 1 + ${#_result_lines[@]} ))
 
               if (( _svc_rc != 0 )); then
                 echo ""
@@ -1341,6 +1341,85 @@ _group_cmd_deploy() {
 
       else
         # ── Remote project: deploy with animated preview ──
+
+        # Pre-flight: verify SSH connectivity in foreground (can re-prompt on failure)
+        _groups_load_remote "$group_name" "$i"
+        if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
+          _groups_load_ssh_password
+        fi
+
+        local _preflight_ok=false
+        local _preflight_tries=0
+        while (( _preflight_tries < 3 )); do
+          _groups_build_ssh_opts
+          local _ssh_err=""
+          if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
+            export SSHPASS="$_GP_PASSWORD"
+            # shellcheck disable=SC2086
+            if _ssh_err=$(sshpass -e ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "echo ok" 2>&1); then
+              unset SSHPASS
+              _preflight_ok=true
+              break
+            fi
+            unset SSHPASS
+            if [[ "$_ssh_err" == *"Permission denied"* || "$_ssh_err" == *"incorrect password"* ]]; then
+              # Wrong password — re-prompt
+              printf '  %b!%b Wrong password for %s@%s\n' "${YELLOW}" "${RESET}" "$_GP_USER" "$_GP_HOST"
+              _section_h=$(( _section_h + 1 ))
+              _GP_PASSWORD=$(_cred_prompt_password "SSH password for ${_GP_USER}@${_GP_HOST}")
+              _section_h=$(( _section_h + 1 ))  # prompt line
+              if [[ -z "$_GP_PASSWORD" ]]; then break; fi
+              local _cred_key="ssh_${_GP_USER}@${_GP_HOST}:${_GP_PORT}"
+              _cred_session_set "$_cred_key" "$_GP_PASSWORD"
+              [[ "$_GP_AUTH_MODE" == "save" ]] && _cred_keychain_save "groups" "$_cred_key" "$_GP_PASSWORD" 2>/dev/null || true
+              _preflight_tries=$(( _preflight_tries + 1 ))
+              continue
+            fi
+          else
+            # shellcheck disable=SC2086
+            if _ssh_err=$(ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "echo ok" 2>&1); then
+              _preflight_ok=true
+              break
+            fi
+          fi
+          # Non-password failure — don't retry
+          break
+        done
+
+        if [[ "$_preflight_ok" != "true" ]]; then
+          printf 'Cannot reach %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
+          [[ -n "$_ssh_err" ]] && printf '%s\n' "$_ssh_err" >> "$log_file"
+          [[ "$_GP_AUTH_METHOD" == "key" ]] && printf 'Hint: auth method is "key" — use --auth password if this host requires a password\n' >> "$log_file"
+          rc=1
+
+          _result_lines[${#_result_lines[@]}]="$(printf '  %b✗%b %s  %b%s%b' "${RED}" "${RESET}" "$_pname" "${DIM}" "$_pdesc" "${RESET}")"
+          _bar_state="error"
+          printf '\033[%dA' "$_section_h"
+          progress_bar "$_steps_done" "$_total_steps" "${_pname}  ${_pdesc}" "$_bar_state"
+          printf '\n'
+          local _ri=0
+          while (( _ri < ${#_result_lines[@]} )); do
+            printf '%b\033[K\n' "${_result_lines[$_ri]}"
+            _ri=$(( _ri + 1 ))
+          done
+          printf '\033[J'
+          _section_h=$(( 1 + ${#_result_lines[@]} ))
+
+          echo ""
+          _section_h=$(( _section_h + 1 ))
+          if [[ -s "$log_file" ]]; then
+            while IFS= read -r _eline; do
+              _eline=$(printf '%s' "$_eline" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
+              printf '    %b%s%b\n' "${RED}" "$_eline" "${RESET}"
+              _section_h=$(( _section_h + 1 ))
+            done < <(tail -5 "$log_file")
+          fi
+
+          # Skip to failure handling below (menu_select)
+        fi
+
+        if [[ "$_preflight_ok" == "true" ]]; then
+
         : > "$log_file"
         _group_deploy_remote "$group_name" "$i" "$log_file" &
         local _remote_pid=$!
@@ -1353,7 +1432,7 @@ _group_cmd_deploy() {
         (( _pw < 10 )) && _pw=10
 
         # Full-section redraw: bar + results + spinner + 3 preview
-        _section_h=$(( 2 + ${#_result_lines[@]} + 4 ))
+        _section_h=$(( 1 + ${#_result_lines[@]} + 4 ))
         _bar_state=""
         # Print initial frame
         progress_bar "$_steps_done" "$_total_steps" "${_pname}  ${_pdesc}"
@@ -1420,7 +1499,7 @@ _group_cmd_deploy() {
           _ri=$(( _ri + 1 ))
         done
         printf '\033[J'
-        _section_h=$(( 2 + ${#_result_lines[@]} ))
+        _section_h=$(( 1 + ${#_result_lines[@]} ))
 
         if (( rc != 0 )); then
           echo ""
@@ -1433,6 +1512,8 @@ _group_cmd_deploy() {
             done < <(tail -5 "$log_file")
           fi
         fi
+
+        fi # _preflight_ok == true
       fi
 
       # Handle interruption
@@ -1477,7 +1558,7 @@ _group_cmd_deploy() {
             fi
             progress_bar "$_steps_done" "$_total_steps" "${_pname}  ${_pdesc}"
             printf '\n\033[J'
-            _section_h=2
+            _section_h=1
             log_file="${log_dir}/group-${group_name}-${_pname}-$(date +%Y%m%d-%H%M%S).log"
             continue
             ;;
@@ -1542,33 +1623,17 @@ _group_deploy_remote() {
       printf -v _escaped_dir '%q' "$_GP_PROJECT_DIR"
       cmd="cd ${_escaped_dir} && ${cmd}"
     fi
-    # SSH transport
+    # SSH transport (pre-flight already done in foreground)
     _groups_build_ssh_opts
 
-    # Pre-flight: check connectivity (capture stderr for diagnostics)
-    local _ssh_err=""
     if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
       export SSHPASS="$_GP_PASSWORD"
-      # shellcheck disable=SC2086
-      if ! _ssh_err=$(sshpass -e ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "echo ok" 2>&1); then
-        unset SSHPASS
-        printf 'Cannot reach %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
-        [[ -n "$_ssh_err" ]] && printf '%s\n' "$_ssh_err" >> "$log_file"
-        return 1
-      fi
       # shellcheck disable=SC2086
       sshpass -e ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" >> "$log_file" 2>&1
       local _rc=$?
       unset SSHPASS
       return $_rc
     else
-      # shellcheck disable=SC2086
-      if ! _ssh_err=$(ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "echo ok" 2>&1); then
-        printf 'Cannot reach %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
-        [[ -n "$_ssh_err" ]] && printf '%s\n' "$_ssh_err" >> "$log_file"
-        [[ "$_GP_AUTH_METHOD" == "key" ]] && printf 'Hint: auth method is "key" — use --auth password if this host requires a password\n' >> "$log_file"
-        return 1
-      fi
       # shellcheck disable=SC2086
       ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" >> "$log_file" 2>&1
     fi

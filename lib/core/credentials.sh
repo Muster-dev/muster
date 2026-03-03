@@ -54,13 +54,14 @@ _cred_prompt_password() {
   local label="$1"
   local password=""
 
-  printf '  %b?%b %s %b(hidden)%b: ' "${ACCENT}" "${RESET}" "$label" "${DIM}" "${RESET}"
+  # Prompt to stderr so $() only captures the password on stdout
+  printf '  %b?%b %s %b(hidden)%b: ' "${ACCENT}" "${RESET}" "$label" "${DIM}" "${RESET}" >&2
 
   # Read with hidden input
   stty -echo 2>/dev/null
   IFS= read -r password || true
   stty echo 2>/dev/null
-  printf '\n'
+  printf '\n' >&2
 
   printf '%s' "$password"
 }
