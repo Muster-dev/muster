@@ -809,16 +809,15 @@ _group_cmd_deploy() {
   # Pre-calculate total deploy steps (services across all projects)
   local _total_steps=0
   local _steps_done=0
-  local _lsb=0
   local _pi=0
   while (( _pi < total )); do
     local _pt
     _pt=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$_pi].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
     if [[ "$_pt" == "local" ]]; then
       local _pp
       _pp=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-        '.groups[$n].projects[$_pi].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+        '.groups[$n].projects[$idx].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
       local _pc=""
       [[ -f "${_pp}/deploy.json" ]] && _pc="${_pp}/deploy.json"
       [[ -z "$_pc" && -f "${_pp}/muster.json" ]] && _pc="${_pp}/muster.json"
@@ -836,12 +835,46 @@ _group_cmd_deploy() {
     _pi=$(( _pi + 1 ))
   done
 
-  # Single progress bar — printed once, updated in-place via cursor
+  # Pre-authenticate sudo if any project hooks use it (before bar for clean TUI)
+  local _any_sudo_global=false
+  _pi=0
+  while (( _pi < total )); do
+    local _pt
+    _pt=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
+      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    if [[ "$_pt" == "local" ]]; then
+      local _pp
+      _pp=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
+        '.groups[$n].projects[$idx].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+      if [[ -d "${_pp:-}" && -d "${_pp}/.muster/hooks" ]]; then
+        if grep -rq 'sudo' "${_pp}/.muster/hooks" 2>/dev/null; then
+          _any_sudo_global=true; break
+        fi
+      fi
+    fi
+    _pi=$(( _pi + 1 ))
+  done
+  if [[ "$_any_sudo_global" == "true" ]]; then
+    local _sudo_was_cached=false
+    sudo -n true 2>/dev/null && _sudo_was_cached=true
+    sudo -v || true
+    if [[ "$_sudo_was_cached" == "false" ]]; then
+      printf '  %b✓%b Authenticated\n' "${GREEN}" "${RESET}"
+      printf '    %bSave?%b  1) Session  2) Always ask  3) Never ' "${DIM}" "${RESET}"
+      local _sudo_ch=""
+      IFS= read -rsn1 -t 5 _sudo_ch 2>/dev/null || true
+      printf '\r\033[K'
+    fi
+  fi
+
+  # Progress bar — printed once, updated via full-section redraw
   local _first_pname
   _first_pname=$(groups_project_name "$group_name" "0")
   progress_bar 0 "$_total_steps" "$_first_pname"
   echo ""
-  _lsb=1
+  local _result_lines=()
+  local _section_h=2
+  local _bar_state=""
 
   local i=0
   while (( i < total )); do
@@ -852,16 +885,12 @@ _group_cmd_deploy() {
       '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
     _pname=$(groups_project_name "$group_name" "$i")
 
-    # Update bar label for current project
-    printf '\033[%dA' "$_lsb"
-    progress_bar "$_steps_done" "$_total_steps" "$_pname"
-    printf '\033[%dB' "$_lsb"
-
     local log_file="${log_dir}/group-${group_name}-${_pname}-$(date +%Y%m%d-%H%M%S).log"
     local rc=0
     local _svc_total=0
     local _svc_idx=0
     local _steps_before="$_steps_done"
+    local _results_before=${#_result_lines[@]}
 
     while true; do
 
@@ -874,11 +903,11 @@ _group_cmd_deploy() {
         # Pre-flight checks
         if [[ -z "$_path" || "$_path" == "null" ]]; then
           err "Project has no path configured"
-          _lsb=$(( _lsb + 1 ))
+          _section_h=$(( _section_h + 1 ))
           rc=1
         elif [[ ! -d "$_path" ]]; then
           err "Project directory not found: ${_path}"
-          _lsb=$(( _lsb + 1 ))
+          _section_h=$(( _section_h + 1 ))
           rc=1
         else
           local _cfg=""
@@ -887,7 +916,7 @@ _group_cmd_deploy() {
 
           if [[ -z "$_cfg" ]]; then
             err "No deploy.json found in ${_path}"
-            _lsb=$(( _lsb + 1 ))
+            _section_h=$(( _section_h + 1 ))
             rc=1
           else
             # Get deploy order
@@ -924,46 +953,23 @@ _group_cmd_deploy() {
               done < "${_path}/.env"
             fi
 
-            # Pre-authenticate sudo if any hooks use it
-            local _any_sudo=false
-            for _sudo_svc in "${_services[@]}"; do
-              local _sudo_hook="${_path}/.muster/hooks/${_sudo_svc}/deploy.sh"
-              if [[ -f "$_sudo_hook" ]] && grep -q 'sudo' "$_sudo_hook" 2>/dev/null; then
-                _any_sudo=true
-                break
-              fi
-            done
-            if [[ "$_any_sudo" == "true" ]]; then
-              # Check if sudo is already cached (no password needed)
-              local _sudo_was_cached=false
-              sudo -n true 2>/dev/null && _sudo_was_cached=true
-              sudo -v || true
-              if [[ "$_sudo_was_cached" == "false" ]]; then
-                printf '  %b✓%b Authenticated\n' "${GREEN}" "${RESET}"
-                printf '    %bSave?%b  1) Session  2) Always ask  3) Never ' "${DIM}" "${RESET}"
-                local _sudo_ch=""
-                IFS= read -rsn1 -t 3 _sudo_ch 2>/dev/null || true
-                printf '\r\033[K'
-              fi
-            fi
-
-            # Deploy each service with animated preview
+            # Deploy each service with full-section redraw
             update_term_size
             local _sp_f=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
             local _svc_idx=0
+            local _pw=$(( TERM_COLS - 8 ))
+            (( _pw > 68 )) && _pw=68
+            (( _pw < 10 )) && _pw=10
             rc=0
+
             for _svc in "${_services[@]}"; do
               _svc_idx=$(( _svc_idx + 1 ))
               local _svc_name
               _svc_name=$(jq -r --arg s "$_svc" '.services[$s].name // $s' "$_cfg" 2>/dev/null)
 
-              # Check for interruption
-              if [[ "$_group_interrupted" == "true" ]]; then
-                rc=130
-                break
-              fi
+              if [[ "$_group_interrupted" == "true" ]]; then rc=130; break; fi
 
-              # Handle credentials (foreground, interactive)
+              # Handle credentials (before animation)
               local _cred_env=""
               _cred_env=$(_group_cred_for_service "$_cfg" "$_svc") || true
               if [[ -n "$_cred_env" ]]; then
@@ -971,26 +977,21 @@ _group_cmd_deploy() {
                   [[ -z "$_ck" ]] && continue
                   export "$_ck=$_cv"
                 done <<< "$_cred_env"
-
-                # Credential save prompt (passive, 3s timeout)
                 local _g_cur_mode
                 _g_cur_mode=$(jq -r --arg s "$_svc" '.services[$s].credentials.mode // ""' "$_cfg" 2>/dev/null)
                 if [[ "$_g_cur_mode" == "session" || "$_g_cur_mode" == "always" ]]; then
                   printf '    %bSave?%b  1) Keychain  2) Session  3) Skip ' "${DIM}" "${RESET}"
                   local _save_ch=""
-                  IFS= read -rsn1 -t 3 _save_ch 2>/dev/null || true
+                  IFS= read -rsn1 -t 5 _save_ch 2>/dev/null || true
                   case "$_save_ch" in
-                    1)
-                      local _tmp_cfg
-                      _tmp_cfg=$(jq --arg s "$_svc" '.services[$s].credentials.mode = "save"' "$_cfg") && printf '%s' "$_tmp_cfg" > "$_cfg"
-                      printf ' %bsaved%b' "${GREEN}" "${RESET}"
-                      ;;
+                    1) local _tmp_cfg
+                       _tmp_cfg=$(jq --arg s "$_svc" '.services[$s].credentials.mode = "save"' "$_cfg") && printf '%s' "$_tmp_cfg" > "$_cfg" ;;
                   esac
                   printf '\r\033[K'
                 fi
               fi
 
-              # Export k8s env vars
+              # Export k8s/deploy env vars
               local _k8s_dep _k8s_ns
               _k8s_dep=$(jq -r --arg s "$_svc" '.services[$s].k8s.deployment // ""' "$_cfg" 2>/dev/null)
               _k8s_ns=$(jq -r --arg s "$_svc" '.services[$s].k8s.namespace // ""' "$_cfg" 2>/dev/null)
@@ -998,16 +999,13 @@ _group_cmd_deploy() {
               [[ -n "$_k8s_ns" && "$_k8s_ns" != "null" ]] && export MUSTER_K8S_NAMESPACE="$_k8s_ns"
               export MUSTER_K8S_SERVICE="${_svc//_/-}"
               export MUSTER_SERVICE_NAME="$_svc_name"
-
               local _timeout
               _timeout=$(jq -r --arg s "$_svc" '.services[$s].deploy_timeout // 120' "$_cfg" 2>/dev/null)
               export MUSTER_DEPLOY_TIMEOUT="$_timeout"
-
               local _deploy_mode
               _deploy_mode=$(jq -r --arg s "$_svc" '.services[$s].deploy_mode // ""' "$_cfg" 2>/dev/null)
               [[ -n "$_deploy_mode" && "$_deploy_mode" != "null" ]] && export MUSTER_DEPLOY_MODE="$_deploy_mode"
 
-              # Find deploy hook
               local _hook="${_path}/.muster/hooks/${_svc}/deploy.sh"
               if [[ ! -x "$_hook" ]]; then
                 warn "No deploy hook for ${_svc_name}, skipping"
@@ -1017,25 +1015,37 @@ _group_cmd_deploy() {
               local _svc_log="${log_dir}/group-${group_name}-${_pname}-${_svc}-$(date +%Y%m%d-%H%M%S).log"
               : > "$_svc_log"
 
-              # Run hook in background, output to log
+              # Run hook in background
               (cd "$_path" && "$_hook") >> "$_svc_log" 2>&1 &
               local _hook_pid=$!
 
-              # Foreground animation: spinner + 3-line log preview
-              local _sp_i=0
-              local _anim_h=4
-              local _pw=$(( TERM_COLS - 8 ))
-              (( _pw > 68 )) && _pw=68
-              (( _pw < 10 )) && _pw=10
-
-              # Print initial placeholder (4 lines)
-              printf '  %b%s%b %bDeploying %s (%d/%d)%b\n' \
+              # Full-section redraw: bar + results + spinner + 3 preview
+              _section_h=$(( 2 + ${#_result_lines[@]} + 4 ))
+              _bar_state=""
+              # Print initial frame
+              progress_bar "$_steps_done" "$_total_steps" "$_pname"
+              printf '\n'
+              local _ri=0
+              while (( _ri < ${#_result_lines[@]} )); do
+                printf '%b\033[K\n' "${_result_lines[$_ri]}"
+                _ri=$(( _ri + 1 ))
+              done
+              printf '  %b%s%b %bDeploying %s (%d/%d)%b\033[K\n' \
                 "${ACCENT}" "${_sp_f[0]}" "${RESET}" "${WHITE}" "$_svc_name" "$_svc_idx" "$_svc_total" "${RESET}"
               printf '\033[K\n\033[K\n\033[K\n'
 
+              # Animation loop
+              local _sp_i=0
               while kill -0 "$_hook_pid" 2>/dev/null; do
                 [[ "$_group_interrupted" == "true" ]] && { kill "$_hook_pid" 2>/dev/null; break; }
-                printf '\033[%dA' "$_anim_h"
+                printf '\033[%dA' "$_section_h"
+                progress_bar "$_steps_done" "$_total_steps" "$_pname"
+                printf '\n'
+                _ri=0
+                while (( _ri < ${#_result_lines[@]} )); do
+                  printf '%b\033[K\n' "${_result_lines[$_ri]}"
+                  _ri=$(( _ri + 1 ))
+                done
                 printf '  %b%s%b %bDeploying %s (%d/%d)%b\033[K\n' \
                   "${ACCENT}" "${_sp_f[$((_sp_i % 10))]}" "${RESET}" \
                   "${WHITE}" "$_svc_name" "$_svc_idx" "$_svc_total" "${RESET}"
@@ -1047,60 +1057,53 @@ _group_cmd_deploy() {
                   case $_ti in 0) _t0="$_tl" ;; 1) _t1="$_tl" ;; 2) _t2="$_tl" ;; esac
                   _ti=$((_ti + 1))
                 done < <(tail -3 "$_svc_log" 2>/dev/null)
-
                 local _tp=""
                 for _tp in "$_t0" "$_t1" "$_t2"; do
                   (( ${#_tp} > _pw )) && _tp="${_tp:0:$((_pw - 3))}..."
                   printf '    %b%s%b\033[K\n' "${DIM}" "$_tp" "${RESET}"
                 done
-
                 sleep 1
               done
 
               wait "$_hook_pid" 2>/dev/null
               local _svc_rc=$?
-
-              # Append service log to project log
               cat "$_svc_log" >> "$log_file" 2>/dev/null
 
-              # Clear animation, show result
-              printf '\033[%dA' "$_anim_h"
-              if (( _svc_rc == 0 )); then
-                printf '  %b✓%b %s\033[K\n' "${GREEN}" "${RESET}" "$_svc_name"
-              else
-                printf '  %b✗%b %s\033[K\n' "${RED}" "${RESET}" "$_svc_name"
-              fi
-              printf '\033[K\n\033[K\n\033[K'
-              printf '\033[2A'
-              _lsb=$(( _lsb + 1 ))
-
-              # Update progress bar in-place
+              # Add result to tracking
               if (( _svc_rc == 0 )); then
                 _steps_done=$(( _steps_done + 1 ))
-                printf '\033[%dA' "$_lsb"
-                progress_bar "$_steps_done" "$_total_steps" "$_pname"
-                printf '\033[%dB' "$_lsb"
+                _result_lines[${#_result_lines[@]}]="$(printf '  %b✓%b %s' "${GREEN}" "${RESET}" "$_svc_name")"
               else
-                printf '\033[%dA' "$_lsb"
-                progress_bar "$_steps_done" "$_total_steps" "$_pname" "error"
-                printf '\033[%dB' "$_lsb"
+                _result_lines[${#_result_lines[@]}]="$(printf '  %b✗%b %s' "${RED}" "${RESET}" "$_svc_name")"
+                _bar_state="error"
               fi
+
+              # Redraw section without animation (bar + results only)
+              printf '\033[%dA' "$_section_h"
+              progress_bar "$_steps_done" "$_total_steps" "$_pname" "$_bar_state"
+              printf '\n'
+              _ri=0
+              while (( _ri < ${#_result_lines[@]} )); do
+                printf '%b\033[K\n' "${_result_lines[$_ri]}"
+                _ri=$(( _ri + 1 ))
+              done
+              printf '\033[J'
+              _section_h=$(( 2 + ${#_result_lines[@]} ))
 
               if (( _svc_rc != 0 )); then
                 echo ""
-                _lsb=$(( _lsb + 1 ))
+                _section_h=$(( _section_h + 1 ))
                 if [[ -s "$_svc_log" ]]; then
                   while IFS= read -r _eline; do
                     _eline=$(printf '%s' "$_eline" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
                     printf '    %b%s%b\n' "${RED}" "$_eline" "${RESET}"
-                    _lsb=$(( _lsb + 1 ))
+                    _section_h=$(( _section_h + 1 ))
                   done < <(tail -5 "$_svc_log")
                 fi
                 rc="$_svc_rc"
                 break
               fi
 
-              # Cleanup credential env vars
               if [[ -n "$_cred_env" ]]; then
                 while IFS='=' read -r _ck _cv; do
                   [[ -z "$_ck" ]] && continue
@@ -1120,18 +1123,35 @@ _group_cmd_deploy() {
         update_term_size
         local _sp_f=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
         local _sp_i=0
-        local _anim_h=4
         local _pw=$(( TERM_COLS - 8 ))
         (( _pw > 68 )) && _pw=68
         (( _pw < 10 )) && _pw=10
 
-        printf '  %b%s%b %bDeploying %s remotely%b\n' \
+        # Full-section redraw: bar + results + spinner + 3 preview
+        _section_h=$(( 2 + ${#_result_lines[@]} + 4 ))
+        _bar_state=""
+        # Print initial frame
+        progress_bar "$_steps_done" "$_total_steps" "$_pname"
+        printf '\n'
+        local _ri=0
+        while (( _ri < ${#_result_lines[@]} )); do
+          printf '%b\033[K\n' "${_result_lines[$_ri]}"
+          _ri=$(( _ri + 1 ))
+        done
+        printf '  %b%s%b %bDeploying %s remotely%b\033[K\n' \
           "${ACCENT}" "${_sp_f[0]}" "${RESET}" "${WHITE}" "$_pname" "${RESET}"
         printf '\033[K\n\033[K\n\033[K\n'
 
         while kill -0 "$_remote_pid" 2>/dev/null; do
           [[ "$_group_interrupted" == "true" ]] && { kill "$_remote_pid" 2>/dev/null; break; }
-          printf '\033[%dA' "$_anim_h"
+          printf '\033[%dA' "$_section_h"
+          progress_bar "$_steps_done" "$_total_steps" "$_pname"
+          printf '\n'
+          _ri=0
+          while (( _ri < ${#_result_lines[@]} )); do
+            printf '%b\033[K\n' "${_result_lines[$_ri]}"
+            _ri=$(( _ri + 1 ))
+          done
           printf '  %b%s%b %bDeploying %s remotely%b\033[K\n' \
             "${ACCENT}" "${_sp_f[$((_sp_i % 10))]}" "${RESET}" \
             "${WHITE}" "$_pname" "${RESET}"
@@ -1156,36 +1176,35 @@ _group_cmd_deploy() {
         wait "$_remote_pid" 2>/dev/null
         rc=$?
 
-        printf '\033[%dA' "$_anim_h"
-        if (( rc == 0 )); then
-          printf '  %b✓%b %s\033[K\n' "${GREEN}" "${RESET}" "$_pname"
-        else
-          printf '  %b✗%b %s\033[K\n' "${RED}" "${RESET}" "$_pname"
-        fi
-        printf '\033[K\n\033[K\n\033[K'
-        printf '\033[2A'
-        _lsb=$(( _lsb + 1 ))
-
-        # Update progress bar in-place
+        # Add result to tracking
         if (( rc == 0 )); then
           _steps_done=$(( _steps_done + 1 ))
-          printf '\033[%dA' "$_lsb"
-          progress_bar "$_steps_done" "$_total_steps" "$_pname"
-          printf '\033[%dB' "$_lsb"
+          _result_lines[${#_result_lines[@]}]="$(printf '  %b✓%b %s %b(remote)%b' "${GREEN}" "${RESET}" "$_pname" "${DIM}" "${RESET}")"
         else
-          printf '\033[%dA' "$_lsb"
-          progress_bar "$_steps_done" "$_total_steps" "$_pname" "error"
-          printf '\033[%dB' "$_lsb"
+          _result_lines[${#_result_lines[@]}]="$(printf '  %b✗%b %s %b(remote)%b' "${RED}" "${RESET}" "$_pname" "${DIM}" "${RESET}")"
+          _bar_state="error"
         fi
+
+        # Redraw section without animation
+        printf '\033[%dA' "$_section_h"
+        progress_bar "$_steps_done" "$_total_steps" "$_pname" "$_bar_state"
+        printf '\n'
+        _ri=0
+        while (( _ri < ${#_result_lines[@]} )); do
+          printf '%b\033[K\n' "${_result_lines[$_ri]}"
+          _ri=$(( _ri + 1 ))
+        done
+        printf '\033[J'
+        _section_h=$(( 2 + ${#_result_lines[@]} ))
 
         if (( rc != 0 )); then
           echo ""
-          _lsb=$(( _lsb + 1 ))
+          _section_h=$(( _section_h + 1 ))
           if [[ -s "$log_file" ]]; then
             while IFS= read -r _eline; do
               _eline=$(printf '%s' "$_eline" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
               printf '    %b%s%b\n' "${RED}" "$_eline" "${RESET}"
-              _lsb=$(( _lsb + 1 ))
+              _section_h=$(( _section_h + 1 ))
             done < <(tail -5 "$log_file")
           fi
         fi
@@ -1202,32 +1221,38 @@ _group_cmd_deploy() {
       fi
 
       if (( rc == 0 )); then
-        echo ""
-        _lsb=$(( _lsb + 1 ))
-        if (( _svc_total > 1 )); then
-          printf '  %b✓%b %s deployed (%d services)\n' "${GREEN}" "${RESET}" "$_pname" "$_svc_total"
-        else
-          printf '  %b✓%b %s deployed\n' "${GREEN}" "${RESET}" "$_pname"
-        fi
-        _lsb=$(( _lsb + 1 ))
         succeeded=$(( succeeded + 1 ))
         break
       else
         # Bar already turned red in service/remote handler above
         echo ""
-        _lsb=$(( _lsb + 1 ))
+        _section_h=$(( _section_h + 1 ))
         menu_select "Deploy failed on ${_pname}" \
           "Retry" "Skip and continue" "Abort"
+        # menu_select net footprint: 3 lines (blank + title + collapsed choice)
+        _section_h=$(( _section_h + 3 ))
 
         case "$MENU_RESULT" in
           "Retry")
-            # Clear everything below bar, restart this project
-            _lsb=$(( _lsb + 3 ))
-            printf '\033[%dA' "$_lsb"
+            # Clear everything from bar down, restart this project
+            printf '\033[%dA' "$_section_h"
             _steps_done="$_steps_before"
+            _bar_state=""
+            # Truncate _result_lines back to _results_before
+            if (( _results_before == 0 )); then
+              _result_lines=()
+            else
+              local _kept=()
+              local _rr=0
+              while (( _rr < _results_before )); do
+                _kept[${#_kept[@]}]="${_result_lines[$_rr]}"
+                _rr=$(( _rr + 1 ))
+              done
+              _result_lines=("${_kept[@]}")
+            fi
             progress_bar "$_steps_done" "$_total_steps" "$_pname"
             printf '\n\033[J'
-            _lsb=1
+            _section_h=2
             log_file="${log_dir}/group-${group_name}-${_pname}-$(date +%Y%m%d-%H%M%S).log"
             continue
             ;;
@@ -1238,11 +1263,11 @@ _group_cmd_deploy() {
             else
               _total_steps=$(( _total_steps - 1 ))
             fi
-            # Update bar to show adjusted progress (no longer error state)
-            _lsb=$(( _lsb + 3 ))
-            printf '\033[%dA' "$_lsb"
+            # Update bar in-place (clear error state)
+            printf '\033[%dA' "$_section_h"
+            _bar_state=""
             progress_bar "$_steps_done" "$_total_steps" "$_pname"
-            printf '\033[%dB' "$_lsb"
+            printf '\033[%dB' "$_section_h"
             skipped=$(( skipped + 1 ))
             break
             ;;
