@@ -841,8 +841,9 @@ _group_deploy_local() {
   fi
 
   # Run muster deploy in a subshell to avoid config contamination
+  # Redirect stdin from /dev/null so deploy skips interactive menus
   local _muster_bin="${MUSTER_ROOT}/bin/muster"
-  (cd "$_path" && "$_muster_bin" deploy --quiet) >> "$log_file" 2>&1
+  (cd "$_path" && "$_muster_bin" deploy --quiet) >> "$log_file" 2>&1 < /dev/null
 }
 
 _group_deploy_remote() {
@@ -1588,28 +1589,41 @@ _group_detail_menu() {
             _cfg="${_raw_path}/muster.json"
           fi
           if [[ -n "$_cfg" ]] && has_cmd jq; then
-            # Get status JSON (cached in health_cache)
-            local _muster_bin="${MUSTER_ROOT}/bin/muster"
-            local _st_json=""
-            _st_json=$(cd "$_raw_path" && "$_muster_bin" status --json 2>/dev/null) || true
-
             local _svc_list
             _svc_list=$(jq -r '.services | keys[]' "$_cfg" 2>/dev/null)
             if [[ -n "$_svc_list" ]]; then
               while IFS= read -r _sk; do
                 [[ -z "$_sk" ]] && continue
-                local _sn _s_icon _s_color _s_status
+                local _sn _s_icon _s_color
                 _sn=$(jq -r --arg k "$_sk" '.services[$k].name // $k' "$_cfg" 2>/dev/null)
 
-                # Look up status from JSON result
-                _s_status=""
-                if [[ -n "$_st_json" ]]; then
-                  _s_status=$(printf '%s' "$_st_json" | jq -r --arg k "$_sk" '.services[$k].status // ""' 2>/dev/null)
+                # Run the health hook directly
+                local _s_status="unknown"
+                local _h_hook="${_raw_path}/.muster/hooks/${_sk}/health.sh"
+                local _h_dir="${_raw_path}/.muster/hooks/${_sk}"
+                local _h_enabled
+                _h_enabled=$(jq -r --arg k "$_sk" '.services[$k].health.enabled // "true"' "$_cfg" 2>/dev/null)
+
+                if [[ "$_h_enabled" == "false" ]]; then
+                  _s_status="disabled"
+                elif [[ -x "$_h_hook" ]]; then
+                  if (cd "$_raw_path" && "$_h_hook") &>/dev/null; then
+                    _s_status="healthy"
+                  else
+                    _s_status="unhealthy"
+                  fi
+                elif [[ -f "${_h_dir}/justfile" ]] && has_cmd just; then
+                  if (cd "$_raw_path" && just --justfile "${_h_dir}/justfile" health) &>/dev/null; then
+                    _s_status="healthy"
+                  else
+                    _s_status="unhealthy"
+                  fi
                 fi
 
                 case "$_s_status" in
                   healthy)   _s_icon="●"; _s_color="${GREEN}" ;;
                   unhealthy) _s_icon="●"; _s_color="${RED}" ;;
+                  disabled)  _s_icon="○"; _s_color="${DIM}" ;;
                   *)         _s_icon="○"; _s_color="${GRAY}" ;;
                 esac
 
