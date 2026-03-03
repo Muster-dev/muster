@@ -517,14 +517,27 @@ _group_cmd_add() {
     _group_validate_port "$port" || return 1
     _group_validate_ssh_key "$key"
 
-    # Check sshpass for password auth
-    if [[ "$_add_auth" == "password" ]] && ! command -v sshpass &>/dev/null; then
-      err "sshpass is required for SSH password auth. Install: brew install esolitos/ipa/sshpass"
-      return 1
+    # Check sshpass for password auth — offer to install if missing
+    if [[ "$_add_auth" == "password" ]]; then
+      _ensure_sshpass || return 1
     fi
 
     echo ""
     groups_add_remote "$group_name" "$host" "$user" "$port" "$key" "$remote_path" "$_add_cloud" "$_add_auth" "$_add_auth_mode" || return 1
+
+    # Prompt for password now if mode is save/session (don't wait until deploy)
+    if [[ "$_add_auth" == "password" && "$_add_auth_mode" != "always" ]]; then
+      source "$MUSTER_ROOT/lib/core/credentials.sh"
+      local _cred_key="ssh_${user}@${host}:${port}"
+      local _pw
+      _pw=$(_cred_prompt_password "SSH password for ${user}@${host}")
+      if [[ -n "$_pw" ]]; then
+        if [[ "$_add_auth_mode" == "save" ]]; then
+          _cred_keychain_save "groups" "$_cred_key" "$_pw" 2>/dev/null && ok "Password saved to keychain" || warn "Could not save to keychain"
+        fi
+        _cred_session_set "$_cred_key" "$_pw"
+      fi
+    fi
 
     # Test connectivity
     local _idx
@@ -997,9 +1010,8 @@ _group_cmd_deploy() {
     fi
     _pi=$(( _pi + 1 ))
   done
-  if [[ "$_needs_sshpass" == "true" ]] && ! command -v sshpass &>/dev/null; then
-    err "sshpass is required for SSH password auth. Install: brew install esolitos/ipa/sshpass"
-    return 1
+  if [[ "$_needs_sshpass" == "true" ]]; then
+    _ensure_sshpass || return 1
   fi
 
   local _prompted_hosts=()
@@ -2107,6 +2119,7 @@ _group_edit_remote_fields() {
   # Auth mode (only for password auth)
   local new_auth_mode="$cur_auth_mode"
   if [[ "$new_auth" == "password" ]]; then
+    _ensure_sshpass || return 1
     printf '  Password mode [%s] (save/session/always): ' "${cur_auth_mode:-session}"
     local mode_input; IFS= read -r mode_input
     case "$mode_input" in
@@ -2119,6 +2132,20 @@ _group_edit_remote_fields() {
   printf '  Project dir [%s]: ' "${cur_dir:-(none)}"
   local new_dir; IFS= read -r new_dir
   [[ -z "$new_dir" ]] && new_dir="$cur_dir"
+
+  # Prompt for password now if switching to password auth with save/session
+  if [[ "$new_auth" == "password" && "$new_auth_mode" != "always" ]]; then
+    source "$MUSTER_ROOT/lib/core/credentials.sh"
+    local _cred_key="ssh_${new_user}@${new_host}:${new_port}"
+    local _pw
+    _pw=$(_cred_prompt_password "SSH password for ${new_user}@${new_host}")
+    if [[ -n "$_pw" ]]; then
+      if [[ "$new_auth_mode" == "save" ]]; then
+        _cred_keychain_save "groups" "$_cred_key" "$_pw" 2>/dev/null && ok "Password saved to keychain" || warn "Could not save to keychain"
+      fi
+      _cred_session_set "$_cred_key" "$_pw"
+    fi
+  fi
 
   # Save all fields via single jq update
   local tmp="${GROUPS_CONFIG_FILE}.tmp"

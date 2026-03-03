@@ -5,6 +5,50 @@
 _CRED_KEYS=()
 _CRED_VALS=()
 
+# Ensure sshpass is installed for password-based SSH auth.
+# Offers to install if missing. Returns 0 if available, 1 if not.
+_ensure_sshpass() {
+  command -v sshpass &>/dev/null && return 0
+
+  echo ""
+  warn "sshpass is required for SSH password authentication."
+
+  # Detect install command
+  local _install_cmd=""
+  if command -v brew &>/dev/null; then
+    _install_cmd="brew install esolitos/ipa/sshpass"
+  elif command -v apt-get &>/dev/null; then
+    _install_cmd="sudo apt-get install -y sshpass"
+  elif command -v yum &>/dev/null; then
+    _install_cmd="sudo yum install -y sshpass"
+  elif command -v pacman &>/dev/null; then
+    _install_cmd="sudo pacman -S --noconfirm sshpass"
+  fi
+
+  if [[ -n "$_install_cmd" && -t 0 ]]; then
+    menu_select "Install sshpass now?" \
+      "Yes — run: ${_install_cmd}" \
+      "No — I'll install it myself"
+    if [[ "$MENU_RESULT" == "Yes"* ]]; then
+      echo ""
+      if eval "$_install_cmd"; then
+        ok "sshpass installed"
+        echo ""
+        return 0
+      else
+        err "Installation failed"
+        printf '%b\n' "  ${DIM}Run manually: ${_install_cmd}${RESET}"
+        echo ""
+        return 1
+      fi
+    fi
+  else
+    [[ -n "$_install_cmd" ]] && printf '%b\n' "  ${DIM}Install: ${_install_cmd}${RESET}"
+  fi
+
+  return 1
+}
+
 # Prompt for a password (hidden input)
 _cred_prompt_password() {
   local label="$1"

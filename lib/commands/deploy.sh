@@ -234,9 +234,8 @@ cmd_deploy() {
     fi
     _si=$(( _si + 1 ))
   done
-  if [[ "$_needs_sshpass" == "true" ]] && ! command -v sshpass &>/dev/null; then
-    err "sshpass is required for SSH password auth. Install: brew install esolitos/ipa/sshpass"
-    return 1
+  if [[ "$_needs_sshpass" == "true" ]]; then
+    _ensure_sshpass || return 1
   fi
 
   local _preauth_hosts=()
