@@ -5,7 +5,7 @@ progress_bar() {
   local current=$1
   local total=$2
   local label="${3:-}"
-  local bar_width=$(( TERM_COLS - 20 ))
+  local bar_width=$(( TERM_COLS - 16 ))
   (( bar_width > 50 )) && bar_width=50
   (( bar_width < 10 )) && bar_width=10
 
@@ -14,14 +14,23 @@ progress_bar() {
   local filled=$(( pct * bar_width / 100 ))
   local empty=$(( bar_width - filled ))
 
+  # Build bar using background-colored spaces
   local bar_filled=""
   local bar_empty=""
-  for ((i=0; i<filled; i++)); do bar_filled+="#"; done
-  for ((i=0; i<empty; i++)); do bar_empty+="-"; done
+  local _fi=0
+  while (( _fi < filled )); do bar_filled="${bar_filled} "; _fi=$((_fi+1)); done
+  local _ei=0
+  while (( _ei < empty )); do bar_empty="${bar_empty} "; _ei=$((_ei+1)); done
 
-  local color="$RED"
-  (( pct > 33 )) && color="$YELLOW"
-  (( pct > 66 )) && color="$GREEN"
+  # Mustard fill, dark gray track
+  local _bg_fill='\033[48;5;178m'
+  local _bg_empty='\033[48;5;236m'
 
-  printf "\r  ${color}${bar_filled}${GRAY}${bar_empty}${RESET} ${WHITE}%3d%%${RESET} ${DIM}%s${RESET}" "$pct" "$label"
+  local counter="${current}/${total}"
+
+  printf '\r  %b%s%b%b%s%b %b%s%b  %b%s%b' \
+    "$_bg_fill" "$bar_filled" "$RESET" \
+    "$_bg_empty" "$bar_empty" "$RESET" \
+    "${DIM}" "$counter" "${RESET}" \
+    "${WHITE}" "$label" "${RESET}"
 }
