@@ -96,21 +96,47 @@ _cred_session_set() {
   _CRED_VALS[${#_CRED_VALS[@]}]="$val"
 }
 
-# Save to macOS Keychain
+# Save to system keyring (macOS Keychain, Linux secret-tool, or file fallback)
 _cred_keychain_save() {
   local svc="$1" key="$2" val="$3"
+  # macOS Keychain
   if command -v security &>/dev/null; then
     security add-generic-password -a "muster-${svc}" -s "muster-${key}" -w "$val" -U 2>/dev/null
     return $?
   fi
-  return 1
+  # Linux: secret-tool (GNOME Keyring / D-Bus Secret Service)
+  if command -v secret-tool &>/dev/null; then
+    printf '%s' "$val" | secret-tool store --label="muster-${key}" service "muster-${svc}" key "$key" 2>/dev/null
+    return $?
+  fi
+  # Fallback: encrypted-ish file store (better than nothing on headless Linux)
+  local _store_dir="${HOME}/.muster/.credentials"
+  mkdir -p "$_store_dir" 2>/dev/null
+  chmod 700 "$_store_dir" 2>/dev/null
+  local _store_file="${_store_dir}/${svc}_$(printf '%s' "$key" | tr '/:@' '___')"
+  printf '%s' "$val" > "$_store_file" 2>/dev/null
+  chmod 600 "$_store_file" 2>/dev/null
+  return $?
 }
 
-# Read from macOS Keychain
+# Read from system keyring (macOS Keychain, Linux secret-tool, or file fallback)
 _cred_keychain_get() {
   local svc="$1" key="$2"
+  # macOS Keychain
   if command -v security &>/dev/null; then
     security find-generic-password -a "muster-${svc}" -s "muster-${key}" -w 2>/dev/null
+    return $?
+  fi
+  # Linux: secret-tool
+  if command -v secret-tool &>/dev/null; then
+    secret-tool lookup service "muster-${svc}" key "$key" 2>/dev/null
+    return $?
+  fi
+  # Fallback: file store
+  local _store_dir="${HOME}/.muster/.credentials"
+  local _store_file="${_store_dir}/${svc}_$(printf '%s' "$key" | tr '/:@' '___')"
+  if [[ -f "$_store_file" ]]; then
+    cat "$_store_file" 2>/dev/null
     return $?
   fi
   return 1
