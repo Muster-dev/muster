@@ -823,7 +823,6 @@ _group_cmd_deploy() {
       # Progress bar
       progress_bar "$i" "$total" "${_pname}"
       echo ""
-      echo ""
 
       if [[ "$_type" == "local" ]]; then
         # ── Local project: iterate services individually ──
@@ -881,7 +880,22 @@ _group_cmd_deploy() {
               done < "${_path}/.env"
             fi
 
-            # Deploy each service
+            # Pre-authenticate sudo if any hooks use it
+            local _any_sudo=false
+            for _sudo_svc in "${_services[@]}"; do
+              local _sudo_hook="${_path}/.muster/hooks/${_sudo_svc}/deploy.sh"
+              if [[ -f "$_sudo_hook" ]] && grep -q 'sudo' "$_sudo_hook" 2>/dev/null; then
+                _any_sudo=true
+                break
+              fi
+            done
+            if [[ "$_any_sudo" == "true" ]]; then
+              sudo -v 2>/dev/null || true
+            fi
+
+            # Deploy each service with animated preview
+            update_term_size
+            local _sp_f=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
             local _svc_idx=0
             rc=0
             for _svc in "${_services[@]}"; do
@@ -930,29 +944,93 @@ _group_cmd_deploy() {
               fi
 
               local _svc_log="${log_dir}/group-${group_name}-${_pname}-${_svc}-$(date +%Y%m%d-%H%M%S).log"
+              : > "$_svc_log"
 
-              start_spinner "Deploying ${_svc_name} (${_svc_idx}/${_svc_total})"
-              (cd "$_path" && "$_hook") >> "$_svc_log" 2>&1
+              # Run hook in background, output to log
+              (cd "$_path" && "$_hook") >> "$_svc_log" 2>&1 &
+              local _hook_pid=$!
+
+              # Foreground animation: spinner + 3-line log preview
+              local _sp_i=0
+              local _anim_h=4
+              local _pw=$(( TERM_COLS - 8 ))
+              (( _pw > 68 )) && _pw=68
+              (( _pw < 10 )) && _pw=10
+
+              # Print initial placeholder (4 lines)
+              printf '  %b%s%b %bDeploying %s (%d/%d)%b\n' \
+                "${ACCENT}" "${_sp_f[0]}" "${RESET}" "${WHITE}" "$_svc_name" "$_svc_idx" "$_svc_total" "${RESET}"
+              printf '\033[K\n\033[K\n\033[K\n'
+
+              while kill -0 "$_hook_pid" 2>/dev/null; do
+                [[ "$_group_interrupted" == "true" ]] && { kill "$_hook_pid" 2>/dev/null; break; }
+                printf '\033[%dA' "$_anim_h"
+                printf '  %b%s%b %bDeploying %s (%d/%d)%b\033[K\n' \
+                  "${ACCENT}" "${_sp_f[$((_sp_i % 10))]}" "${RESET}" \
+                  "${WHITE}" "$_svc_name" "$_svc_idx" "$_svc_total" "${RESET}"
+                _sp_i=$(( _sp_i + 1 ))
+
+                local _t0="" _t1="" _t2="" _ti=0
+                while IFS= read -r _tl; do
+                  _tl=$(printf '%s' "$_tl" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
+                  case $_ti in 0) _t0="$_tl" ;; 1) _t1="$_tl" ;; 2) _t2="$_tl" ;; esac
+                  _ti=$((_ti + 1))
+                done < <(tail -3 "$_svc_log" 2>/dev/null)
+
+                local _tp=""
+                for _tp in "$_t0" "$_t1" "$_t2"; do
+                  (( ${#_tp} > _pw )) && _tp="${_tp:0:$((_pw - 3))}..."
+                  printf '    %b%s%b\033[K\n' "${DIM}" "$_tp" "${RESET}"
+                done
+
+                sleep 1
+              done
+
+              wait "$_hook_pid" 2>/dev/null
               local _svc_rc=$?
-              stop_spinner
 
               # Append service log to project log
               cat "$_svc_log" >> "$log_file" 2>/dev/null
 
+              # Clear animation, show result
+              printf '\033[%dA' "$_anim_h"
               if (( _svc_rc == 0 )); then
-                ok "${_svc_name} deployed"
+                printf '  %b✓%b %s\033[K\n' "${GREEN}" "${RESET}" "$_svc_name"
               else
-                err "${_svc_name} deploy failed"
-                # Show error output in red
-                if [[ -f "$_svc_log" && -s "$_svc_log" ]]; then
-                  echo ""
-                  tail -10 "$_svc_log" | while IFS= read -r _eline; do
+                printf '  %b✗%b %s\033[K\n' "${RED}" "${RESET}" "$_svc_name"
+              fi
+              printf '\033[K\n\033[K\n\033[K'
+              printf '\033[2A'
+
+              if (( _svc_rc != 0 )); then
+                echo ""
+                if [[ -s "$_svc_log" ]]; then
+                  tail -5 "$_svc_log" | while IFS= read -r _eline; do
                     _eline=$(printf '%s' "$_eline" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
-                    printf '  %b%s%b\n' "${RED}" "$_eline" "${RESET}"
+                    printf '    %b%s%b\n' "${RED}" "$_eline" "${RESET}"
                   done
                 fi
                 rc="$_svc_rc"
                 break
+              fi
+
+              # Credential save prompt (passive, 2s timeout)
+              if [[ -n "$_cred_env" ]]; then
+                local _g_cur_mode
+                _g_cur_mode=$(jq -r --arg s "$_svc" '.services[$s].credentials.mode // ""' "$_cfg" 2>/dev/null)
+                if [[ "$_g_cur_mode" == "session" || "$_g_cur_mode" == "always" ]]; then
+                  printf '    %bSave password?%b  1) Keychain  2) Session  3) Skip ' "${DIM}" "${RESET}"
+                  local _save_ch=""
+                  IFS= read -rsn1 -t 2 _save_ch 2>/dev/null || true
+                  case "$_save_ch" in
+                    1)
+                      local _tmp_cfg
+                      _tmp_cfg=$(jq --arg s "$_svc" '.services[$s].credentials.mode = "save"' "$_cfg") && printf '%s' "$_tmp_cfg" > "$_cfg"
+                      printf ' %bsaved%b' "${GREEN}" "${RESET}"
+                      ;;
+                  esac
+                  printf '\r\033[K'
+                fi
               fi
 
               # Cleanup credential env vars
@@ -967,20 +1045,65 @@ _group_cmd_deploy() {
         fi
 
       else
-        # ── Remote project: deploy as single unit ──
+        # ── Remote project: deploy with animated preview ──
         : > "$log_file"
-        start_spinner "Deploying ${_pname} remotely"
-        _group_deploy_remote "$group_name" "$i" "$log_file"
+        _group_deploy_remote "$group_name" "$i" "$log_file" &
+        local _remote_pid=$!
+
+        update_term_size
+        local _sp_f=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+        local _sp_i=0
+        local _anim_h=4
+        local _pw=$(( TERM_COLS - 8 ))
+        (( _pw > 68 )) && _pw=68
+        (( _pw < 10 )) && _pw=10
+
+        printf '  %b%s%b %bDeploying %s remotely%b\n' \
+          "${ACCENT}" "${_sp_f[0]}" "${RESET}" "${WHITE}" "$_pname" "${RESET}"
+        printf '\033[K\n\033[K\n\033[K\n'
+
+        while kill -0 "$_remote_pid" 2>/dev/null; do
+          [[ "$_group_interrupted" == "true" ]] && { kill "$_remote_pid" 2>/dev/null; break; }
+          printf '\033[%dA' "$_anim_h"
+          printf '  %b%s%b %bDeploying %s remotely%b\033[K\n' \
+            "${ACCENT}" "${_sp_f[$((_sp_i % 10))]}" "${RESET}" \
+            "${WHITE}" "$_pname" "${RESET}"
+          _sp_i=$(( _sp_i + 1 ))
+
+          local _t0="" _t1="" _t2="" _ti=0
+          while IFS= read -r _tl; do
+            _tl=$(printf '%s' "$_tl" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
+            case $_ti in 0) _t0="$_tl" ;; 1) _t1="$_tl" ;; 2) _t2="$_tl" ;; esac
+            _ti=$((_ti + 1))
+          done < <(tail -3 "$log_file" 2>/dev/null)
+
+          local _tp=""
+          for _tp in "$_t0" "$_t1" "$_t2"; do
+            (( ${#_tp} > _pw )) && _tp="${_tp:0:$((_pw - 3))}..."
+            printf '    %b%s%b\033[K\n' "${DIM}" "$_tp" "${RESET}"
+          done
+
+          sleep 1
+        done
+
+        wait "$_remote_pid" 2>/dev/null
         rc=$?
-        stop_spinner
+
+        printf '\033[%dA' "$_anim_h"
+        if (( rc == 0 )); then
+          printf '  %b✓%b %s\033[K\n' "${GREEN}" "${RESET}" "$_pname"
+        else
+          printf '  %b✗%b %s\033[K\n' "${RED}" "${RESET}" "$_pname"
+        fi
+        printf '\033[K\n\033[K\n\033[K'
+        printf '\033[2A'
 
         if (( rc != 0 )); then
-          err "${_pname} deploy failed"
-          if [[ -f "$log_file" && -s "$log_file" ]]; then
-            echo ""
-            tail -10 "$log_file" | while IFS= read -r _eline; do
+          echo ""
+          if [[ -s "$log_file" ]]; then
+            tail -5 "$log_file" | while IFS= read -r _eline; do
               _eline=$(printf '%s' "$_eline" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
-              printf '  %b%s%b\n' "${RED}" "$_eline" "${RESET}"
+              printf '    %b%s%b\n' "${RED}" "$_eline" "${RESET}"
             done
           fi
         fi
@@ -997,12 +1120,13 @@ _group_cmd_deploy() {
       fi
 
       if (( rc == 0 )); then
+        echo ""
         progress_bar "$current" "$total" "${_pname}"
         echo ""
         if (( _svc_total > 1 )); then
-          ok "${_pname} deployed (${_svc_total} services)"
+          printf '  %b✓%b %s deployed (%d services)\n' "${GREEN}" "${RESET}" "$_pname" "$_svc_total"
         else
-          ok "${_pname} deployed"
+          printf '  %b✓%b %s deployed\n' "${GREEN}" "${RESET}" "$_pname"
         fi
         succeeded=$(( succeeded + 1 ))
         break
