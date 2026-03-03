@@ -81,6 +81,34 @@ has_cmd() {
   command -v "$1" &>/dev/null
 }
 
+# ── Path input with tab completion ──
+
+# Read a path from the user with tab completion for directories.
+# Usage: _read_path "  > "
+#   Result in: REPLY
+# Uses readline (-e) for tab completion. Falls back to plain read if
+# readline is unavailable (non-interactive, bash < 3.2).
+_read_path() {
+  local _rp_prompt="${1:-  > }"
+  REPLY=""
+
+  # Temporarily bind tab to directory completion only
+  if [[ -t 0 ]]; then
+    bind 'set show-all-if-ambiguous on' 2>/dev/null
+    bind 'TAB:complete' 2>/dev/null
+    read -e -r -p "$_rp_prompt" REPLY
+    bind 'set show-all-if-ambiguous off' 2>/dev/null
+  else
+    printf '%s' "$_rp_prompt"
+    read -r REPLY
+  fi
+
+  # Expand ~ to $HOME
+  if [[ "$REPLY" == "~"* ]]; then
+    REPLY="${HOME}${REPLY:1}"
+  fi
+}
+
 # ── Hook timeout wrapper ──
 
 # Run a command with a timeout. Returns the command's exit code, or 124 on timeout.

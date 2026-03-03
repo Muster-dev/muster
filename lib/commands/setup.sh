@@ -1148,14 +1148,13 @@ cmd_setup() {
     "Choose location")
       _SETUP_CUR_SUMMARY=(
         ""
-        "  ${DIM}Enter the path to your project directory${RESET}"
+        "  ${DIM}Enter the path to your project directory (Tab to autocomplete)${RESET}"
         ""
-        "  ${ACCENT}>${RESET} "
       )
-      _SETUP_CUR_PROMPT="true"
-      _setup_screen 1 "Project location"
-      read -r project_path
       _SETUP_CUR_PROMPT="false"
+      _setup_screen 1 "Project location"
+      _read_path "  > "
+      project_path="$REPLY"
 
       case "$project_path" in
         [Bb][Aa][Cc][Kk]|[Hh][Oo][Mm][Ee]|[Qq][Uu][Ii][Tt]|[Ee][Xx][Ii][Tt]|[Qq]) return 0 ;;
