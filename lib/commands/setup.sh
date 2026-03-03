@@ -695,6 +695,26 @@ print(json.dumps(data, indent=2))
   _registry_touch "$project_path"
 
   ok "Setup complete"
+
+  # Check for build context overlaps in the new config
+  source "$MUSTER_ROOT/lib/core/build_context.sh"
+  _build_context_detect
+  if (( ${#_BUILD_CONTEXT_ISSUES[@]} > 0 )); then
+    echo ""
+    local _bc_count=${#_BUILD_CONTEXT_ISSUES[@]}
+    printf '  %b!%b Build context overlap detected — %d issue%s\n' \
+      "${YELLOW}" "${RESET}" "$_bc_count" "$( (( _bc_count > 1 )) && echo s)"
+    local _bi=0
+    while (( _bi < _bc_count )); do
+      local _bline="${_BUILD_CONTEXT_ISSUES[$_bi]}"
+      local _bparent _bchild _bctx _bdir
+      IFS='|' read -r _bparent _bchild _bctx _bdir <<< "$_bline"
+      printf '    %b%s (%s) contains %s (%s/)%b\n' "${DIM}" "$_bparent" "$_bctx" "$_bchild" "$_bdir" "${RESET}"
+      printf '    %b→ Add '\''%s'\'' to .dockerignore%b\n' "${DIM}" "$_bdir" "${RESET}"
+      _bi=$(( _bi + 1 ))
+    done
+  fi
+
   echo ""
   echo "  Project:  ${project_name}"
   echo "  Root:     ${project_path}"

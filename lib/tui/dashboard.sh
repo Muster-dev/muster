@@ -4,6 +4,7 @@
 source "$MUSTER_ROOT/lib/tui/menu.sh"
 source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/core/updater.sh"
+source "$MUSTER_ROOT/lib/core/build_context.sh"
 
 _HEALTH_CACHE_DIR="${HOME}/.muster/health_cache"
 
@@ -413,6 +414,19 @@ cmd_dashboard() {
       echo ""
     fi
 
+    # Build context overlap detection (refresh cache if stale)
+    local _bc_issue_count=0
+    if _build_context_cache_stale; then
+      _build_context_detect
+    fi
+    if _build_context_read_cache; then
+      _bc_issue_count=${#_BUILD_CONTEXT_ISSUES[@]}
+      printf '  %b!%b %bBuild context overlap — %d issue%s%b\n' \
+        "${YELLOW}" "${RESET}" "${DIM}" "$_bc_issue_count" \
+        "$( (( _bc_issue_count > 1 )) && echo s)" "${RESET}"
+      echo ""
+    fi
+
     # Collect available actions
     local actions=()
     local project_dir
@@ -434,6 +448,12 @@ cmd_dashboard() {
     [[ "$has_logs" == "true" ]] && actions[${#actions[@]}]="Logs"
     [[ "$has_rollback" == "true" ]] && actions[${#actions[@]}]="Rollback"
     actions[${#actions[@]}]="Cleanup"
+
+    local _doctor_label="Doctor"
+    if (( _bc_issue_count > 0 )); then
+      _doctor_label="Doctor !"
+    fi
+    actions[${#actions[@]}]="$_doctor_label"
 
     # Add Fleet action if remotes.json exists
     if [[ -f "${project_dir}/remotes.json" ]]; then
@@ -581,6 +601,11 @@ cmd_dashboard() {
       Cleanup)
         source "$MUSTER_ROOT/lib/commands/cleanup.sh"
         cmd_cleanup
+        _dashboard_pause
+        ;;
+      Doctor|"Doctor !")
+        source "$MUSTER_ROOT/lib/commands/doctor.sh"
+        cmd_doctor
         _dashboard_pause
         ;;
       Fleet)

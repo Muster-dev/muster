@@ -63,13 +63,15 @@ remote_exec_stdout() {
     if [[ -n "$cred_env_lines" ]]; then
       while IFS= read -r _cred_line; do
         [[ -z "$_cred_line" ]] && continue
-        printf 'export %s\n' "$_cred_line"
+        local _ck="${_cred_line%%=*}"
+        local _cv="${_cred_line#*=}"
+        printf "export %s=%q\n" "$_ck" "$_cv"
       done <<< "$cred_env_lines"
     fi
 
     # cd to project directory if set
     if [[ -n "$_REMOTE_PROJECT_DIR" ]]; then
-      printf 'cd %s || exit 1\n' "$_REMOTE_PROJECT_DIR"
+      printf 'cd %q || exit 1\n' "$_REMOTE_PROJECT_DIR"
     fi
 
     # Pipe the hook script content

@@ -4,7 +4,7 @@
 # https://getmuster.dev | https://github.com/Muster-dev/muster
 set -uo pipefail
 
-MUSTER_VERSION="0.5.11"
+MUSTER_VERSION="0.5.12"
 
 # Resolve symlinks (macOS bash 3.2 has no readlink -f)
 _muster_self="${BASH_SOURCE[0]}"
@@ -19,18 +19,20 @@ unset _muster_self _muster_dir
 # ── Global flags ──
 MUSTER_QUIET="${MUSTER_QUIET:-false}"
 MUSTER_VERBOSE="${MUSTER_VERBOSE:-false}"
+MUSTER_MINIMAL="${MUSTER_MINIMAL:-false}"
 
 _muster_args=()
 for _arg in "$@"; do
   case "$_arg" in
     --quiet|-q) MUSTER_QUIET=true ;;
     --verbose)  MUSTER_VERBOSE=true ;;
+    --minimal)  MUSTER_MINIMAL=true ;;
     *)          _muster_args[${#_muster_args[@]}]="$_arg" ;;
   esac
 done
 set -- "${_muster_args[@]+"${_muster_args[@]}"}"
 unset _muster_args _arg
-export MUSTER_QUIET MUSTER_VERBOSE
+export MUSTER_QUIET MUSTER_VERBOSE MUSTER_MINIMAL
 
 # ── Fast path: no lib loading needed ──
 case "${1:-}" in
@@ -178,9 +180,47 @@ case "${1:-}" in
     echo "  -v, --version   Show version"
     echo "  -q, --quiet     Suppress info output (errors and warnings still shown)"
     echo "  --verbose       Show debug output"
+    echo "  --minimal       Plain text output, no TUI (for scripts and CI)"
     echo "  -h, --help      Show this help"
     ;;
   "")
+    # Minimal mode: plain text status, no TUI
+    if [[ "$MUSTER_MINIMAL" == "true" ]]; then
+      if find_config &>/dev/null; then
+        load_config
+        source "$MUSTER_ROOT/lib/core/build_context.sh"
+
+        _project=$(config_get '.project')
+        echo "muster: ${_project}"
+
+        _services=$(config_services)
+        _svc_count=0; _healthy=0; _unhealthy=0; _disabled=0
+        while IFS= read -r _svc; do
+          [[ -z "$_svc" ]] && continue
+          _svc_count=$(( _svc_count + 1 ))
+          _hstatus=""
+          if [[ -f "${HOME}/.muster/health_cache/${_svc}" ]]; then
+            _hstatus=$(cat "${HOME}/.muster/health_cache/${_svc}")
+          fi
+          _name=$(config_get ".services.${_svc}.name")
+          case "$_hstatus" in
+            healthy)   _healthy=$(( _healthy + 1 )); echo "  ${_name}: healthy" ;;
+            unhealthy) _unhealthy=$(( _unhealthy + 1 )); echo "  ${_name}: unhealthy" ;;
+            disabled)  _disabled=$(( _disabled + 1 )); echo "  ${_name}: disabled" ;;
+            *)         echo "  ${_name}: unknown" ;;
+          esac
+        done <<< "$_services"
+
+        echo "muster: ${_svc_count} services (${_healthy} healthy, ${_unhealthy} unhealthy, ${_disabled} disabled)"
+
+        # Build context warnings to stderr
+        _build_context_warn_minimal
+      else
+        echo "muster: no project found (run muster setup)"
+      fi
+      exit 0
+    fi
+
     # Check tui_mode setting (default: "go" when muster-tui installed)
     _tui_mode="go"
     _settings_file="$HOME/.muster/settings.json"

@@ -26,7 +26,7 @@ cmd_logs() {
 
   # If no target, let user pick
   if [[ -z "$target" ]]; then
-    local -a service_names=()
+    local service_names=()
     local services
     services=$(config_services)
 

@@ -264,6 +264,11 @@ skill_remove() {
     exit 1
   fi
 
+  # Validate: no slashes or path traversal
+  case "$name" in
+    */*|*..*) err "Invalid skill name: ${name}"; exit 1 ;;
+  esac
+
   if [[ -d "${SKILLS_DIR}/${name}" ]]; then
     rm -rf "${SKILLS_DIR}/${name}"
     ok "Skill '${name}' removed"

@@ -37,17 +37,17 @@ global_config_get() {
     jq -r "$(_jq_quote ".$key")" "$GLOBAL_CONFIG_FILE"
   elif has_cmd python3; then
     python3 -c "
-import json
-with open('$GLOBAL_CONFIG_FILE') as f:
+import json, sys
+with open(sys.argv[1]) as f:
     data = json.load(f)
-val = data.get('$key', '')
+val = data.get(sys.argv[2], '')
 if isinstance(val, list):
     print(json.dumps(val))
 elif isinstance(val, str):
     print(val)
 else:
     print(val)
-"
+" "$GLOBAL_CONFIG_FILE" "$key"
   else
     err "jq or python3 required to read global config"
     return 1
@@ -76,10 +76,10 @@ global_config_dump() {
     jq '.' "$GLOBAL_CONFIG_FILE"
   elif has_cmd python3; then
     python3 -c "
-import json
-with open('$GLOBAL_CONFIG_FILE') as f:
+import json, sys
+with open(sys.argv[1]) as f:
     print(json.dumps(json.load(f), indent=2))
-"
+" "$GLOBAL_CONFIG_FILE"
   else
     cat "$GLOBAL_CONFIG_FILE"
   fi
@@ -109,13 +109,13 @@ config_get() {
   elif has_cmd python3; then
     python3 -c "
 import json, sys
-with open('$CONFIG_FILE') as f:
+with open(sys.argv[1]) as f:
     data = json.load(f)
-keys = '$query'.strip('.').split('.')
+keys = sys.argv[2].strip('.').split('.')
 for k in keys:
     if k: data = data.get(k, '')
 print(data if isinstance(data, str) else json.dumps(data))
-"
+" "$CONFIG_FILE" "$query"
   else
     err "jq or python3 required to read config"
     exit 1
@@ -128,12 +128,15 @@ config_services() {
     jq -r '.services | keys[]' "$CONFIG_FILE"
   elif has_cmd python3; then
     python3 -c "
-import json
-with open('$CONFIG_FILE') as f:
+import json, sys
+with open(sys.argv[1]) as f:
     data = json.load(f)
 for k in data.get('services', {}):
     print(k)
-"
+" "$CONFIG_FILE"
+  else
+    err "jq or python3 required to read config"
+    return 1
   fi
 }
 

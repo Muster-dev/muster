@@ -345,8 +345,8 @@ _deploy_lock_acquire() {
   # Create lock
   mkdir -p "$(dirname "$lock_file")"
   local _svcs=""
-  local _i=0
-  while (( _i < $# )); do
+  local _i=1
+  while (( _i <= $# )); do
     [[ -n "$_svcs" ]] && _svcs="${_svcs},"
     _svcs="${_svcs}\"${!_i}\""
     _i=$((_i + 1))

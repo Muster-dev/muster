@@ -28,6 +28,7 @@ cmd_doctor() {
   done
 
   load_config
+  source "$MUSTER_ROOT/lib/core/build_context.sh"
 
   # Auth gate: JSON mode requires valid token
   if [[ "$_json_mode" == "true" ]]; then
@@ -53,7 +54,7 @@ cmd_doctor() {
     _json_checks="${_json_checks}{\"name\":\"${_name}\",\"status\":\"${_status}\",\"detail\":\"${_detail}\"}"
   }
 
-  if [[ "$_json_mode" == "false" ]]; then
+  if [[ "$_json_mode" == "false" && "$MUSTER_MINIMAL" != "true" ]]; then
     echo ""
     printf '%b\n' "  ${BOLD}Doctor${RESET}"
     echo ""
@@ -63,6 +64,8 @@ cmd_doctor() {
   _doc_pass() {
     if [[ "$_json_mode" == "true" ]]; then
       _doc_json_add "$1" "pass" "$1"
+    elif [[ "$MUSTER_MINIMAL" == "true" ]]; then
+      printf 'PASS: %s\n' "$1"
     else
       printf '%b\n' "  ${GREEN}✓${RESET} $1"
     fi
@@ -71,6 +74,8 @@ cmd_doctor() {
   _doc_warn() {
     if [[ "$_json_mode" == "true" ]]; then
       _doc_json_add "$1" "warn" "$1"
+    elif [[ "$MUSTER_MINIMAL" == "true" ]]; then
+      printf 'WARN: %s\n' "$1"
     else
       printf '%b\n' "  ${YELLOW}!${RESET} $1"
     fi
@@ -79,6 +84,8 @@ cmd_doctor() {
   _doc_fail() {
     if [[ "$_json_mode" == "true" ]]; then
       _doc_json_add "$1" "fail" "$1"
+    elif [[ "$MUSTER_MINIMAL" == "true" ]]; then
+      printf 'FAIL: %s\n' "$1"
     else
       printf '%b\n' "  ${RED}✗${RESET} $1"
     fi
@@ -317,6 +324,49 @@ $(cat "$hf" 2>/dev/null)"
     fi
   fi
 
+  # ── (m) Build context overlap ──
+  _build_context_detect  # Always run fresh in doctor (ignore cache)
+
+  if (( ${#_BUILD_CONTEXT_ISSUES[@]} > 0 )); then
+    local _bc_count=${#_BUILD_CONTEXT_ISSUES[@]}
+    _doc_warn "Build context overlap (${_bc_count} issue$( (( _bc_count > 1 )) && echo s))"
+
+    if [[ "$_json_mode" == "false" ]]; then
+      local _bi=0
+      while (( _bi < _bc_count )); do
+        local _bline="${_BUILD_CONTEXT_ISSUES[$_bi]}"
+        local _bparent _bchild _bctx _bdir
+        IFS='|' read -r _bparent _bchild _bctx _bdir <<< "$_bline"
+        printf '    %b%s (%s) contains %s (%s/)%b\n' "${DIM}" "$_bparent" "$_bctx" "$_bchild" "$_bdir" "${RESET}"
+        printf '    %b→ Changes to %s/ will bust %s'\''s Docker cache%b\n' "${DIM}" "$_bdir" "$_bparent" "${RESET}"
+        printf '    %b→ Fix: add '\''%s'\'' to .dockerignore%b\n' "${DIM}" "$_bdir" "${RESET}"
+        _bi=$(( _bi + 1 ))
+      done
+    fi
+
+    # --fix: add missing directories to .dockerignore
+    if [[ "$fix" == "true" ]]; then
+      local _di_file="${project_dir}/.dockerignore"
+      local _fixed_count=0
+      local _bi=0
+      while (( _bi < _bc_count )); do
+        local _bline="${_BUILD_CONTEXT_ISSUES[$_bi]}"
+        local _bparent _bchild _bctx _bdir
+        IFS='|' read -r _bparent _bchild _bctx _bdir <<< "$_bline"
+        if ! _build_context_in_dockerignore "$project_dir" "$_bdir"; then
+          printf '%s\n' "$_bdir" >> "$_di_file"
+          _fixed_count=$(( _fixed_count + 1 ))
+        fi
+        _bi=$(( _bi + 1 ))
+      done
+      if (( _fixed_count > 0 )); then
+        _doc_pass "Added ${_fixed_count} director$( (( _fixed_count > 1 )) && echo ies || echo y) to .dockerignore"
+      fi
+    fi
+  else
+    _doc_pass "No build context overlaps"
+  fi
+
   # ── (l) Fleet connectivity (if remotes.json exists) ──
   local _fleet_cfg="${project_dir}/remotes.json"
   if [[ -f "$_fleet_cfg" ]] && has_cmd jq; then
@@ -350,6 +400,8 @@ $(cat "$hf" 2>/dev/null)"
   if [[ "$_json_mode" == "true" ]]; then
     printf '{"pass":%d,"warnings":%d,"failures":%d,"checks":[%s]}\n' \
       "$pass" "$warnings" "$failures" "$_json_checks"
+  elif [[ "$MUSTER_MINIMAL" == "true" ]]; then
+    printf '%d passed, %d warnings, %d failures\n' "$pass" "$warnings" "$failures"
   else
     echo ""
     local summary="  ${pass} checks passed"

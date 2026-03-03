@@ -49,6 +49,7 @@ cmd_deploy() {
 
   load_config
   _load_env_file
+  source "$MUSTER_ROOT/lib/core/build_context.sh"
 
   local target="${1:-all}"
   local project_dir
@@ -65,7 +66,7 @@ cmd_deploy() {
       _unload_env_file
       return 1
     fi
-    trap '_deploy_lock_release "'"$project_dir"'"; _unload_env_file' EXIT
+    trap '_deploy_lock_release "'"$project_dir"'"; _unload_env_file; cleanup_term' EXIT
   fi
 
   local project
@@ -81,6 +82,19 @@ cmd_deploy() {
     echo ""
     printf '  %b%bDeploying%b %b%s%b\n' "${BOLD}" "${ACCENT_BRIGHT}" "${RESET}" "${WHITE}" "$project" "${RESET}"
     echo ""
+
+    # Build context overlap warning (read cache only, non-blocking)
+    if _build_context_read_cache; then
+      local _bc_count=${#_BUILD_CONTEXT_ISSUES[@]}
+      printf '  %b!%b %bBuild context overlap — %d issue%s (run muster doctor)%b\n' \
+        "${YELLOW}" "${RESET}" "${DIM}" "$_bc_count" \
+        "$( (( _bc_count > 1 )) && echo s)" "${RESET}"
+      echo ""
+    fi
+  fi
+
+  if [[ "$MUSTER_MINIMAL" == "true" ]]; then
+    _build_context_warn_minimal
   fi
 
   # Get deploy order
@@ -472,8 +486,8 @@ ${_k8s_env_lines}"
 
           stream_in_box "$name" "$log_file" "$hook"
         fi
-        unset _SIB_REDRAW_FN
         local rc=$?
+        unset _SIB_REDRAW_FN
 
         if (( rc == 0 )); then
           ok "${name} deployed"

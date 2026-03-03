@@ -50,9 +50,20 @@ cat > "${TMPDIR}/.muster/logs/deploy-events.log" << 'EOF'
 EOF
 
 # Test JSON output parses all 3 formats
+# Run in a child process to isolate any exit calls from load_config/auth
 export MUSTER_TOKEN=""
-_json=$(cmd_history --json 2>/dev/null || true)
-# If auth is required, provide a token
+_json=$(bash -c '
+  source "'"$MUSTER_ROOT"'/lib/core/logger.sh"
+  source "'"$MUSTER_ROOT"'/lib/core/utils.sh"
+  source "'"$MUSTER_ROOT"'/lib/core/config.sh"
+  source "'"$MUSTER_ROOT"'/lib/core/registry.sh"
+  CONFIG_FILE="'"${TMPDIR}"'/deploy.json"
+  source "'"$MUSTER_ROOT"'/lib/commands/history.sh"
+  MUSTER_ROOT="'"$MUSTER_ROOT"'"
+  MUSTER_QUIET="true"
+  cmd_history --json
+' 2>/dev/null) || true
+# If auth is required or cmd_history failed, skip JSON validation
 if [[ -z "$_json" || "$_json" == *"error"* ]]; then
   # Skip auth for testing — read directly
   _json="skipped"

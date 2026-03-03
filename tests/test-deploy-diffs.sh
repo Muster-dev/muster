@@ -54,6 +54,8 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 cd "$TMPDIR"
 git init -q
+git config user.email "test@test.com"
+git config user.name "Test"
 git commit --allow-empty -m "initial commit" -q
 
 # Create a fake deploy.json + .muster dir so CONFIG_FILE works
