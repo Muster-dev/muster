@@ -26,7 +26,7 @@ cmd_cleanup() {
   services=$(config_services)
 
   echo ""
-  echo -e "  ${BOLD}Cleanup${RESET}"
+  printf '  %bCleanup%b\n' "${BOLD}" "${RESET}"
   echo ""
 
   # Run cleanup hooks if they exist

@@ -42,7 +42,7 @@ detect_platform() {
 }
 
 print_platform() {
-  echo -e "  ${DIM}${MUSTER_OS} ${MUSTER_ARCH}${RESET}"
+  printf '%b\n' "  ${DIM}${MUSTER_OS} ${MUSTER_ARCH}${RESET}"
 
   local tools=""
   [[ "$MUSTER_HAS_DOCKER" == "true" ]] && tools+="docker "
@@ -51,13 +51,13 @@ print_platform() {
   [[ "$MUSTER_HAS_PYTHON" == "true" ]] && tools+="python3 "
 
   if [[ -n "$tools" ]]; then
-    echo -e "  ${DIM}tools: ${tools}${RESET}"
+    printf '%b\n' "  ${DIM}tools: ${tools}${RESET}"
   fi
 
   if [[ "$MUSTER_HAS_KEYCHAIN" == "true" ]]; then
-    echo -e "  ${DIM}keychain: available${RESET}"
+    printf '%b\n' "  ${DIM}keychain: available${RESET}"
   else
-    echo -e "  ${DIM}keychain: not available (will use encrypted vault)${RESET}"
+    printf '%b\n' "  ${DIM}keychain: not available (will use encrypted vault)${RESET}"
   fi
 }
 

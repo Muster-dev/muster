@@ -106,14 +106,14 @@ update_apply() {
     echo ""
     ok "Updated to v${new_ver:-unknown}"
     echo ""
-    echo -e "  ${DIM}Please re-run ${BOLD}muster${RESET}${DIM} to use the new version.${RESET}"
+    printf '  %bPlease re-run %bmuster%b%b to use the new version.%b\n' "${DIM}" "${BOLD}" "${RESET}" "${DIM}" "${RESET}"
     echo ""
-    echo -e "  ${DIM}Press any key to exit...${RESET}"
+    printf '  %bPress any key to exit...%b\n' "${DIM}" "${RESET}"
     IFS= read -rsn1 || true
     exit 0
   else
     err "Update failed. You can update manually:"
-    echo -e "  ${DIM}cd ${MUSTER_ROOT} && git pull${RESET}"
+    printf '  %bcd %s && git pull%b\n' "${DIM}" "$MUSTER_ROOT" "${RESET}"
     echo ""
   fi
 }

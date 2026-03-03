@@ -110,9 +110,9 @@ _fleet_cmd_manager() {
   if ! fleet_load_config; then
     info "No remotes.json found. Set up fleet via CLI:"
     echo ""
-    echo -e "  ${DIM}muster fleet init${RESET}"
-    echo -e "  ${DIM}muster fleet add <name> user@host [--mode muster|push]${RESET}"
-    echo -e "  ${DIM}muster fleet --help${RESET}"
+    printf '%b\n' "  ${DIM}muster fleet init${RESET}"
+    printf '%b\n' "  ${DIM}muster fleet add <name> user@host [--mode muster|push]${RESET}"
+    printf '%b\n' "  ${DIM}muster fleet --help${RESET}"
     echo ""
     return 0
   fi
@@ -125,7 +125,7 @@ _fleet_cmd_manager() {
     machines=$(fleet_machines)
 
     if [[ -z "$machines" ]]; then
-      echo -e "  ${DIM}Add machines via CLI: muster fleet add <name> user@host${RESET}"
+      printf '%b\n' "  ${DIM}Add machines via CLI: muster fleet add <name> user@host${RESET}"
       echo ""
       return 0
     fi
@@ -144,25 +144,25 @@ _fleet_cmd_manager() {
       "Deploy")
         _fleet_cmd_deploy
         echo ""
-        echo -e "  ${DIM}Press any key to continue...${RESET}"
+        printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
         IFS= read -rsn1 || true
         ;;
       "Status")
         _fleet_cmd_status
         echo ""
-        echo -e "  ${DIM}Press any key to continue...${RESET}"
+        printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
         IFS= read -rsn1 || true
         ;;
       "Test connections")
         _fleet_cmd_test
         echo ""
-        echo -e "  ${DIM}Press any key to continue...${RESET}"
+        printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
         IFS= read -rsn1 || true
         ;;
       "Rollback")
         _fleet_cmd_rollback
         echo ""
-        echo -e "  ${DIM}Press any key to continue...${RESET}"
+        printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
         IFS= read -rsn1 || true
         ;;
       "Back")
@@ -257,7 +257,7 @@ _fleet_cmd_add() {
     if ! _fleet_cloud_available; then
       echo ""
       warn "muster-tunnel not installed"
-      echo -e "  ${DIM}Install: curl -sSL https://getmuster.dev/cloud | bash${RESET}"
+      printf '%b\n' "  ${DIM}Install: curl -sSL https://getmuster.dev/cloud | bash${RESET}"
     fi
 
     # Check if remotes.json has a cloud section
@@ -266,12 +266,12 @@ _fleet_cmd_add() {
     if [[ -z "$_relay" || "$_relay" == "null" ]]; then
       echo ""
       warn "No cloud config in remotes.json"
-      echo -e "  ${DIM}Add a \"cloud\" section with relay URL and org_id to remotes.json${RESET}"
+      printf '%b\n' "  ${DIM}Add a \"cloud\" section with relay URL and org_id to remotes.json${RESET}"
     fi
 
     echo ""
     info "Cloud machine added. Deploy via: muster fleet deploy ${name}"
-    echo -e "  ${DIM}Ensure muster-agent is running on the remote and connected to the relay.${RESET}"
+    printf '%b\n' "  ${DIM}Ensure muster-agent is running on the remote and connected to the relay.${RESET}"
   else
     # SSH transport: test connectivity
     echo ""
@@ -282,7 +282,7 @@ _fleet_cmd_add() {
     else
       stop_spinner
       warn "SSH connection to ${user}@${host}:${port} failed"
-      echo -e "  ${DIM}Machine added but not reachable. Check SSH config and try: muster fleet test ${name}${RESET}"
+      printf '%b\n' "  ${DIM}Machine added but not reachable. Check SSH config and try: muster fleet test ${name}${RESET}"
     fi
 
     # Auto-pair for muster mode
@@ -523,7 +523,7 @@ _fleet_cmd_list() {
         order_str="$_grp"
       fi
     done <<< "$deploy_order"
-    echo -e "  ${DIM}Deploy order:${RESET} ${order_str}"
+    printf '%b\n' "  ${DIM}Deploy order:${RESET} ${order_str}"
   fi
 
   echo ""
@@ -939,7 +939,7 @@ _fleet_cmd_rollback() {
 
   local total=${#machines[@]}
   echo ""
-  echo -e "  ${BOLD}${YELLOW}Fleet Rollback${RESET} — ${total} machine(s)"
+  printf '%b\n' "  ${BOLD}${YELLOW}Fleet Rollback${RESET} — ${total} machine(s)"
   echo ""
 
   local succeeded=0 failed=0

@@ -48,14 +48,14 @@ cmd_auth() {
       token=$(auth_create_token "$name" "$scope") || return 1
 
       echo ""
-      echo -e "  ${GREEN}Token created${RESET}"
+      printf '%b\n' "  ${GREEN}Token created${RESET}"
       echo ""
-      echo -e "  Name:   ${BOLD}${name}${RESET}"
-      echo -e "  Scope:  ${scope}"
-      echo -e "  Token:  ${ACCENT}${token}${RESET}"
+      printf '%b\n' "  Name:   ${BOLD}${name}${RESET}"
+      printf '%b\n' "  Scope:  ${scope}"
+      printf '%b\n' "  Token:  ${ACCENT}${token}${RESET}"
       echo ""
-      echo -e "  ${YELLOW}Save this token now -- it won't be shown again.${RESET}"
-      echo -e "  ${DIM}Set MUSTER_TOKEN=<token> when using --json commands.${RESET}"
+      printf '%b\n' "  ${YELLOW}Save this token now -- it won't be shown again.${RESET}"
+      printf '%b\n' "  ${DIM}Set MUSTER_TOKEN=<token> when using --json commands.${RESET}"
       echo ""
       ;;
 
@@ -74,7 +74,7 @@ cmd_auth() {
 
     verify)
       if auth_validate_token; then
-        echo -e "  ${GREEN}Valid${RESET} -- scope: ${BOLD}${AUTH_SCOPE}${RESET}"
+        printf '%b\n' "  ${GREEN}Valid${RESET} -- scope: ${BOLD}${AUTH_SCOPE}${RESET}"
       fi
       ;;
 

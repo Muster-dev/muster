@@ -245,14 +245,14 @@ RUNSH
 
   ok "Skill '${name}' created"
   echo ""
-  echo -e "  ${DIM}${SKILLS_DIR}/${name}/${RESET}"
-  echo -e "  ${DIM}  skill.json  — edit name, description, hooks${RESET}"
-  echo -e "  ${DIM}  run.sh      — add your logic${RESET}"
+  printf '  %b%s/%s/%b\n' "${DIM}" "$SKILLS_DIR" "$name" "${RESET}"
+  printf '  %b  skill.json  — edit name, description, hooks%b\n' "${DIM}" "${RESET}"
+  printf '  %b  run.sh      — add your logic%b\n' "${DIM}" "${RESET}"
   echo ""
-  echo -e "  ${DIM}Hooks: add \"pre-deploy\", \"post-deploy\", \"pre-rollback\",${RESET}"
-  echo -e "  ${DIM}       \"post-rollback\" to the hooks array in skill.json${RESET}"
+  printf '  %bHooks: add "pre-deploy", "post-deploy", "pre-rollback",%b\n' "${DIM}" "${RESET}"
+  printf '  %b       "post-rollback" to the hooks array in skill.json%b\n' "${DIM}" "${RESET}"
   echo ""
-  echo -e "  ${DIM}Test: muster skill run ${name}${RESET}"
+  printf '  %bTest: muster skill run %s%b\n' "${DIM}" "$name" "${RESET}"
   echo ""
 }
 
@@ -275,7 +275,7 @@ skill_remove() {
 
 skill_list() {
   echo ""
-  echo -e "  ${BOLD}Installed Skills${RESET}"
+  printf '  %bInstalled Skills%b\n' "${BOLD}" "${RESET}"
   echo ""
 
   local _found=false
@@ -292,7 +292,7 @@ skill_list() {
 
   # List project skills
   if [[ -n "$_project_dir" && -d "$_project_dir" ]] && [[ -n "$(ls -A "$_project_dir" 2>/dev/null)" ]]; then
-    echo -e "  ${DIM}Project skills:${RESET}"
+    printf '  %bProject skills:%b\n' "${DIM}" "${RESET}"
     _skill_list_dir "$_project_dir"
     _found=true
   fi
@@ -302,14 +302,14 @@ skill_list() {
     if [[ "$_found" == "true" ]]; then
       echo ""
     fi
-    echo -e "  ${DIM}Global skills:${RESET}"
+    printf '  %bGlobal skills:%b\n' "${DIM}" "${RESET}"
     _skill_list_dir "$GLOBAL_SKILLS_DIR"
     _found=true
   fi
 
   if [[ "$_found" == "false" ]]; then
     info "No skills installed"
-    echo -e "  ${DIM}Run 'muster skill add <git-url>' to install one${RESET}"
+    printf '  %bRun '\''muster skill add <git-url>'\'' to install one%b\n' "${DIM}" "${RESET}"
   fi
   echo ""
 }
@@ -341,7 +341,7 @@ _skill_list_dir() {
       _mode_tag="${DIM}disabled${RESET}"
     fi
 
-    echo -e "  ${ACCENT}*${RESET} ${BOLD}${name}${RESET}  ${_mode_tag}  ${DIM}${desc}${RESET}"
+    printf '  %b•%b %b%s%b  %b  %b%s%b\n' "${ACCENT}" "${RESET}" "${BOLD}" "$name" "${RESET}" "$_mode_tag" "${DIM}" "$desc" "${RESET}"
   done
 }
 

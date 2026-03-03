@@ -15,10 +15,9 @@ _toggle_select() {
 
   tput civis
 
-  local w=$(( TERM_COLS - 4 ))
-  (( w > 50 )) && w=50
-  (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
+  local _tog_w=$(( TERM_COLS - 4 ))
+  (( _tog_w > 50 )) && _tog_w=50
+  (( _tog_w < 20 )) && _tog_w=20
 
   # Parse option counts per item
   local _tog_opt_counts=()
@@ -48,15 +47,14 @@ _toggle_select() {
 
   _tog_draw_header() {
     echo ""
-    echo -e "  ${BOLD}${title}${RESET}"
-    echo -e "  ${DIM}↑/↓ navigate  ⏎ cycle  q back${RESET}"
-    echo ""
+    printf '  %b%s%b\n' "${BOLD}" "$title" "${RESET}"
+    printf '  %b↑/↓ navigate  ⏎ cycle  q back%b\n' "${DIM}" "${RESET}"
   }
 
   _tog_draw() {
-    local border
-    border=$(printf '%*s' "$w" "" | sed 's/ /─/g')
-    printf '%b' "  ${ACCENT}┌${border}┐${RESET}\n"
+    _tog_w=$(( TERM_COLS - 4 ))
+    (( _tog_w > 50 )) && _tog_w=50
+    (( _tog_w < 20 )) && _tog_w=20
 
     local i=0
     while (( i < count )); do
@@ -68,33 +66,40 @@ _toggle_select() {
       local state_color="$GREEN"
       (( _TOG_STATES[i] == 0 )) && state_color="$RED"
 
-      local prefix="  "
-      (( i == selected )) && prefix="${ACCENT}>${RESET} "
-
-      local content_len=$(( 5 + ${#label} + ${#cur_opt} ))
-      local pad_len=$(( inner - content_len ))
-      (( pad_len < 0 )) && pad_len=0
-      local pad
-      pad=$(printf '%*s' "$pad_len" "")
-
-      printf '%b' "  ${ACCENT}│${RESET} ${prefix}${label}${pad} ${state_color}${cur_opt}${RESET}${ACCENT}│${RESET}\n"
+      if (( i == selected )); then
+        local text="  ▸ ${label}  ${cur_opt}"
+        local text_len=${#text}
+        local bar_pad=$(( _tog_w - text_len ))
+        (( bar_pad < 0 )) && bar_pad=0
+        local pad
+        pad=$(printf '%*s' "$bar_pad" "")
+        printf '\033[48;5;178m\033[38;5;0m%s%s\033[0m\n' "$text" "$pad"
+      else
+        local content_len=$(( 4 + ${#label} + 2 + ${#cur_opt} ))
+        local pad_len=$(( _tog_w - content_len ))
+        (( pad_len < 0 )) && pad_len=0
+        local pad
+        pad=$(printf '%*s' "$pad_len" "")
+        printf '    %s%s %b%s%b\n' "$label" "$pad" "$state_color" "$cur_opt" "${RESET}"
+      fi
       i=$((i + 1))
     done
 
     # Back row
-    local back_prefix="  "
-    (( selected == count )) && back_prefix="${ACCENT}>${RESET} "
-    local back_pad_len=$(( inner - 3 - 4 ))
-    (( back_pad_len < 0 )) && back_pad_len=0
-    local back_pad
-    back_pad=$(printf '%*s' "$back_pad_len" "")
-    printf '%b' "  ${ACCENT}│${RESET} ${back_prefix}${DIM}Back${RESET}${back_pad}${ACCENT}│${RESET}\n"
-
-    border=$(printf '%*s' "$w" "" | sed 's/ /─/g')
-    printf '%b' "  ${ACCENT}└${border}┘${RESET}\n"
+    if (( selected == count )); then
+      local text="  ▸ Back"
+      local text_len=${#text}
+      local bar_pad=$(( _tog_w - text_len ))
+      (( bar_pad < 0 )) && bar_pad=0
+      local pad
+      pad=$(printf '%*s' "$bar_pad" "")
+      printf '\033[48;5;178m\033[38;5;0m%s%s\033[0m\n' "$text" "$pad"
+    else
+      printf '    %bBack%b\n' "${DIM}" "${RESET}"
+    fi
   }
 
-  local total_lines=$(( count + 3 ))
+  local total_lines=$(( count + 1 ))
 
   _tog_clear() {
     local i=0
@@ -336,11 +341,11 @@ _settings_pair_tui() {
       if "$bin_path" --set-token "$tui_token" >/dev/null 2>&1; then
         ok "Auth token created and linked."
       else
-        echo -e "  ${YELLOW}!${RESET} ${DIM}Token created. Connect manually:${RESET}"
-        echo -e "  ${DIM}  muster-tui --set-token ${tui_token}${RESET}"
+        printf '%b\n' "  ${YELLOW}!${RESET} ${DIM}Token created. Connect manually:${RESET}"
+        printf '%b\n' "  ${DIM}  muster-tui --set-token ${tui_token}${RESET}"
       fi
     else
-      echo -e "  ${YELLOW}!${RESET} ${DIM}Could not create token (jq may be missing).${RESET}"
+      printf '%b\n' "  ${YELLOW}!${RESET} ${DIM}Could not create token (jq may be missing).${RESET}"
     fi
   fi
 }
@@ -363,7 +368,7 @@ _settings_download_tui() {
   fi
 
   if [[ -n "$tui_ver" ]]; then
-    echo -e "  ${BOLD}${ACCENT_BRIGHT}muster-tui${RESET} ${DIM}already installed (${tui_ver})${RESET}"
+    printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}muster-tui${RESET} ${DIM}already installed (${tui_ver})${RESET}"
     echo ""
     menu_select "Options" "Pair auth token" "Reinstall / update" "Back"
     case "$MENU_RESULT" in
@@ -371,7 +376,7 @@ _settings_download_tui() {
         echo ""
         _settings_pair_tui "$tui_bin"
         echo ""
-        echo -e "  ${DIM}Press any key to continue...${RESET}"
+        printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
         IFS= read -rsn1 || true
         return 0
         ;;
@@ -381,7 +386,7 @@ _settings_download_tui() {
     esac
   fi
 
-  echo -e "  ${DIM}Downloading muster-tui...${RESET}"
+  printf '%b\n' "  ${DIM}Downloading muster-tui...${RESET}"
 
   local _os _arch
   _os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -434,14 +439,14 @@ _settings_download_tui() {
     _settings_pair_tui "${bin_dir}/muster-tui"
   else
     err "Could not download muster-tui binary."
-    echo -e "  ${DIM}No pre-built release for ${_os}/${_arch}.${RESET}"
+    printf '%b\n' "  ${DIM}No pre-built release for ${_os}/${_arch}.${RESET}"
     echo ""
-    echo -e "  ${DIM}Build from source:${RESET}"
-    echo -e "  ${DIM}  go install github.com/${tui_repo}@latest${RESET}"
+    printf '%b\n' "  ${DIM}Build from source:${RESET}"
+    printf '%b\n' "  ${DIM}  go install github.com/${tui_repo}@latest${RESET}"
   fi
 
   echo ""
-  echo -e "  ${DIM}Press any key to continue...${RESET}"
+  printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
   IFS= read -rsn1 || true
 }
 
@@ -457,7 +462,7 @@ _settings_project() {
 
     clear
     echo ""
-    echo -e "  ${BOLD}${ACCENT_BRIGHT}Project Settings${RESET}  ${WHITE}${project}${RESET}"
+    printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Project Settings${RESET}  ${WHITE}${project}${RESET}"
     echo ""
 
     local w=$(( TERM_COLS - 4 ))
@@ -505,7 +510,7 @@ _settings_project() {
     local bottom
     bottom=$(printf '%*s' "$w" "" | sed 's/ /─/g')
     printf '  %b└%s┘%b\n' "${ACCENT}" "$bottom" "${RESET}"
-    echo -e "  ${DIM}D=deploy H=health R=rollback L=logs C=cleanup${RESET}"
+    printf '%b\n' "  ${DIM}D=deploy H=health R=rollback L=logs C=cleanup${RESET}"
     echo ""
 
     menu_select "Project Settings" "Services" "Open config" "Back"

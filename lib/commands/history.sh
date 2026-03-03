@@ -191,9 +191,9 @@ cmd_history() {
   project=$(config_get '.project')
 
   echo ""
-  echo -e "  ${BOLD}${ACCENT_BRIGHT}Deploy History${RESET} ${DIM}${project}${RESET}"
+  printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Deploy History${RESET} ${DIM}${project}${RESET}"
   if [[ -n "$filter" ]]; then
-    echo -e "  ${DIM}Filtered: ${filter}${RESET}"
+    printf '%b\n' "  ${DIM}Filtered: ${filter}${RESET}"
   fi
   echo ""
 
@@ -221,7 +221,7 @@ cmd_history() {
 
   echo ""
   if [[ "$show_all" == "false" && $start -gt 0 ]]; then
-    echo -e "  ${DIM}Showing last 20 of ${count} events. Use --all to see all.${RESET}"
+    printf '%b\n' "  ${DIM}Showing last 20 of ${count} events. Use --all to see all.${RESET}"
     echo ""
   fi
 }

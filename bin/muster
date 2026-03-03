@@ -64,7 +64,7 @@ case "${1:-}" in
     for _arg in "$@"; do [[ "$_arg" == "--json" ]] && _has_json=true; done
     if [[ "$_has_json" == "false" && -t 0 ]]; then
       echo ""
-      echo -e "  ${DIM}Press any key to continue...${RESET}"
+      printf '  %bPress any key to continue...%b' "${DIM}" "${RESET}"
       IFS= read -rsn1 || true
       source "$MUSTER_ROOT/lib/tui/dashboard.sh"
       cmd_dashboard
@@ -150,7 +150,7 @@ case "${1:-}" in
     update_apply
     ;;
   --help|-h)
-    echo -e "${BOLD}muster${RESET} — Universal deploy framework"
+    printf '%bmuster%b — Universal deploy framework\n' "${BOLD}" "${RESET}"
     echo ""
     echo "Usage: muster [command]"
     echo ""

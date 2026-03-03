@@ -129,7 +129,7 @@ ${_k8s_env_lines}"
       echo ""
       if [[ -f "$log_file" ]]; then
         tail -5 "$log_file" | while IFS= read -r _line; do
-          echo -e "  ${DIM}${_line}${RESET}"
+          printf '  %b%s%b\n' "${DIM}" "$_line" "${RESET}"
         done
       fi
       echo ""

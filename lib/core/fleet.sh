@@ -120,9 +120,9 @@ fleet_auto_pair() {
 _fleet_pair_instructions() {
   local machine="$1"
   echo ""
-  echo -e "  ${DIM}To pair manually:${RESET}"
-  echo -e "  ${DIM}  1. On the remote:${RESET}  ssh $(fleet_desc "$machine") \"muster auth create fleet-\$(hostname) --scope deploy\""
-  echo -e "  ${DIM}  2. Locally:${RESET}        muster fleet pair ${machine} --token <raw-token>"
+  printf '%b\n' "  ${DIM}To pair manually:${RESET}"
+  printf '%b\n' "  ${DIM}  1. On the remote:${RESET}  ssh $(fleet_desc "$machine") \"muster auth create fleet-\$(hostname) --scope deploy\""
+  printf '%b\n' "  ${DIM}  2. Locally:${RESET}        muster fleet pair ${machine} --token <raw-token>"
   echo ""
 }
 

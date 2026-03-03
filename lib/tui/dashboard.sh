@@ -7,6 +7,33 @@ source "$MUSTER_ROOT/lib/core/updater.sh"
 
 _HEALTH_CACHE_DIR="${HOME}/.muster/health_cache"
 
+# ── Shared header bar ──
+# Renders a mustard-background branded header bar
+# Usage: _dashboard_bar "left text" "right text"
+_dashboard_bar() {
+  local left="$1" right="${2:-}"
+  local bar_w=$(( TERM_COLS - 2 ))
+  (( bar_w < 20 )) && bar_w=20
+  local text="  ${left}"
+  local text_len=${#text}
+  local right_len=${#right}
+  local pad_len=$(( bar_w - text_len - right_len ))
+  (( pad_len < 1 )) && pad_len=1
+  local pad
+  pad=$(printf '%*s' "$pad_len" "")
+  printf ' \033[48;5;178m\033[38;5;0m\033[1m%s%s%s\033[0m\n' "$text" "$pad" "$right"
+}
+
+# ── Thin separator ──
+_dashboard_rule() {
+  local rule_w=$(( TERM_COLS - 4 ))
+  (( rule_w > 50 )) && rule_w=50
+  (( rule_w < 10 )) && rule_w=10
+  local rule
+  rule=$(printf '%*s' "$rule_w" "" | sed 's/ /─/g')
+  printf '  %b%s%b\n' "${GRAY}" "$rule" "${RESET}"
+}
+
 _dashboard_pause() {
   echo ""
   printf '  %bPress any key to continue...%b' "$DIM" "$RESET"
@@ -15,13 +42,27 @@ _dashboard_pause() {
 }
 
 _dashboard_print_svc_line() {
-  local status_icon="$1" status_color="$2" display_name="$3" pad="$4" cred_warn="$5"
+  local status_icon="$1" status_color="$2" display_name="$3" status_label="$4" cred_warn="$5" max_w="$6"
+
+  local left="  ${display_name}"
+  local right="${status_label}"
   if [[ -n "$cred_warn" ]]; then
-    printf '  %b│%b  %b%s%b %s%s %b%s%b%b│%b\n' \
-      "${ACCENT}" "${RESET}" "$status_color" "$status_icon" "${RESET}" "$display_name" "$pad" "${YELLOW}" "$cred_warn" "${RESET}" "${ACCENT}" "${RESET}"
+    right="${cred_warn}  ${status_label}"
+  fi
+
+  local left_len=${#left}
+  local right_len=${#right}
+  local pad_len=$(( max_w - left_len - right_len - 4 ))
+  (( pad_len < 1 )) && pad_len=1
+  local pad
+  pad=$(printf '%*s' "$pad_len" "")
+
+  if [[ -n "$cred_warn" ]]; then
+    printf '  %b%s%b %s%s%b%s%b  %b%s%b\n' \
+      "$status_color" "$status_icon" "${RESET}" "$display_name" "$pad" "${YELLOW}" "$cred_warn" "${RESET}" "${DIM}" "$status_label" "${RESET}"
   else
-    printf '  %b│%b  %b%s%b %s%s%b│%b\n' \
-      "${ACCENT}" "${RESET}" "$status_color" "$status_icon" "${RESET}" "$display_name" "$pad" "${ACCENT}" "${RESET}"
+    printf '  %b%s%b %s%s%b%s%b\n' \
+      "$status_color" "$status_icon" "${RESET}" "$display_name" "$pad" "${DIM}" "$status_label" "${RESET}"
   fi
 }
 
@@ -33,8 +74,11 @@ _dashboard_header() {
 
   muster_tui_fullscreen
   clear
-  echo -e "\n  ${BOLD}${ACCENT_BRIGHT}muster${RESET} ${DIM}v${MUSTER_VERSION}${RESET}  ${WHITE}${project}${RESET}"
-  print_platform
+
+  # Branded header bar
+  local _right="v${MUSTER_VERSION}  ${MUSTER_OS} ${MUSTER_ARCH}  "
+  echo ""
+  _dashboard_bar "muster  ${project}" "$_right"
   echo ""
 
   local services
@@ -43,7 +87,6 @@ _dashboard_header() {
   local w=$(( TERM_COLS - 4 ))
   (( w > 50 )) && w=50
   (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
 
   local project_dir
   project_dir="$(dirname "$CONFIG_FILE")"
@@ -79,13 +122,8 @@ _dashboard_header() {
     fi
   done <<< "$services"
 
-  # Top border with "Services" label
-  local label="Services"
-  local label_pad_len=$(( w - ${#label} - 3 ))
-  (( label_pad_len < 1 )) && label_pad_len=1
-  local label_pad
-  label_pad=$(printf '%*s' "$label_pad_len" "" | sed 's/ /─/g')
-  printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$label" "${RESET}${ACCENT}" "$label_pad" "${RESET}"
+  # Section header
+  printf '  %b%bServices%b\n' "${BOLD}" "${WHITE}" "${RESET}"
 
   # Render each service from cached health status
   local _idx=0
@@ -93,20 +131,20 @@ _dashboard_header() {
     local svc="${_svc_keys[$_idx]}"
 
     # Read from persistent cache
-    local status_icon status_color
+    local status_icon status_color status_label
     if [[ -f "${_HEALTH_CACHE_DIR}/${svc}" ]]; then
       local _result
       _result=$(cat "${_HEALTH_CACHE_DIR}/${svc}")
       case "$_result" in
-        healthy)   status_icon="●"; status_color="$GREEN" ;;
-        unhealthy) status_icon="●"; status_color="$RED" ;;
-        disabled)  status_icon="○"; status_color="$GRAY" ;;
-        *)         status_icon="○"; status_color="$YELLOW" ;;
+        healthy)   status_icon="●"; status_color="$GREEN";  status_label="healthy" ;;
+        unhealthy) status_icon="●"; status_color="$RED";    status_label="unhealthy" ;;
+        disabled)  status_icon="○"; status_color="$GRAY";   status_label="disabled" ;;
+        *)         status_icon="○"; status_color="$YELLOW"; status_label="loading" ;;
       esac
     else
-      # No cache yet — first run
       status_icon="○"
       status_color="$YELLOW"
+      status_label="loading"
     fi
 
     # Format service line
@@ -116,58 +154,30 @@ _dashboard_header() {
     cred_enabled=$(config_get ".services.${svc}.credentials.enabled")
 
     local cred_warn=""
-    local cred_extra=0
     if [[ "$cred_enabled" == "true" ]]; then
-      cred_warn="! KEY"
-      cred_extra=${#cred_warn}
-      cred_extra=$((cred_extra + 1))
+      cred_warn="KEY"
     fi
 
-    local max_name=$(( inner - 4 - cred_extra ))
-    (( max_name < 5 )) && max_name=5
-    local display_name="$name"
-    if (( ${#display_name} > max_name )); then
-      display_name="${display_name:0:$((max_name - 3))}..."
-    fi
-
-    local content_len=$(( 4 + ${#display_name} + cred_extra ))
-    local pad_len=$(( inner - content_len ))
-    (( pad_len < 0 )) && pad_len=0
-    local pad
-    pad=$(printf '%*s' "$pad_len" "")
-
-    _dashboard_print_svc_line "$status_icon" "$status_color" "$display_name" "$pad" "$cred_warn"
+    _dashboard_print_svc_line "$status_icon" "$status_color" "$name" "$status_label" "$cred_warn" "$w"
 
     _idx=$((_idx + 1))
   done
 
-  local bottom
-  bottom=$(printf '%*s' "$w" "" | sed 's/ /─/g')
-  printf '  %b└%s┘%b\n' "${ACCENT}" "$bottom" "${RESET}"
+  _dashboard_rule
   echo ""
 
   # Fleet panel (only if remotes.json exists)
   local _fleet_config="${project_dir}/remotes.json"
   if [[ -f "$_fleet_config" ]] && has_cmd jq; then
-    local _fleet_label="Fleet"
-    local _fleet_label_pad_len=$(( w - ${#_fleet_label} - 3 ))
-    (( _fleet_label_pad_len < 1 )) && _fleet_label_pad_len=1
-    local _fleet_label_pad
-    _fleet_label_pad=$(printf '%*s' "$_fleet_label_pad_len" "" | sed 's/ /─/g')
-    printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$_fleet_label" "${RESET}${ACCENT}" "$_fleet_label_pad" "${RESET}"
+    printf '  %b%bFleet%b\n' "${BOLD}" "${WHITE}" "${RESET}"
 
     local _fleet_machines
     _fleet_machines=$(jq -r '.machines | keys[]' "$_fleet_config" 2>/dev/null)
 
     if [[ -z "$_fleet_machines" ]]; then
-      local _empty_msg="No machines configured"
-      local _empty_pad_len=$(( inner - ${#_empty_msg} - 2 ))
-      (( _empty_pad_len < 0 )) && _empty_pad_len=0
-      local _empty_pad
-      _empty_pad=$(printf '%*s' "$_empty_pad_len" "")
-      printf '  %b│%b  %b%s%b%s%b│%b\n' "${ACCENT}" "${RESET}" "${DIM}" "$_empty_msg" "${RESET}" "$_empty_pad" "${ACCENT}" "${RESET}"
+      printf '  %bNo machines configured%b\n' "${DIM}" "${RESET}"
     else
-      # Launch background SSH checks (same pattern as health checks)
+      # Launch background SSH checks
       local _fleet_cache_dir="${_HEALTH_CACHE_DIR}/fleet"
       mkdir -p "$_fleet_cache_dir"
       local _fleet_keys=()
@@ -176,7 +186,6 @@ _dashboard_header() {
         [[ -z "$_fm" ]] && continue
         _fleet_keys[${#_fleet_keys[@]}]="$_fm"
 
-        # Background connectivity check
         (
           local _fm_data
           _fm_data=$(jq -r --arg n "$_fm" '.machines[$n] | "\(.user // "")\n\(.host // "")\n\(.port // 22)\n\(.identity_file // "")"' "$_fleet_config" 2>/dev/null)
@@ -212,39 +221,24 @@ _dashboard_header() {
         local _fm_host="${_fm_data% *}"
         local _fm_mode="${_fm_data##* }"
 
-        # Read cached status
-        local _fm_status_icon="○" _fm_status_color="$YELLOW"
+        local _fm_status_icon="○" _fm_status_color="$YELLOW" _fm_status_label="checking"
         if [[ -f "${_fleet_cache_dir}/${_fm}" ]]; then
           local _fm_cached
           _fm_cached=$(cat "${_fleet_cache_dir}/${_fm}")
           case "$_fm_cached" in
-            online)  _fm_status_icon="●"; _fm_status_color="$GREEN" ;;
-            offline) _fm_status_icon="●"; _fm_status_color="$RED" ;;
+            online)  _fm_status_icon="●"; _fm_status_color="$GREEN"; _fm_status_label="online" ;;
+            offline) _fm_status_icon="●"; _fm_status_color="$RED";   _fm_status_label="offline" ;;
           esac
         fi
 
         local _fm_display="${_fm}: ${_fm_host} (${_fm_mode})"
-        local _max_fm=$(( inner - 4 ))
-        if (( ${#_fm_display} > _max_fm )); then
-          _fm_display="${_fm_display:0:$((_max_fm - 3))}..."
-        fi
-
-        local _fm_content_len=$(( 4 + ${#_fm_display} ))
-        local _fm_pad_len=$(( inner - _fm_content_len ))
-        (( _fm_pad_len < 0 )) && _fm_pad_len=0
-        local _fm_pad
-        _fm_pad=$(printf '%*s' "$_fm_pad_len" "")
-
-        printf '  %b│%b  %b%s%b %s%s%b│%b\n' \
-          "${ACCENT}" "${RESET}" "$_fm_status_color" "$_fm_status_icon" "${RESET}" "$_fm_display" "$_fm_pad" "${ACCENT}" "${RESET}"
+        _dashboard_print_svc_line "$_fm_status_icon" "$_fm_status_color" "$_fm_display" "$_fm_status_label" "" "$w"
 
         _fi=$(( _fi + 1 ))
       done
     fi
 
-    local _fleet_bottom
-    _fleet_bottom=$(printf '%*s' "$w" "" | sed 's/ /─/g')
-    printf '  %b└%s┘%b\n' "${ACCENT}" "$_fleet_bottom" "${RESET}"
+    _dashboard_rule
     echo ""
   fi
 }
@@ -258,19 +252,17 @@ _dashboard_home() {
   while true; do
     muster_tui_fullscreen
     clear
-    echo -e "\n  ${BOLD}${ACCENT_BRIGHT}muster${RESET} ${DIM}v${MUSTER_VERSION}${RESET}"
+
+    # Branded header bar
+    local _right="v${MUSTER_VERSION}  ${MUSTER_OS} ${MUSTER_ARCH}  "
+    echo ""
+    _dashboard_bar "muster" "$_right"
     echo ""
 
     # Collect background update check result
     update_check_collect
     if [[ "$MUSTER_UPDATE_AVAILABLE" == "true" ]]; then
-      echo -e "  ${YELLOW}!${RESET} ${DIM}A new version of muster is available${RESET}"
-      echo ""
-    fi
-
-    # Promote muster-tui if not installed
-    if ! command -v muster-tui >/dev/null 2>&1; then
-      echo -e "  ${ACCENT_BRIGHT}*${RESET} ${DIM}Try the new Go TUI:${RESET} ${WHITE}go install github.com/Muster-dev/muster-tui@latest${RESET} ${DIM}(beta)${RESET}"
+      printf '  %b!%b %bA new version of muster is available%b\n' "${YELLOW}" "${RESET}" "${DIM}" "${RESET}"
       echo ""
     fi
 
@@ -300,16 +292,9 @@ _dashboard_home() {
     local w=$(( TERM_COLS - 4 ))
     (( w > 50 )) && w=50
     (( w < 10 )) && w=10
-    local inner=$(( w - 2 ))
 
     if (( _count > 0 )); then
-      # Top border with "Projects" label
-      local label="Projects"
-      local label_pad_len=$(( w - ${#label} - 3 ))
-      (( label_pad_len < 1 )) && label_pad_len=1
-      local label_pad
-      label_pad=$(printf '%*s' "$label_pad_len" "" | sed 's/ /─/g')
-      printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$label" "${RESET}${ACCENT}" "$label_pad" "${RESET}"
+      printf '  %b%bProjects%b\n' "${BOLD}" "${WHITE}" "${RESET}"
 
       local _pi=0
       while (( _pi < _count )); do
@@ -318,34 +303,32 @@ _dashboard_home() {
         local _pname="${_project_names[$_pi]}"
 
         # Truncate path to fit
-        local max_path=$(( inner - ${#_pname} - 5 ))
+        local max_path=$(( w - ${#_pname} - 6 ))
         (( max_path < 5 )) && max_path=5
         if (( ${#_display_path} > max_path )); then
           _display_path="...${_display_path: -$((max_path - 3))}"
         fi
 
         local content_len=$(( 4 + ${#_pname} + 1 + ${#_display_path} ))
-        local pad_len=$(( inner - content_len ))
+        local pad_len=$(( w - content_len ))
         (( pad_len < 0 )) && pad_len=0
         local pad
         pad=$(printf '%*s' "$pad_len" "")
 
-        printf '  %b│%b  %b●%b %b%s%b %b%s%b%s%b│%b\n' \
-          "${ACCENT}" "${RESET}" "${GREEN}" "${RESET}" \
+        printf '  %b●%b %b%s%b %b%s%b%s\n' \
+          "${GREEN}" "${RESET}" \
           "${WHITE}" "$_pname" "${RESET}" \
           "${DIM}" "$_display_path" "${RESET}" \
-          "$pad" "${ACCENT}" "${RESET}"
+          "$pad"
 
         actions[${#actions[@]}]="${_pname}"
         _pi=$(( _pi + 1 ))
       done
 
-      local bottom
-      bottom=$(printf '%*s' "$w" "" | sed 's/ /─/g')
-      printf '  %b└%s┘%b\n' "${ACCENT}" "$bottom" "${RESET}"
+      _dashboard_rule
     else
-      echo -e "  ${DIM}No projects registered yet.${RESET}"
-      echo -e "  ${DIM}Run 'muster setup' in a project directory.${RESET}"
+      printf '  %bNo projects registered yet.%b\n' "${DIM}" "${RESET}"
+      printf '  %bRun '\''muster setup'\'' in a project directory.%b\n' "${DIM}" "${RESET}"
     fi
 
     echo ""
@@ -392,7 +375,7 @@ _dashboard_home() {
               cmd_dashboard
               return 0
             else
-              echo -e "  ${RED}Directory not found:${RESET} $_target"
+              printf '  %bDirectory not found:%b %s\n' "${RED}" "${RESET}" "$_target"
               _dashboard_pause
             fi
             break
@@ -426,13 +409,7 @@ cmd_dashboard() {
     # Collect background update check result
     update_check_collect
     if [[ "$MUSTER_UPDATE_AVAILABLE" == "true" ]]; then
-      echo -e "  ${YELLOW}!${RESET} ${DIM}A new version of muster is available${RESET}"
-      echo ""
-    fi
-
-    # Promote muster-tui if not installed
-    if ! command -v muster-tui >/dev/null 2>&1; then
-      echo -e "  ${ACCENT_BRIGHT}*${RESET} ${DIM}Try the new Go TUI:${RESET} ${WHITE}go install github.com/Muster-dev/muster-tui@latest${RESET} ${DIM}(beta)${RESET}"
+      printf '  %b!%b %bA new version of muster is available%b\n' "${YELLOW}" "${RESET}" "${DIM}" "${RESET}"
       echo ""
     fi
 

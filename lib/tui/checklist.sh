@@ -27,69 +27,53 @@ checklist_select() {
   local i=0
   while (( i < count )); do checked[$i]=$_cl_default; i=$((i + 1)); done
 
+  # Bar width for highlighted selection
+  local _cl_w=$(( TERM_COLS - 4 ))
+  (( _cl_w > 50 )) && _cl_w=50
+  (( _cl_w < 20 )) && _cl_w=20
+
   muster_tui_enter
   tput civis
 
   _cl_draw_header() {
     echo ""
-    echo -e "  ${BOLD}${title}${RESET}"
-    echo -e "  ${DIM}↑/↓ navigate  ␣ toggle  ⏎ confirm  esc back${RESET}"
-    echo ""
+    printf '  %b%s%b\n' "${BOLD}" "$title" "${RESET}"
+    printf '  %b↑/↓ navigate  ␣ toggle  ⏎ confirm  esc back%b\n' "${DIM}" "${RESET}"
   }
 
-  _cl_calc_width() {
-    _cl_w=$(( TERM_COLS - 4 ))
-    (( _cl_w > 50 )) && _cl_w=50
-    (( _cl_w < 10 )) && _cl_w=10
-    _cl_inner=$(( _cl_w - 2 ))
-    _cl_border=$(printf '%*s' "$_cl_w" "" | sed 's/ /─/g')
-  }
-
-  _cl_calc_width
-  local total_lines=$((count + 2))
+  # Lines to clear = count + 1 (help text line merged into header area)
+  local total_lines=$((count))
 
   _cl_draw() {
-    _cl_calc_width
-    printf '  %b┌%s┐%b\n' "${ACCENT}" "$_cl_border" "${RESET}"
+    _cl_w=$(( TERM_COLS - 4 ))
+    (( _cl_w > 50 )) && _cl_w=50
+    (( _cl_w < 20 )) && _cl_w=20
+
     local i=0
     while (( i < count )); do
-      local mark="✓"
-      local mcolor="${GREEN}"
-      if (( checked[i] == 0 )); then
-        mark=" "
-        mcolor="${DIM}"
+      local mark="○"
+      local mcolor="${GRAY}"
+      if (( checked[i] == 1 )); then
+        mark="✓"
+        mcolor="${GREEN}"
       fi
 
       local label="${items[$i]}"
-      local prefix
-      if (( i == selected )); then
-        prefix="> "
-      else
-        prefix="  "
-      fi
-
-      local max_label=$(( _cl_inner - 6 ))
-      (( max_label < 3 )) && max_label=3
-      if (( ${#label} > max_label )); then
-        label="${label:0:$((max_label - 3))}..."
-      fi
-
-      local content_len=$(( 6 + ${#label} ))
-      local pad_len=$(( _cl_inner - content_len ))
-      (( pad_len < 0 )) && pad_len=0
-      local pad
-      pad=$(printf '%*s' "$pad_len" "")
 
       if (( i == selected )); then
-        printf '  %b│%b %b%s[%b%s%b%b] %s%b%s%b│%b\n' \
-          "${ACCENT}" "${RESET}" "${ACCENT}" "$prefix" "$mcolor" "$mark" "${RESET}" "${ACCENT}" "$label" "${RESET}" "$pad" "${ACCENT}" "${RESET}"
+        # Highlighted bar: mustard bg, black text
+        local text="  ▸ ${mark} ${label}"
+        local text_len=${#text}
+        local bar_pad=$(( _cl_w - text_len ))
+        (( bar_pad < 0 )) && bar_pad=0
+        local pad
+        pad=$(printf '%*s' "$bar_pad" "")
+        printf '\033[48;5;178m\033[38;5;0m%s%s\033[0m\n' "$text" "$pad"
       else
-        printf '  %b│%b %s[%b%s%b] %s%s%b│%b\n' \
-          "${ACCENT}" "${RESET}" "$prefix" "$mcolor" "$mark" "${RESET}" "$label" "$pad" "${ACCENT}" "${RESET}"
+        printf '    %b%s%b %s\n' "$mcolor" "$mark" "${RESET}" "$label"
       fi
       i=$((i + 1))
     done
-    printf '  %b└%s┘%b\n' "${ACCENT}" "$_cl_border" "${RESET}"
   }
 
   _cl_clear() {
@@ -122,6 +106,9 @@ checklist_select() {
     # If screen was cleared by resize, redraw everything immediately
     if [[ "$_MUSTER_INPUT_DIRTY" == "true" ]]; then
       _MUSTER_INPUT_DIRTY="false"
+      _cl_w=$(( TERM_COLS - 4 ))
+      (( _cl_w > 50 )) && _cl_w=50
+      (( _cl_w < 20 )) && _cl_w=20
       _cl_draw_header
       _cl_draw
       continue
@@ -142,7 +129,6 @@ checklist_select() {
         fi
         ;;
       $'\x1b')
-        # Bare Escape — go back
         _cl_clear
         tput cnorm
         CHECKLIST_RESULT="__back__"
@@ -153,7 +139,7 @@ checklist_select() {
         i=0
         while (( i < count )); do
           if (( checked[i] == 1 )); then
-            echo -e "  ${GREEN}*${RESET} ${items[$i]}"
+            printf '  %b✓%b %s\n' "${GREEN}" "${RESET}" "${items[$i]}"
           fi
           i=$((i + 1))
         done

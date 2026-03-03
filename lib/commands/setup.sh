@@ -114,7 +114,7 @@ _setup_screen_inner() {
 
   if [[ -n "$_SETUP_CUR_LABEL" ]]; then
     echo ""
-    echo -e "  ${BOLD}${_SETUP_CUR_LABEL}${RESET}"
+    printf '%b\n' "  ${BOLD}${_SETUP_CUR_LABEL}${RESET}"
   fi
 
   local _sum_count=${#_SETUP_CUR_SUMMARY[@]}
@@ -125,7 +125,7 @@ _setup_screen_inner() {
     if (( _sum_i == _sum_count )) && [[ "$_SETUP_CUR_PROMPT" == "true" ]]; then
       printf '%b' "$s"
     else
-      echo -e "$s"
+      printf '%b\n' "$s"
     fi
   done
 }
@@ -159,13 +159,13 @@ _setup_remote_agent() {
 
   clear
   echo ""
-  echo -e "  ${BOLD}${ACCENT_BRIGHT}muster${RESET} ${DIM}— Remote Agent Setup${RESET}"
+  printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}muster${RESET} ${DIM}— Remote Agent Setup${RESET}"
   echo ""
-  echo -e "  ${DIM}Connect this machine to your fleet relay so it can${RESET}"
-  echo -e "  ${DIM}receive deployments from your host machine.${RESET}"
+  printf '%b\n' "  ${DIM}Connect this machine to your fleet relay so it can${RESET}"
+  printf '%b\n' "  ${DIM}receive deployments from your host machine.${RESET}"
   echo ""
 
-  echo -e "  ${BOLD}Relay URL${RESET} ${DIM}(e.g. wss://relay.example.com/v1/tunnel)${RESET}"
+  printf '%b\n' "  ${BOLD}Relay URL${RESET} ${DIM}(e.g. wss://relay.example.com/v1/tunnel)${RESET}"
   printf '  %b>%b ' "$ACCENT" "$RESET"
   read -r _relay_url
   if [[ -z "$_relay_url" ]]; then
@@ -174,7 +174,7 @@ _setup_remote_agent() {
   fi
 
   echo ""
-  echo -e "  ${BOLD}Organization ID${RESET}"
+  printf '%b\n' "  ${BOLD}Organization ID${RESET}"
   printf '  %b>%b ' "$ACCENT" "$RESET"
   read -r _org_id
   if [[ -z "$_org_id" ]]; then
@@ -183,7 +183,7 @@ _setup_remote_agent() {
   fi
 
   echo ""
-  echo -e "  ${BOLD}Join token${RESET} ${DIM}(from: muster-cloud token create --type agent-join)${RESET}"
+  printf '%b\n' "  ${BOLD}Join token${RESET} ${DIM}(from: muster-cloud token create --type agent-join)${RESET}"
   printf '  %b>%b ' "$ACCENT" "$RESET"
   read -r _join_token
   if [[ -z "$_join_token" ]]; then
@@ -194,7 +194,7 @@ _setup_remote_agent() {
   local _default_name
   _default_name="$(hostname -s 2>/dev/null || hostname)"
   echo ""
-  echo -e "  ${BOLD}Agent name${RESET} ${DIM}[${_default_name}]${RESET}"
+  printf '%b\n' "  ${BOLD}Agent name${RESET} ${DIM}[${_default_name}]${RESET}"
   printf '  %b>%b ' "$ACCENT" "$RESET"
   read -r _agent_name
   _agent_name="${_agent_name:-$_default_name}"
@@ -211,8 +211,8 @@ _setup_remote_agent() {
     echo ""
     ok "Agent joined successfully!"
     echo ""
-    echo -e "  ${DIM}Start the agent daemon with:${RESET}"
-    echo -e "    ${WHITE}muster-agent run${RESET}"
+    printf '%b\n' "  ${DIM}Start the agent daemon with:${RESET}"
+    printf '%b\n' "    ${WHITE}muster-agent run${RESET}"
     echo ""
   else
     echo ""
@@ -836,9 +836,9 @@ cmd_setup() {
   if [[ "$_fc_detected" = true ]]; then
     clear
     echo ""
-    echo -e "  ${BOLD}${ACCENT_BRIGHT}muster${RESET} ${DIM}setup${RESET}"
+    printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}muster${RESET} ${DIM}setup${RESET}"
     echo ""
-    echo -e "  ${DIM}Fleet cloud detected. How will this machine be used?${RESET}"
+    printf '%b\n' "  ${DIM}Fleet cloud detected. How will this machine be used?${RESET}"
     echo ""
 
     menu_select "Role" "Host — I deploy FROM this machine" "Remote — this machine RECEIVES deploys"
@@ -884,7 +884,7 @@ cmd_setup() {
   local _resolved_path
   _resolved_path="$(cd "$project_path" 2>/dev/null && pwd)" || {
     err "Path does not exist: $project_path"
-    echo -e "  ${DIM}Press any key to continue...${RESET}"
+    printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
     IFS= read -rsn1 || true
     return 0
   }
@@ -1001,7 +1001,7 @@ cmd_setup() {
       order_select "What order should services deploy?" "${selected_services[@]}"
       selected_services=("${ORDER_RESULT[@]}")
     else
-      echo -e "\n  ${GREEN}1.${RESET} ${selected_services[0]}"
+      printf '\n  %b1.%b %s\n' "${GREEN}" "${RESET}" "${selected_services[0]}"
     fi
 
     # ── Step 5: Per-service config (health + credentials) ──
@@ -1110,7 +1110,7 @@ cmd_setup() {
     # ── Fleet init offer (host path only) ──
     if [[ "$_fc_detected" = true ]]; then
       echo ""
-      echo -e "  ${DIM}Fleet cloud is installed. Set up remote machines?${RESET}"
+      printf '%b\n' "  ${DIM}Fleet cloud is installed. Set up remote machines?${RESET}"
       echo ""
       menu_select "Fleet" "Skip — set up fleet later" "Yes — initialize fleet config"
       if [[ "$MENU_RESULT" == *"Yes"* ]]; then
@@ -1121,10 +1121,10 @@ cmd_setup() {
           ok "Created remotes.json"
         fi
         echo ""
-        echo -e "  ${DIM}Add machines later with:${RESET}"
-        echo -e "    ${WHITE}muster fleet add <name> user@host${RESET}"
+        printf '%b\n' "  ${DIM}Add machines later with:${RESET}"
+        printf '%b\n' "    ${WHITE}muster fleet add <name> user@host${RESET}"
         echo ""
-        echo -e "  ${DIM}Press any key to continue...${RESET}"
+        printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
         IFS= read -rsn1 || true
       fi
     fi

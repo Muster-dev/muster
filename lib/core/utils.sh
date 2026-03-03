@@ -227,7 +227,7 @@ _git_deploy_diff() {
 
   # Verify previous SHA is reachable
   if ! git cat-file -t "$prev" &>/dev/null; then
-    echo -e "    ${DIM}Previous commit ${prev} not reachable (history rewritten?)${RESET}"
+    printf '%b\n' "    ${DIM}Previous commit ${prev} not reachable (history rewritten?)${RESET}"
     return 0
   fi
 
@@ -236,11 +236,11 @@ _git_deploy_diff() {
   total_commits=$(git rev-list --count "${prev}..${curr}" 2>/dev/null || echo "0")
 
   if [[ "$total_commits" == "0" ]]; then
-    echo -e "    ${DIM}No new commits${RESET}"
+    printf '%b\n' "    ${DIM}No new commits${RESET}"
     return 0
   fi
 
-  echo -e "    ${DIM}Changes since last deploy (${total_commits} commit$( (( total_commits != 1 )) && echo "s")):${RESET}"
+  printf '%b\n' "    ${DIM}Changes since last deploy (${total_commits} commit$( (( total_commits != 1 )) && echo "s")):${RESET}"
 
   # Show up to 5 commit one-liners (hash in accent, message dimmed)
   while IFS= read -r line; do
@@ -251,12 +251,12 @@ _git_deploy_diff() {
     if (( ${#msg} > 64 )); then
       msg="${msg:0:61}..."
     fi
-    echo -e "      ${ACCENT}${sha}${RESET} ${DIM}${msg}${RESET}"
+    printf '%b\n' "      ${ACCENT}${sha}${RESET} ${DIM}${msg}${RESET}"
   done < <(git log --oneline "${prev}..${curr}" --max-count=5 2>/dev/null)
 
   if (( total_commits > 5 )); then
     local remaining=$(( total_commits - 5 ))
-    echo -e "      ${DIM}...and ${remaining} more${RESET}"
+    printf '%b\n' "      ${DIM}...and ${remaining} more${RESET}"
   fi
 
   # Diffstat summary with colored +/-
@@ -271,7 +271,7 @@ _git_deploy_diff() {
     local stat_line="${files} file$( (( files != 1 )) && echo "s") changed"
     [[ -n "$ins" ]] && stat_line="${stat_line}, ${GREEN}+${ins}${RESET}"
     [[ -n "$del" ]] && stat_line="${stat_line}, ${RED}-${del}${RESET}"
-    echo -e "    ${DIM}${stat_line}${RESET}"
+    printf '%b\n' "    ${DIM}${stat_line}${RESET}"
   fi
 }
 

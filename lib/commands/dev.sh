@@ -7,7 +7,7 @@ source "$MUSTER_ROOT/lib/commands/cleanup.sh"
 _dev_cleanup() {
   echo ""
   echo ""
-  echo -e "  ${BOLD}Shutting down dev environment...${RESET}"
+  printf '  %bShutting down dev environment...%b\n' "${BOLD}" "${RESET}"
   echo ""
 
   load_config
@@ -76,7 +76,7 @@ _dev_show_status() {
 
   local lines=0
 
-  echo -e "  ${BOLD}Service Health${RESET}"
+  printf '  %bService Health%b\n' "${BOLD}" "${RESET}"
   lines=$(( lines + 1 ))
 
   local services
@@ -92,7 +92,7 @@ _dev_show_status() {
     local hook="${project_dir}/.muster/hooks/${svc}/health.sh"
 
     if [[ "$health_enabled" == "false" ]]; then
-      echo -e "  ${GRAY}○${RESET} ${name} ${DIM}(disabled)${RESET}"
+      printf '  %b○%b %s %b(disabled)%b\n' "${GRAY}" "${RESET}" "$name" "${DIM}" "${RESET}"
     elif [[ -x "$hook" ]]; then
       # Export k8s env vars for health hook
       local _k8s_env=""
@@ -132,19 +132,19 @@ _dev_show_status() {
       fi
 
       if [[ "$_health_ok" == "true" ]]; then
-        echo -e "  ${GREEN}●${RESET} ${name}"
+        printf '  %b●%b %s\n' "${GREEN}" "${RESET}" "$name"
       else
-        echo -e "  ${RED}●${RESET} ${name}"
+        printf '  %b●%b %s\n' "${RED}" "${RESET}" "$name"
       fi
     else
-      echo -e "  ${GRAY}○${RESET} ${name} ${DIM}(no health check)${RESET}"
+      printf '  %b○%b %s %b(no health check)%b\n' "${GRAY}" "${RESET}" "$name" "${DIM}" "${RESET}"
     fi
     lines=$(( lines + 1 ))
   done <<< "$services"
 
   echo ""
   lines=$(( lines + 1 ))
-  echo -e "  ${DIM}Last checked: $(date +%H:%M:%S)${RESET}  ${DIM}|${RESET}  ${DIM}Ctrl+C to stop${RESET}"
+  printf '  %bLast checked: %s%b  %b|%b  %bCtrl+C to stop%b\n' "${DIM}" "$(date +%H:%M:%S)" "${RESET}" "${DIM}" "${RESET}" "${DIM}" "${RESET}"
   lines=$(( lines + 1 ))
 
   _dev_status_lines="$lines"
@@ -177,7 +177,7 @@ cmd_dev() {
   trap '_dev_cleanup' INT TERM
 
   echo ""
-  echo -e "  ${BOLD}${ACCENT_BRIGHT}Dev Mode${RESET} ${WHITE}${project}${RESET}"
+  printf '  %b%bDev Mode%b %b%s%b\n' "${BOLD}" "${ACCENT_BRIGHT}" "${RESET}" "${WHITE}" "$project" "${RESET}"
   echo ""
 
   # Deploy all services
@@ -189,7 +189,7 @@ cmd_dev() {
   fi
 
   echo ""
-  echo -e "  ${GREEN}*${RESET} ${BOLD}Dev environment running${RESET}"
+  printf '  %b✓%b %bDev environment running%b\n' "${GREEN}" "${RESET}" "${BOLD}" "${RESET}"
   echo ""
 
   _dev_first_status=true

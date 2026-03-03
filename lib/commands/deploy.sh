@@ -79,7 +79,7 @@ cmd_deploy() {
 
   if [[ "$_json_mode" == "false" ]]; then
     echo ""
-    echo -e "  ${BOLD}${ACCENT_BRIGHT}Deploying${RESET} ${WHITE}${project}${RESET}"
+    printf '  %b%bDeploying%b %b%s%b\n' "${BOLD}" "${ACCENT_BRIGHT}" "${RESET}" "${WHITE}" "$project" "${RESET}"
     echo ""
   fi
 
@@ -285,24 +285,24 @@ ${_k8s_env_lines}" 2>&1
       progress_bar "$current" "$total" "Deploying ${name}..."
       echo ""
       echo ""
-      echo -e "  ${ACCENT}[DRY-RUN]${RESET} ${BOLD}Deploying ${name}${RESET} (${current}/${total})"
-      echo -e "  ${DIM}Hook:${RESET} ${hook}"
+      printf '  %b[DRY-RUN]%b %bDeploying %s%b (%s/%s)\n' "${ACCENT}" "${RESET}" "${BOLD}" "$name" "${RESET}" "$current" "$total"
+      printf '  %bHook:%b %s\n' "${DIM}" "${RESET}" "$hook"
 
       # Show first 10 lines of the hook script
       local _line_num=0
       local _separator=""
       printf -v _separator '%*s' 34 ''
       _separator="${_separator// /-}"
-      echo -e "  ${DIM}${_separator}${RESET}"
+      printf '  %b%s%b\n' "${DIM}" "$_separator" "${RESET}"
       while IFS= read -r _line; do
         _line_num=$(( _line_num + 1 ))
         (( _line_num > 10 )) && break
-        echo -e "  ${DIM}${_line}${RESET}"
+        printf '  %b%s%b\n' "${DIM}" "$_line" "${RESET}"
       done < "$hook"
       if (( _line_num > 10 )); then
-        echo -e "  ${DIM}...${RESET}"
+        printf '  %b...%b\n' "${DIM}" "${RESET}"
       fi
-      echo -e "  ${DIM}${_separator}${RESET}"
+      printf '  %b%s%b\n' "${DIM}" "$_separator" "${RESET}"
 
       # Show credential key names (without fetching values)
       local _cred_enabled
@@ -322,7 +322,7 @@ ${_k8s_env_lines}" 2>&1
               _cred_display="MUSTER_CRED_${_upper_ck}"
             fi
           done <<< "$_cred_keys"
-          echo -e "  ${DIM}Credentials:${RESET} ${_cred_display}"
+          printf '  %bCredentials:%b %s\n' "${DIM}" "${RESET}" "$_cred_display"
         fi
       fi
 
@@ -331,9 +331,9 @@ ${_k8s_env_lines}" 2>&1
       local health_enabled
       health_enabled=$(config_get ".services.${svc}.health.enabled")
       if [[ "$health_enabled" != "false" && -x "$health_hook" ]]; then
-        echo -e "  ${DIM}Health check:${RESET} ${health_hook} ${GREEN}(enabled)${RESET}"
+        printf '  %bHealth check:%b %s %b(enabled)%b\n' "${DIM}" "${RESET}" "$health_hook" "${GREEN}" "${RESET}"
       else
-        echo -e "  ${DIM}Health check:${RESET} ${RED}(disabled)${RESET}"
+        printf '  %bHealth check:%b %b(disabled)%b\n' "${DIM}" "${RESET}" "${RED}" "${RESET}"
       fi
 
       # Show remote status
@@ -341,9 +341,9 @@ ${_k8s_env_lines}" 2>&1
         local _remote_pdir
         _remote_pdir=$(config_get ".services.${svc}.remote.project_dir")
         [[ "$_remote_pdir" == "null" ]] && _remote_pdir=""
-        echo -e "  ${DIM}Remote:${RESET} $(remote_desc "$svc") ${GREEN}(enabled)${RESET}"
+        printf '  %bRemote:%b %s %b(enabled)%b\n' "${DIM}" "${RESET}" "$(remote_desc "$svc")" "${GREEN}" "${RESET}"
         if [[ -n "$_remote_pdir" ]]; then
-          echo -e "  ${DIM}Project dir:${RESET} ${_remote_pdir}"
+          printf '  %bProject dir:%b %s\n' "${DIM}" "${RESET}" "$_remote_pdir"
         fi
       fi
 
@@ -356,7 +356,7 @@ ${_k8s_env_lines}" 2>&1
         _gp_branch=$(config_get ".services.${svc}.git_pull.branch")
         [[ "$_gp_remote" == "null" || -z "$_gp_remote" ]] && _gp_remote="origin"
         [[ "$_gp_branch" == "null" || -z "$_gp_branch" ]] && _gp_branch="main"
-        echo -e "  ${DIM}Git pull:${RESET} ${_gp_remote}/${_gp_branch} ${GREEN}(enabled)${RESET}"
+        printf '  %bGit pull:%b %s/%s %b(enabled)%b\n' "${DIM}" "${RESET}" "$_gp_remote" "$_gp_branch" "${GREEN}" "${RESET}"
       fi
 
       echo ""
@@ -434,7 +434,7 @@ ${_k8s_env_lines}" 2>&1
 
           if (( _gp_rc != 0 )); then
             err "git pull failed for ${name}"
-            echo -e "  ${DIM}${_gp_output}${RESET}"
+            printf '  %b%s%b\n' "${DIM}" "$_gp_output" "${RESET}"
             echo ""
             menu_select "Git pull failed. What do you want to do?" "Retry" "Skip git pull" "Abort"
             case "$MENU_RESULT" in
@@ -586,7 +586,7 @@ ${_k8s_env_lines}"
           echo ""
           if [[ -f "$log_file" ]]; then
             tail -5 "$log_file" | while IFS= read -r _line; do
-              echo -e "  ${DIM}${_line}${RESET}"
+              printf '  %b%s%b\n' "${DIM}" "$_line" "${RESET}"
             done
           fi
           echo ""

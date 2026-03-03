@@ -55,7 +55,7 @@ cmd_doctor() {
 
   if [[ "$_json_mode" == "false" ]]; then
     echo ""
-    echo -e "  ${BOLD}Doctor${RESET}"
+    printf '%b\n' "  ${BOLD}Doctor${RESET}"
     echo ""
   fi
 
@@ -64,7 +64,7 @@ cmd_doctor() {
     if [[ "$_json_mode" == "true" ]]; then
       _doc_json_add "$1" "pass" "$1"
     else
-      echo -e "  ${GREEN}✓${RESET} $1"
+      printf '%b\n' "  ${GREEN}✓${RESET} $1"
     fi
     pass=$(( pass + 1 ))
   }
@@ -72,7 +72,7 @@ cmd_doctor() {
     if [[ "$_json_mode" == "true" ]]; then
       _doc_json_add "$1" "warn" "$1"
     else
-      echo -e "  ${YELLOW}!${RESET} $1"
+      printf '%b\n' "  ${YELLOW}!${RESET} $1"
     fi
     warnings=$(( warnings + 1 ))
   }
@@ -80,7 +80,7 @@ cmd_doctor() {
     if [[ "$_json_mode" == "true" ]]; then
       _doc_json_add "$1" "fail" "$1"
     else
-      echo -e "  ${RED}✗${RESET} $1"
+      printf '%b\n' "  ${RED}✗${RESET} $1"
     fi
     failures=$(( failures + 1 ))
   }
@@ -359,7 +359,7 @@ $(cat "$hf" 2>/dev/null)"
     if (( failures > 0 )); then
       summary="${summary}, ${RED}${failures} failures${RESET}"
     fi
-    echo -e "  ${summary}"
+    printf '%b\n' "  ${summary}"
     echo ""
   fi
 }

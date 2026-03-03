@@ -17,22 +17,34 @@ menu_select() {
   local selected=0
   local count=${#options[@]}
 
+  # Calculate bar width for highlighted selection
+  local _menu_w=$(( TERM_COLS - 4 ))
+  (( _menu_w > 50 )) && _menu_w=50
+  (( _menu_w < 20 )) && _menu_w=20
+
   muster_tui_enter
   tput civis
 
   _menu_draw_header() {
     echo ""
-    echo -e "  ${BOLD}${title}${RESET}"
-    echo ""
+    printf '  %b%s%b\n' "${BOLD}" "$title" "${RESET}"
   }
 
   _menu_draw() {
     local i=0
     while (( i < count )); do
+      local label="${options[$i]}"
       if (( i == selected )); then
-        echo -e "  ${ACCENT}> ${options[$i]}${RESET}"
+        # Highlighted bar: mustard bg, black text, full width
+        local text="  ▸ ${label}"
+        local text_len=${#text}
+        local bar_pad=$(( _menu_w - text_len ))
+        (( bar_pad < 0 )) && bar_pad=0
+        local pad
+        pad=$(printf '%*s' "$bar_pad" "")
+        printf '\033[48;5;178m\033[38;5;0m%s%s\033[0m\n' "$text" "$pad"
       else
-        echo -e "    ${DIM}${options[$i]}${RESET}"
+        printf '    %b%s%b\n' "${DIM}" "$label" "${RESET}"
       fi
       i=$((i + 1))
     done
@@ -76,6 +88,10 @@ menu_select() {
     # If screen was cleared by resize, redraw everything immediately
     if [[ "$_MUSTER_INPUT_DIRTY" == "true" ]]; then
       _MUSTER_INPUT_DIRTY="false"
+      # Recalculate bar width
+      _menu_w=$(( TERM_COLS - 4 ))
+      (( _menu_w > 50 )) && _menu_w=50
+      (( _menu_w < 20 )) && _menu_w=20
       _menu_draw_header
       _menu_draw
       continue
@@ -83,7 +99,6 @@ menu_select() {
 
     case "$REPLY" in
       "__timeout__")
-        # Timeout — return for caller to refresh
         _menu_clear
         tput cnorm
         MENU_RESULT="__timeout__"
@@ -96,7 +111,6 @@ menu_select() {
         (( selected < count - 1 )) && selected=$((selected + 1))
         ;;
       $'\x1b')
-        # Bare Escape — go back
         _menu_clear
         tput cnorm
         MENU_RESULT="__back__"
@@ -105,7 +119,7 @@ menu_select() {
       '')
         # Enter — collapse to selected choice
         _menu_clear
-        echo -e "  ${GREEN}*${RESET} ${options[$selected]}"
+        printf '  %b✓%b %s\n' "${GREEN}" "${RESET}" "${options[$selected]}"
         tput cnorm
         MENU_RESULT="${options[$selected]}"
         return 0

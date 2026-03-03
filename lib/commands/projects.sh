@@ -75,12 +75,12 @@ cmd_projects() {
   [[ -z "$count" ]] && count=0
 
   echo ""
-  echo -e "  ${BOLD}${ACCENT_BRIGHT}Registered Projects${RESET}"
+  printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Registered Projects${RESET}"
   echo ""
 
   if (( count == 0 )); then
-    echo -e "  ${DIM}No projects registered yet.${RESET}"
-    echo -e "  ${DIM}Run 'muster setup' or any command in a project directory.${RESET}"
+    printf '%b\n' "  ${DIM}No projects registered yet.${RESET}"
+    printf '%b\n' "  ${DIM}Run 'muster setup' or any command in a project directory.${RESET}"
     echo ""
     return 0
   fi
@@ -111,6 +111,6 @@ cmd_projects() {
   done
 
   echo ""
-  echo -e "  ${DIM}${count} project(s) registered. Use --prune to remove stale entries.${RESET}"
+  printf '%b\n' "  ${DIM}${count} project(s) registered. Use --prune to remove stale entries.${RESET}"
   echo ""
 }

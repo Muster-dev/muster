@@ -50,11 +50,11 @@ cmd_uninstall() {
   local muster_dir="${project_dir}/.muster"
 
   echo ""
-  echo -e "  ${BOLD}Uninstall muster from ${project}${RESET}"
+  printf '%b\n' "  ${BOLD}Uninstall muster from ${project}${RESET}"
   echo ""
-  echo -e "  ${DIM}This will remove:${RESET}"
-  echo -e "    ${RED}*${RESET} ${CONFIG_FILE}"
-  [[ -d "$muster_dir" ]] && echo -e "    ${RED}*${RESET} ${muster_dir}/"
+  printf '%b\n' "  ${DIM}This will remove:${RESET}"
+  printf '    %b•%b %s\n' "${RED}" "${RESET}" "${CONFIG_FILE}"
+  [[ -d "$muster_dir" ]] && printf '    %b•%b %s\n' "${RED}" "${RESET}" "${muster_dir}/"
   echo ""
 
   menu_select "Are you sure?" "No, keep everything" "Yes, remove muster from this project"
@@ -92,7 +92,7 @@ cmd_uninstall() {
 
   echo ""
   ok "muster removed from ${project_dir}"
-  echo -e "  ${DIM}Run 'muster setup' to set up again${RESET}"
+  printf '%b\n' "  ${DIM}Run 'muster setup' to set up again${RESET}"
   echo ""
 }
 
@@ -102,17 +102,17 @@ _uninstall_system() {
   local bin_dir="${MUSTER_BIN_DIR:-$HOME/.local/bin}"
 
   echo ""
-  echo -e "  ${BOLD}${RED}Uninstall muster from this machine${RESET}"
+  printf '%b\n' "  ${BOLD}${RED}Uninstall muster from this machine${RESET}"
   echo ""
-  echo -e "  ${DIM}This will remove:${RESET}"
-  [[ -d "$install_dir" ]] && echo -e "    ${RED}*${RESET} ${install_dir}/  (repo, settings, tokens, skills)"
-  [[ -L "${bin_dir}/muster" || -f "${bin_dir}/muster" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster"
-  [[ -L "${bin_dir}/muster-mcp" || -f "${bin_dir}/muster-mcp" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster-mcp"
-  [[ -L "${bin_dir}/muster-tui" || -f "${bin_dir}/muster-tui" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster-tui"
-  [[ -f "${bin_dir}/muster-tunnel" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster-tunnel"
-  [[ -f "${bin_dir}/muster-agent" ]] && echo -e "    ${RED}*${RESET} ${bin_dir}/muster-agent"
+  printf '%b\n' "  ${DIM}This will remove:${RESET}"
+  [[ -d "$install_dir" ]] && printf '    %b•%b %s\n' "${RED}" "${RESET}" "${install_dir}/  (repo, settings, tokens, skills)"
+  [[ -L "${bin_dir}/muster" || -f "${bin_dir}/muster" ]] && printf '    %b•%b %s\n' "${RED}" "${RESET}" "${bin_dir}/muster"
+  [[ -L "${bin_dir}/muster-mcp" || -f "${bin_dir}/muster-mcp" ]] && printf '    %b•%b %s\n' "${RED}" "${RESET}" "${bin_dir}/muster-mcp"
+  [[ -L "${bin_dir}/muster-tui" || -f "${bin_dir}/muster-tui" ]] && printf '    %b•%b %s\n' "${RED}" "${RESET}" "${bin_dir}/muster-tui"
+  [[ -f "${bin_dir}/muster-tunnel" ]] && printf '    %b•%b %s\n' "${RED}" "${RESET}" "${bin_dir}/muster-tunnel"
+  [[ -f "${bin_dir}/muster-agent" ]] && printf '    %b•%b %s\n' "${RED}" "${RESET}" "${bin_dir}/muster-agent"
   echo ""
-  echo -e "  ${DIM}Project configs (.muster/ in your projects) will NOT be removed.${RESET}"
+  printf '%b\n' "  ${DIM}Project configs (.muster/ in your projects) will NOT be removed.${RESET}"
   echo ""
 
   menu_select "Are you sure?" "No, keep muster" "Yes, uninstall muster"
@@ -136,6 +136,6 @@ _uninstall_system() {
 
   echo ""
   ok "muster has been uninstalled."
-  echo -e "  ${DIM}To reinstall: curl -fsSL https://getmuster.dev/install.sh | bash${RESET}"
+  printf '%b\n' "  ${DIM}To reinstall: curl -fsSL https://getmuster.dev/install.sh | bash${RESET}"
   echo ""
 }

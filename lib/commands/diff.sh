@@ -26,11 +26,11 @@ cmd_diff() {
 
     if [[ -z "$prev_sha" ]]; then
       echo ""
-      echo -e "  ${BOLD}${name}${RESET}  ${DIM}no previous deploy recorded${RESET}"
+      printf '%b\n' "  ${BOLD}${name}${RESET}  ${DIM}no previous deploy recorded${RESET}"
       echo ""
     else
       echo ""
-      echo -e "  ${BOLD}${name}${RESET}  ${DIM}${prev_sha} → ${current_sha}${RESET}"
+      printf '%b\n' "  ${BOLD}${name}${RESET}  ${DIM}${prev_sha} → ${current_sha}${RESET}"
       _git_deploy_diff "$prev_sha" "$current_sha"
       echo ""
     fi
@@ -43,7 +43,7 @@ cmd_diff() {
   local found=false
 
   echo ""
-  echo -e "  ${BOLD}${ACCENT_BRIGHT}Deploy diffs${RESET}  ${DIM}(HEAD: ${current_sha})${RESET}"
+  printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Deploy diffs${RESET}  ${DIM}(HEAD: ${current_sha})${RESET}"
   echo ""
 
   while IFS= read -r svc; do
@@ -59,11 +59,11 @@ cmd_diff() {
     [[ -z "$name" || "$name" == "null" ]] && name="$svc"
 
     if [[ -z "$prev_sha" ]]; then
-      echo -e "  ${BOLD}${name}${RESET}  ${DIM}no previous deploy${RESET}"
+      printf '%b\n' "  ${BOLD}${name}${RESET}  ${DIM}no previous deploy${RESET}"
     elif [[ "$prev_sha" == "$current_sha" ]]; then
-      echo -e "  ${BOLD}${name}${RESET}  ${GREEN}up to date${RESET}"
+      printf '%b\n' "  ${BOLD}${name}${RESET}  ${GREEN}up to date${RESET}"
     else
-      echo -e "  ${BOLD}${name}${RESET}  ${DIM}${prev_sha} → ${current_sha}${RESET}"
+      printf '%b\n' "  ${BOLD}${name}${RESET}  ${DIM}${prev_sha} → ${current_sha}${RESET}"
       _git_deploy_diff "$prev_sha" "$current_sha"
       found=true
     fi
@@ -71,7 +71,7 @@ cmd_diff() {
   done <<< "$services"
 
   if [[ "$found" == "false" ]]; then
-    echo -e "  ${DIM}All services are up to date (or no previous deploys recorded).${RESET}"
+    printf '%b\n' "  ${DIM}All services are up to date (or no previous deploys recorded).${RESET}"
     echo ""
   fi
 }

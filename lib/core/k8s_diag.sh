@@ -17,8 +17,8 @@ _diag_run_kubectl() {
 # Display a diagnosis line
 _diag_show() {
   local diagnosis="$1" suggestion="$2"
-  echo -e "  ${RED}*${RESET} ${BOLD}${diagnosis}${RESET}"
-  echo -e "    ${DIM}${suggestion}${RESET}"
+  printf '%b\n' "  ${RED}•${RESET} ${BOLD}${diagnosis}${RESET}"
+  printf '%b\n' "    ${DIM}${suggestion}${RESET}"
 }
 
 # Run k8s deploy failure diagnostics for a service
@@ -33,7 +33,7 @@ k8s_diagnose_failure() {
   [[ -z "$deployment" ]] && return 0
   [[ "$MUSTER_HAS_KUBECTL" != "true" ]] && return 0
 
-  echo -e "  ${ACCENT}Diagnosing deploy failure...${RESET}"
+  printf '%b\n' "  ${ACCENT}Diagnosing deploy failure...${RESET}"
   echo ""
 
   # Step 1: Describe the deployment (includes events, conditions, RS info)
@@ -141,11 +141,11 @@ ${pod_prev_logs}"
   fi
 
   if [[ "$_diag_matched" == "false" ]]; then
-    echo -e "  ${DIM}No specific error pattern detected (likely a timeout)${RESET}"
+    printf '%b\n' "  ${DIM}No specific error pattern detected (likely a timeout)${RESET}"
     if [[ -n "$pod_name" ]]; then
-      echo -e "  ${DIM}Inspect: kubectl describe pod ${pod_name} -n ${namespace}${RESET}"
+      printf '%b\n' "  ${DIM}Inspect: kubectl describe pod ${pod_name} -n ${namespace}${RESET}"
     else
-      echo -e "  ${DIM}Inspect: kubectl describe deployment ${deployment} -n ${namespace}${RESET}"
+      printf '%b\n' "  ${DIM}Inspect: kubectl describe deployment ${deployment} -n ${namespace}${RESET}"
     fi
   fi
 
@@ -154,7 +154,7 @@ ${pod_prev_logs}"
     local _pod_status_line
     _pod_status_line=$(_diag_run_kubectl "$svc" "kubectl get pod ${pod_name} -n ${namespace} --no-headers")
     if [[ -n "$_pod_status_line" ]]; then
-      echo -e "  ${DIM}Pod status: ${_pod_status_line}${RESET}"
+      printf '%b\n' "  ${DIM}Pod status: ${_pod_status_line}${RESET}"
     fi
   fi
 

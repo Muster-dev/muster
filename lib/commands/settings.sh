@@ -20,7 +20,7 @@ _settings_open_config() {
     # macOS: open Finder to the folder, highlighting deploy.json
     open -R "$CONFIG_FILE" 2>/dev/null && {
       ok "Opened in Finder"
-      echo -e "  ${DIM}${CONFIG_FILE}${RESET}"
+      printf '%b\n' "  ${DIM}${CONFIG_FILE}${RESET}"
       echo ""
       return 0
     }
@@ -29,7 +29,7 @@ _settings_open_config() {
     if has_cmd xdg-open; then
       xdg-open "$config_dir" 2>/dev/null &
       ok "Opened file manager"
-      echo -e "  ${DIM}${CONFIG_FILE}${RESET}"
+      printf '%b\n' "  ${DIM}${CONFIG_FILE}${RESET}"
       echo ""
       return 0
     fi
@@ -38,9 +38,9 @@ _settings_open_config() {
   # No GUI or open failed — just print the path
   info "Config file:"
   echo ""
-  echo -e "  ${WHITE}${CONFIG_FILE}${RESET}"
+  printf '%b\n' "  ${WHITE}${CONFIG_FILE}${RESET}"
   echo ""
-  echo -e "  ${DIM}Press any key to continue...${RESET}"
+  printf '%b\n' "  ${DIM}Press any key to continue...${RESET}"
   IFS= read -rsn1 || true
 }
 
@@ -225,13 +225,13 @@ cmd_settings() {
   while true; do
     clear
     echo ""
-    echo -e "  ${BOLD}${ACCENT_BRIGHT}Settings${RESET}"
+    printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Settings${RESET}"
     echo ""
 
     if [[ "$_has_project" == "true" ]]; then
-      menu_select "Settings" "Project Settings" "Muster Settings" "Download muster-tui (Go)" "Back"
+      menu_select "Settings" "Project Settings" "Muster Settings" "Back"
     else
-      menu_select "Settings" "Muster Settings" "Download muster-tui (Go)" "Back"
+      menu_select "Settings" "Muster Settings" "Back"
     fi
 
     case "$MENU_RESULT" in
@@ -240,9 +240,6 @@ cmd_settings() {
         ;;
       "Muster Settings")
         _settings_muster_global
-        ;;
-      "Download muster-tui (Go)")
-        _settings_download_tui
         ;;
       Back)
         return 0

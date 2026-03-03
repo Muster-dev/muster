@@ -18,63 +18,61 @@ order_select() {
   local selected=0
   local grabbed=-1  # -1 = nothing grabbed
 
+  local _ord_w=$(( TERM_COLS - 4 ))
+  (( _ord_w > 50 )) && _ord_w=50
+  (( _ord_w < 20 )) && _ord_w=20
+
   muster_tui_enter
   tput civis
 
-  local w=$(( TERM_COLS - 4 ))
-  (( w > 50 )) && w=50
-  (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
-
   _ord_draw_header() {
     echo ""
-    echo -e "  ${BOLD}${title}${RESET}"
+    printf '  %b%s%b\n' "${BOLD}" "$title" "${RESET}"
     if (( grabbed >= 0 )); then
-      echo -e "  ${DIM}↑/↓ move item  ⏎ drop  q done${RESET}"
+      printf '  %b↑/↓ move item  ⏎ drop  q done%b\n' "${DIM}" "${RESET}"
     else
-      echo -e "  ${DIM}↑/↓ navigate  ⏎ grab  q done${RESET}"
+      printf '  %b↑/↓ navigate  ⏎ grab  q done%b\n' "${DIM}" "${RESET}"
     fi
-    echo ""
   }
 
   _ord_draw() {
-    local border
-    border=$(printf '%*s' "$w" "" | sed 's/ /─/g')
-    printf '%b' "  ${ACCENT}┌${border}┐${RESET}\n"
+    _ord_w=$(( TERM_COLS - 4 ))
+    (( _ord_w > 50 )) && _ord_w=50
+    (( _ord_w < 20 )) && _ord_w=20
 
     local i=0
     while (( i < count )); do
       local label="${items[$i]}"
       local num=$((i + 1))
-      local prefix="  "
 
       if (( i == selected && grabbed >= 0 )); then
-        # Currently grabbed and selected — highlight with accent
-        prefix="${ACCENT_BRIGHT}*${RESET} "
+        # Grabbed and selected — bright highlight bar
+        local text="  ✦ ${num}. ${label}"
+        local text_len=${#text}
+        local bar_pad=$(( _ord_w - text_len ))
+        (( bar_pad < 0 )) && bar_pad=0
+        local pad
+        pad=$(printf '%*s' "$bar_pad" "")
+        printf '\033[48;5;220m\033[38;5;0m%s%s\033[0m\n' "$text" "$pad"
       elif (( i == selected )); then
-        prefix="${ACCENT}>${RESET} "
-      fi
-
-      local num_str="${num}."
-      local content_len=$(( 4 + ${#num_str} + 1 + ${#label} ))
-      local pad_len=$(( inner - content_len ))
-      (( pad_len < 0 )) && pad_len=0
-      local pad
-      pad=$(printf '%*s' "$pad_len" "")
-
-      if (( i == grabbed )); then
-        printf '%b' "  ${ACCENT}│${RESET} ${prefix}${DIM}${num_str}${RESET} ${ACCENT_BRIGHT}${label}${RESET}${pad}${ACCENT}│${RESET}\n"
+        # Selected — mustard highlight bar
+        local text="  ▸ ${num}. ${label}"
+        local text_len=${#text}
+        local bar_pad=$(( _ord_w - text_len ))
+        (( bar_pad < 0 )) && bar_pad=0
+        local pad
+        pad=$(printf '%*s' "$bar_pad" "")
+        printf '\033[48;5;178m\033[38;5;0m%s%s\033[0m\n' "$text" "$pad"
+      elif (( i == grabbed )); then
+        printf '    %b%s. %b%s%b\n' "${DIM}" "$num" "${ACCENT_BRIGHT}" "$label" "${RESET}"
       else
-        printf '%b' "  ${ACCENT}│${RESET} ${prefix}${DIM}${num_str}${RESET} ${label}${pad}${ACCENT}│${RESET}\n"
+        printf '    %b%s.%b %s\n' "${DIM}" "$num" "${RESET}" "$label"
       fi
       i=$((i + 1))
     done
-
-    border=$(printf '%*s' "$w" "" | sed 's/ /─/g')
-    printf '%b' "  ${ACCENT}└${border}┘${RESET}\n"
   }
 
-  local total_lines=$(( count + 2 ))
+  local total_lines=$((count))
 
   _ord_clear() {
     local i=0
@@ -120,7 +118,6 @@ order_select() {
     case "$REPLY" in
       $'\x1b[A')
         if (( grabbed >= 0 && selected > 0 )); then
-          # Move grabbed item up
           _ord_swap "$selected" "$((selected - 1))"
           grabbed=$((selected - 1))
           selected=$((selected - 1))
@@ -130,7 +127,6 @@ order_select() {
         ;;
       $'\x1b[B')
         if (( grabbed >= 0 && selected < count - 1 )); then
-          # Move grabbed item down
           _ord_swap "$selected" "$((selected + 1))"
           grabbed=$((selected + 1))
           selected=$((selected + 1))
@@ -141,17 +137,15 @@ order_select() {
       'q'|'Q')
         _ord_clear
         tput cnorm
-        # Show final order
         local i=0
         while (( i < count )); do
-          echo -e "  ${GREEN}${i+1}.${RESET} ${items[$i]}"
+          printf '  %b✓%b %b%s.%b %s\n' "${GREEN}" "${RESET}" "${DIM}" "$((i + 1))" "${RESET}" "${items[$i]}"
           i=$((i + 1))
         done
         ORDER_RESULT=("${items[@]}")
         return 0
         ;;
       '')
-        # Enter — toggle grab
         if (( grabbed >= 0 )); then
           grabbed=-1
         else

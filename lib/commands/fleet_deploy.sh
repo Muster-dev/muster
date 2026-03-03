@@ -112,7 +112,7 @@ _fleet_cmd_deploy() {
   _load_env_file
 
   echo ""
-  echo -e "  ${BOLD}${ACCENT_BRIGHT}Fleet Deploy${RESET} — ${total} machine(s)"
+  printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Fleet Deploy${RESET} — ${total} machine(s)"
   echo ""
 
   if [[ "$parallel" == "true" ]]; then
@@ -242,7 +242,7 @@ _fleet_deploy_sequential() {
         if [[ -f "$log_file" ]]; then
           echo ""
           tail -5 "$log_file" | while IFS= read -r _line; do
-            echo -e "  ${DIM}${_line}${RESET}"
+            printf '%b\n' "  ${DIM}${_line}${RESET}"
           done
           echo ""
         fi
@@ -560,9 +560,9 @@ ${_ke}"
           latest_log=$(ls -t "${log_dir}/fleet-${m}-"*.log 2>/dev/null | head -1)
           if [[ -n "$latest_log" ]]; then
             echo ""
-            echo -e "  ${BOLD}${m}:${RESET}"
+            printf '%b\n' "  ${BOLD}${m}:${RESET}"
             tail -10 "$latest_log" | while IFS= read -r _line; do
-              echo -e "  ${DIM}${_line}${RESET}"
+              printf '%b\n' "  ${DIM}${_line}${RESET}"
             done
           fi
         done

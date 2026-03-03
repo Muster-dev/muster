@@ -43,7 +43,7 @@ cmd_status() {
 
   if [[ "$_json_mode" == "false" ]]; then
     echo ""
-    echo -e "  ${BOLD}${project}${RESET} — Service Status"
+    printf '  %b%s%b — Service Status\n' "${BOLD}" "$project" "${RESET}"
     echo ""
   fi
 
@@ -82,7 +82,7 @@ cmd_status() {
         printf '"%s":{"name":"%s","status":"disabled","health_type":"%s","detail":"health check disabled"}' \
           "$svc" "$name" "$health_type"
       else
-        echo -e "  ${GRAY}○${RESET} ${name}${_remote_tag} ${DIM}(disabled)${RESET}"
+        printf '  %b○%b %s%s %b(disabled)%b\n' "${GRAY}" "${RESET}" "$name" "$_remote_tag" "${DIM}" "${RESET}"
       fi
     elif [[ -x "$hook" ]]; then
       # Export k8s env vars for health hook
@@ -127,10 +127,10 @@ cmd_status() {
       else
         if [[ "$_health_ok" == "true" ]]; then
           stop_spinner
-          echo -e "  ${GREEN}●${RESET} ${name}${_remote_tag}"
+          printf '  %b●%b %s%s\n' "${GREEN}" "${RESET}" "$name" "$_remote_tag"
         else
           stop_spinner
-          echo -e "  ${RED}●${RESET} ${name}${_remote_tag}"
+          printf '  %b●%b %s%s\n' "${RED}" "${RESET}" "$name" "$_remote_tag"
         fi
       fi
     else
@@ -140,7 +140,7 @@ cmd_status() {
         printf '"%s":{"name":"%s","status":"no_health_check","health_type":"","detail":"no health hook"}' \
           "$svc" "$name"
       else
-        echo -e "  ${GRAY}○${RESET} ${name}${_remote_tag} ${DIM}(no health check)${RESET}"
+        printf '  %b○%b %s%s %b(no health check)%b\n' "${GRAY}" "${RESET}" "$name" "$_remote_tag" "${DIM}" "${RESET}"
       fi
     fi
   done <<< "$services"
