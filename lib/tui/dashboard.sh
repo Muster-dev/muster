@@ -663,6 +663,11 @@ cmd_dashboard() {
     fi
 
     # Trust requests badge
+    local _trust_pending_count=0
+    if [[ -f "$HOME/.muster/fleet/pending.json" ]] && has_cmd jq; then
+      _trust_pending_count=$(jq 'length' "$HOME/.muster/fleet/pending.json" 2>/dev/null)
+      [[ -z "$_trust_pending_count" || "$_trust_pending_count" == "null" ]] && _trust_pending_count=0
+    fi
     if (( _trust_pending_count > 0 )); then
       actions[${#actions[@]}]="Trust requests (${_trust_pending_count} pending)"
     fi
