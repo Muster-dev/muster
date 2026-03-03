@@ -1579,7 +1579,7 @@ _group_detail_menu() {
           "${WHITE}" "$_pname" "${RESET}" \
           "${DIM}" "$_desc" "${RESET}"
 
-        # Show services under each project
+        # Show services with health status under each project
         if [[ "$_type" == "local" && -d "$_raw_path" ]]; then
           local _cfg=""
           if [[ -f "${_raw_path}/deploy.json" ]]; then
@@ -1588,14 +1588,34 @@ _group_detail_menu() {
             _cfg="${_raw_path}/muster.json"
           fi
           if [[ -n "$_cfg" ]] && has_cmd jq; then
+            # Get status JSON (cached in health_cache)
+            local _muster_bin="${MUSTER_ROOT}/bin/muster"
+            local _st_json=""
+            _st_json=$(cd "$_raw_path" && "$_muster_bin" status --json 2>/dev/null) || true
+
             local _svc_list
             _svc_list=$(jq -r '.services | keys[]' "$_cfg" 2>/dev/null)
             if [[ -n "$_svc_list" ]]; then
               while IFS= read -r _sk; do
                 [[ -z "$_sk" ]] && continue
-                local _sn
+                local _sn _s_icon _s_color _s_status
                 _sn=$(jq -r --arg k "$_sk" '.services[$k].name // $k' "$_cfg" 2>/dev/null)
-                printf '      %b-%b %b%s%b\n' "${DIM}" "${RESET}" "${DIM}" "$_sn" "${RESET}"
+
+                # Look up status from JSON result
+                _s_status=""
+                if [[ -n "$_st_json" ]]; then
+                  _s_status=$(printf '%s' "$_st_json" | jq -r --arg k "$_sk" '.services[$k].status // ""' 2>/dev/null)
+                fi
+
+                case "$_s_status" in
+                  healthy)   _s_icon="●"; _s_color="${GREEN}" ;;
+                  unhealthy) _s_icon="●"; _s_color="${RED}" ;;
+                  *)         _s_icon="○"; _s_color="${GRAY}" ;;
+                esac
+
+                printf '      %b%s%b %b%s%b\n' \
+                  "$_s_color" "$_s_icon" "${RESET}" \
+                  "$_s_color" "$_sn" "${RESET}"
               done <<< "$_svc_list"
             fi
           fi
