@@ -66,6 +66,8 @@ muster setup --help                                     # see all flags
 | `muster status` | Check health of all services |
 | `muster logs` | Stream logs (interactive service picker) |
 | `muster rollback` | Rollback a service |
+| `muster doctor` | Run project diagnostics (13 checks) |
+| `muster doctor --fix` | Auto-fix what it can (permissions, stale PIDs, old logs, .dockerignore) |
 | `muster cleanup` | Clean up stuck processes and old logs |
 | `muster settings` | Project settings + global muster preferences |
 | `muster settings --global` | View/edit global settings (color, log retention, etc.) |
@@ -363,11 +365,23 @@ Skills with `post-deploy` hooks (like Discord notifications) fire immediately wh
 Run diagnostics on your project:
 
 ```bash
-muster doctor         # check everything
-muster doctor --fix   # auto-fix what it can
+muster doctor              # check everything
+muster doctor --fix        # auto-fix what it can
+muster --minimal doctor    # plain text output (PASS/WARN/FAIL lines)
 ```
 
-Checks: deploy.json validity, hook existence and permissions, tool availability, stale PID files, old logs, credential health, remote SSH connectivity, and more.
+13 checks: deploy.json validity, hook existence and permissions, health check status, tool availability, stale PID files, .env presence, old logs, k8s cluster reachability, fleet connectivity, **build context overlap detection**, and more.
+
+### Build Context Overlap Detection
+
+In monorepos, one service's Docker build context (usually `.`) can contain another service's directory. This causes cache invalidation from unrelated changes, bloated build contexts, and potential secret leakage. muster detects this automatically:
+
+- **Dashboard** — warning banner + "Doctor !" badge on the menu item when issues are found
+- **Deploy** — yellow warning line before build starts
+- **Setup** — detection runs after hook generation with fix suggestions
+- **Doctor** — detailed diagnostics with `--fix` to auto-add directories to `.dockerignore`
+
+Results are cached at `~/.muster/.build_context_cache` and refreshed when `deploy.json` or `.dockerignore` changes.
 
 ## History
 
@@ -376,6 +390,18 @@ muster history              # recent deploy/rollback events
 muster history --all        # full log
 muster history api          # filter by service
 ```
+
+## Minimal Mode
+
+For scripts and CI pipelines that don't need the TUI:
+
+```bash
+muster --minimal              # plain text service status, no interactive dashboard
+muster --minimal doctor       # PASS/WARN/FAIL lines, no color or boxes
+muster --minimal deploy api   # build context warnings to stderr as comments
+```
+
+Minimal mode outputs plain text to stdout and warnings as `# comment`-style lines to stderr, making it easy to pipe and parse.
 
 ## Philosophy
 
@@ -393,8 +419,7 @@ PRs welcome. The codebase is modular by design — each file in `lib/` is self-c
 ### Running tests
 
 ```bash
-brew install bats-core   # or your package manager
-./test/run.sh
+make test
 ```
 
 ## License

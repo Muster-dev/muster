@@ -22,8 +22,8 @@ muster rollback <svc>  # rollback a service (interactive picker if no arg)
 muster history     # show deploy/rollback event log
 muster history --all           # show full history (not just recent)
 muster history api             # show history for one service
-muster doctor      # run project diagnostics (11 checks)
-muster doctor --fix            # auto-fix what it can (permissions, stale PIDs, old logs)
+muster doctor      # run project diagnostics (13 checks)
+muster doctor --fix            # auto-fix what it can (permissions, stale PIDs, old logs, .dockerignore)
 muster cleanup     # clean stuck processes + old logs
 muster settings    # project settings + global muster settings
 muster settings --global                  # dump global settings as JSON
@@ -32,6 +32,9 @@ muster uninstall   # remove muster from project
 muster skill add <url>  # install a skill addon
 muster skill list       # list installed skills
 muster skill remove <n> # remove a skill
+muster --minimal              # plain text dashboard (no TUI, for scripts/CI)
+muster --minimal doctor       # PASS/WARN/FAIL plain text output
+muster --minimal deploy api   # build context warnings as stderr comments
 ```
 
 ## Project Structure
@@ -40,7 +43,7 @@ muster skill remove <n> # remove a skill
 muster/
 ├── bin/muster                     ← entry point (routes commands)
 ├── bin/muster-mcp                 ← MCP stdio transport (uses shared scanner)
-├── lib/core/                      ← config, colors, logger, platform, utils, scanner, credentials, remote, k8s_diag, updater
+├── lib/core/                      ← config, colors, logger, platform, utils, scanner, credentials, remote, k8s_diag, updater, build_context
 ├── lib/tui/                       ← menu, checklist, spinner, progress, streambox, dashboard, order
 ├── lib/commands/                  ← setup, deploy, dev, status, logs, rollback, history, doctor, cleanup, settings, uninstall
 ├── lib/skills/manager.sh          ← skill lifecycle (reads name from skill.json)
@@ -113,9 +116,27 @@ Deploy and rollback failures show interactive recovery menus instead of aborting
 
 **K8s smart rollout wait** (`_k8s_smart_wait()` in k8s deploy templates): Replaces bare `kubectl rollout status --timeout`. Starts rollout in background, polls pod status every 5s, prints progress (`"2/3 pods ready (15s)"`), and detects terminal errors immediately (ErrImageNeverPull, ImagePullBackOff, CrashLoopBackOff, OOMKilled, CreateContainerConfigError, RunContainerError, InvalidImageName). On terminal error: prints error, shows pod events/logs, kills rollout wait, exits non-zero. Uses deployment's label selector for pod matching.
 
-**Dashboard** (`lib/tui/dashboard.sh`): Services panel auto-refreshes every 20s via `MENU_TIMEOUT=20` in menu.sh. Health check results are cached persistently in `~/.muster/.health_cache/` (not temp dir) so status survives across renders.
+**Dashboard** (`lib/tui/dashboard.sh`): Services panel auto-refreshes every 20s via `MENU_TIMEOUT=20` in menu.sh. Health check results are cached persistently in `~/.muster/.health_cache/` (not temp dir) so status survives across renders. Build context overlap detection runs on each refresh (cache-based — only re-scans when deploy.json or .dockerignore changes). Shows warning banner and badges the Doctor menu item with `!` when issues found. `--minimal` mode outputs plain text service status and exits.
 
 **Interactive service selection:** `muster deploy` with >1 service in a TTY shows "All services" / "Select services" menu. "Select services" opens a checklist (`lib/tui/checklist.sh`). Non-interactive (scripts, CI) deploys all as before.
+
+## Build Context Overlap Detection
+
+`lib/core/build_context.sh` detects when one service's Docker build context (usually `.`) contains another service's directory in a monorepo. This causes cache invalidation, bloated contexts, and potential secret leakage.
+
+**Detection flow:** Scan deploy hooks for `docker build` commands → extract context paths → compare pairwise for containment → check `.dockerignore` for exclusions → write results to cache.
+
+**Cache:** `~/.muster/.build_context_cache`. Format: `parent_svc|child_svc|parent_context|child_dir` (one line per issue). Invalidated when deploy.json or .dockerignore mtime changes.
+
+**Integration points:**
+
+| Where | Behavior |
+|-------|----------|
+| Dashboard (every refresh) | Run detection if cache stale, show warning banner + Doctor `!` badge |
+| Deploy (before first build) | Read cache, show yellow warning line |
+| Doctor (check #13) | Run fresh detection, show detailed diagnostics, `--fix` adds to .dockerignore |
+| Setup (after hook generation) | Run detection, show fix suggestions |
+| `--minimal` mode | Output `# warning:` comments to stderr |
 
 ## Dev Stack
 
