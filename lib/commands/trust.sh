@@ -98,6 +98,39 @@ _trust_cmd_requests() {
   echo ""
 }
 
+_trust_configure_sudo() {
+  local _user="${USER:-$(whoami)}"
+  local _sudoers_file="/etc/sudoers.d/muster-${_user}"
+
+  # Skip if user already has NOPASSWD sudo
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+
+  info "Configuring passwordless sudo for fleet deploys..."
+  printf '  %bFleet deploys run non-interactively over SSH and need sudo without a prompt.%b\n' "${DIM}" "${RESET}"
+  printf '  %bThis only affects the %s user — other accounts are unchanged.%b\n' "${DIM}" "$_user" "${RESET}"
+  echo ""
+
+  local _entry="${_user} ALL=(ALL) NOPASSWD: ALL"
+
+  if ! echo "$_entry" | sudo tee "$_sudoers_file" >/dev/null 2>&1; then
+    warn "Could not configure sudo — fleet deploys using sudo may fail"
+    printf '  %bManually run: echo "%s" | sudo tee %s%b\n' "${DIM}" "$_entry" "$_sudoers_file" "${RESET}"
+    return 0
+  fi
+
+  sudo chmod 440 "$_sudoers_file" 2>/dev/null
+
+  # Validate the sudoers entry
+  if sudo visudo -c -f "$_sudoers_file" &>/dev/null; then
+    ok "Sudo configured for ${_user} (fleet deploys)"
+  else
+    sudo rm -f "$_sudoers_file"
+    warn "Invalid sudoers entry — removed. Fleet deploys using sudo may fail."
+  fi
+}
+
 _trust_cmd_accept() {
   local id="${1:-}"
   if [[ -z "$id" ]]; then
@@ -107,6 +140,7 @@ _trust_cmd_accept() {
 
   if trust_accept "$id"; then
     ok "Trust accepted"
+    _trust_configure_sudo
   else
     err "Request not found: ${id}"
     return 1
@@ -286,6 +320,7 @@ _trust_manage_pending() {
       "Accept")
         trust_accept "$_selected_fp"
         ok "Trusted: ${_selected_label}"
+        _trust_configure_sudo
         ;;
       "Reject")
         trust_reject "$_selected_fp"
