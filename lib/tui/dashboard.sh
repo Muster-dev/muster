@@ -332,6 +332,38 @@ _dashboard_home() {
       printf '  %bRun '\''muster setup'\'' in a project directory.%b\n' "${DIM}" "${RESET}"
     fi
 
+    # Fleet Groups section
+    local _group_names=()
+    local _gcount=0
+    if [[ -f "$HOME/.muster/groups.json" ]] && has_cmd jq; then
+      _gcount=$(jq '.groups | length' "$HOME/.muster/groups.json" 2>/dev/null)
+      [[ -z "$_gcount" ]] && _gcount=0
+
+      if (( _gcount > 0 )); then
+        echo ""
+        printf '  %b%bGroups%b\n' "${BOLD}" "${WHITE}" "${RESET}"
+
+        local _gi=0
+        while (( _gi < _gcount )); do
+          local _gkey _gdisplay _gpcount
+          _gkey=$(jq -r ".groups | keys[$_gi]" "$HOME/.muster/groups.json")
+          _gdisplay=$(jq -r --arg g "$_gkey" '.groups[$g].name // $g' "$HOME/.muster/groups.json")
+          _gpcount=$(jq -r --arg g "$_gkey" '.groups[$g].projects | length' "$HOME/.muster/groups.json")
+          _group_names[${#_group_names[@]}]="$_gkey"
+
+          printf '  %b○%b %b%s%b %b(%s project%s)%b\n' \
+            "${ACCENT}" "${RESET}" \
+            "${WHITE}" "$_gdisplay" "${RESET}" \
+            "${DIM}" "$_gpcount" "$([ "$_gpcount" != "1" ] && echo "s")" "${RESET}"
+
+          actions[${#actions[@]}]="Group: ${_gdisplay}"
+          _gi=$(( _gi + 1 ))
+        done
+
+        _dashboard_rule
+      fi
+    fi
+
     echo ""
     actions[${#actions[@]}]="Setup new project"
     actions[${#actions[@]}]="Settings"
@@ -364,6 +396,22 @@ _dashboard_home() {
       "Quit")
         echo ""
         exit 0
+        ;;
+      Group:\ *)
+        # Group selection — open group detail menu
+        source "$MUSTER_ROOT/lib/commands/group.sh"
+        local _selected_group="${MENU_RESULT#Group: }"
+        # Find matching group key by display name
+        local _gsi=0
+        while (( _gsi < ${#_group_names[@]} )); do
+          local _gdn
+          _gdn=$(jq -r --arg g "${_group_names[$_gsi]}" '.groups[$g].name // $g' "$HOME/.muster/groups.json")
+          if [[ "$_selected_group" == "$_gdn" ]]; then
+            _group_detail_menu "${_group_names[$_gsi]}"
+            break
+          fi
+          _gsi=$(( _gsi + 1 ))
+        done
         ;;
       *)
         # Must be a project selection — find matching name
@@ -458,6 +506,15 @@ cmd_dashboard() {
     # Add Fleet action if remotes.json exists
     if [[ -f "${project_dir}/remotes.json" ]]; then
       actions[${#actions[@]}]="Fleet"
+    fi
+
+    # Add Groups action if groups.json has entries
+    if [[ -f "$HOME/.muster/groups.json" ]] && has_cmd jq; then
+      local _gcount
+      _gcount=$(jq '.groups | length' "$HOME/.muster/groups.json" 2>/dev/null)
+      if [[ -n "$_gcount" && "$_gcount" != "0" ]]; then
+        actions[${#actions[@]}]="Groups"
+      fi
     fi
 
     actions[${#actions[@]}]="Settings"
@@ -612,6 +669,10 @@ cmd_dashboard() {
         source "$MUSTER_ROOT/lib/commands/fleet.sh"
         cmd_fleet
         _dashboard_pause
+        ;;
+      Groups)
+        source "$MUSTER_ROOT/lib/commands/group.sh"
+        cmd_group
         ;;
       Settings)
         source "$MUSTER_ROOT/lib/commands/settings.sh"

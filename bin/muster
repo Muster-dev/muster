@@ -147,6 +147,11 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/fleet.sh"
     cmd_fleet "$@"
     ;;
+  group)
+    shift
+    source "$MUSTER_ROOT/lib/commands/group.sh"
+    cmd_group "$@"
+    ;;
   update|--update)
     source "$MUSTER_ROOT/lib/core/updater.sh"
     update_apply
@@ -174,6 +179,7 @@ case "${1:-}" in
     echo "  projects    List registered projects (--prune to clean stale)"
     echo "  auth        Manage API tokens (create, list, revoke, verify)"
     echo "  fleet       Manage fleet deployments across machines"
+    echo "  group       Manage fleet groups (combine projects for unified deploys)"
     echo "  update      Update muster to latest version"
     echo ""
     echo "Options:"
