@@ -120,10 +120,9 @@ _read_path() {
   }
 
   # Redraw just the input line — zero subprocesses
+  # Shows _rp_input as-is (preserves user's path style)
   _rp_redraw_input() {
-    local _d="$_rp_input"
-    [[ "$_d" == "$HOME"* ]] && _d="~${_d#$HOME}"
-    printf '\r\033[K%s%s' "$_rp_prompt" "$_d"
+    printf '\r\033[K%s%s' "$_rp_prompt" "$_rp_input"
   }
 
   # Run compgen (only called on Tab)
@@ -239,9 +238,15 @@ _read_path() {
         fi
         ;;
       $'\t')  # Tab — trigger autocomplete
+        local _was_tilde=false
+        [[ "$_rp_input" == "~"* ]] && _was_tilde=true
         _rp_get_matches
         if (( ${#_rp_matches[@]} == 1 )); then
           _rp_input="${_rp_matches[0]}"
+          # Preserve user's path style: only shorten to ~ if they typed ~
+          if [[ "$_was_tilde" == true && "$_rp_input" == "$HOME"* ]]; then
+            _rp_input="~${_rp_input#$HOME}"
+          fi
           _rp_matches=()
           _rp_sel=-1
           _rp_clear_below
@@ -253,6 +258,10 @@ _read_path() {
           [[ "$_exp_input" == "~"* ]] && _exp_input="${HOME}${_exp_input:1}"
           if [[ -n "$_cp" && "$_cp" != "$_exp_input" ]]; then
             _rp_input="$_cp"
+            # Preserve tilde style
+            if [[ "$_was_tilde" == true && "$_rp_input" == "$HOME"* ]]; then
+              _rp_input="~${_rp_input#$HOME}"
+            fi
             _rp_sel=-1
             _rp_get_matches
           else
@@ -284,12 +293,16 @@ _read_path() {
         ;;
       ''|$'\n')  # Enter — accept
         if (( _rp_sel >= 0 && _rp_sel < ${#_rp_matches[@]} )); then
-          _rp_input="${_rp_matches[$_rp_sel]}"
+          local _sel_path="${_rp_matches[$_rp_sel]}"
+          # Preserve tilde style from what user typed
+          if [[ "$_rp_input" == "~"* && "$_sel_path" == "$HOME"* ]]; then
+            _rp_input="~${_sel_path#$HOME}"
+          else
+            _rp_input="$_sel_path"
+          fi
         fi
         _rp_clear_below
-        local _final="$_rp_input"
-        [[ "$_final" == "$HOME"* ]] && _final="~${_final#$HOME}"
-        printf '\r\033[K%s%s\n' "$_rp_prompt" "$_final"
+        printf '\r\033[K%s%s\n' "$_rp_prompt" "$_rp_input"
         REPLY="$_rp_input"
         [[ "$REPLY" == "~"* ]] && REPLY="${HOME}${REPLY:1}"
         return 0
