@@ -5,6 +5,7 @@ progress_bar() {
   local current=$1
   local total=$2
   local label="${3:-}"
+  local state="${4:-}"
   local bar_width=$(( TERM_COLS - 16 ))
   (( bar_width > 50 )) && bar_width=50
   (( bar_width < 10 )) && bar_width=10
@@ -22,9 +23,13 @@ progress_bar() {
   local _ei=0
   while (( _ei < empty )); do bar_empty="${bar_empty} "; _ei=$((_ei+1)); done
 
-  # Mustard fill, dark gray track
+  # Mustard fill, dark gray track — red on error
   local _bg_fill='\033[48;5;178m'
   local _bg_empty='\033[48;5;236m'
+  if [[ "$state" == "error" ]]; then
+    _bg_fill='\033[48;5;160m'
+    _bg_empty='\033[48;5;52m'
+  fi
 
   local counter="${current}/${total}"
 

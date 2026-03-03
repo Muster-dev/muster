@@ -1140,6 +1140,9 @@ _group_cmd_deploy() {
         break
       else
         echo ""
+        progress_bar "$i" "$total" "${_pname}" "error"
+        echo ""
+        echo ""
         menu_select "Deploy failed on ${_pname}" \
           "Retry" "Skip and continue" "Abort"
 
