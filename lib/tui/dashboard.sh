@@ -257,6 +257,7 @@ _dashboard_home() {
   set +u
   source "$MUSTER_ROOT/lib/core/registry.sh"
   source "$MUSTER_ROOT/lib/core/groups.sh"
+  source "$MUSTER_ROOT/lib/commands/group.sh"
 
   # Kick off background update check (non-blocking)
   update_check_start
@@ -478,7 +479,6 @@ _dashboard_home() {
         ;;
       Fleet:\ *)
         # Fleet selection — open group detail menu
-        source "$MUSTER_ROOT/lib/commands/group.sh"
         local _selected_fleet="${MENU_RESULT#Fleet: }"
         local _gsi=0
         while (( _gsi < ${#_group_keys[@]} )); do
