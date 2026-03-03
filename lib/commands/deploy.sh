@@ -130,6 +130,26 @@ cmd_deploy() {
   local log_dir="${project_dir}/.muster/logs"
   mkdir -p "$log_dir"
 
+  # Block local deploys while a fleet deploy is in progress (remote pushing to us)
+  if [[ -z "${MUSTER_DEPLOY_SOURCE:-}" && -f "${project_dir}/.muster/.fleet_deploying" ]]; then
+    local _fleet_src
+    _fleet_src=$(cat "${project_dir}/.muster/.fleet_deploying" 2>/dev/null)
+    err "Deploy blocked — fleet deploy in progress from ${_fleet_src:-remote}"
+    printf '  %bWait for the fleet deploy to finish, or remove %s%b\n' \
+      "${DIM}" "${project_dir}/.muster/.fleet_deploying" "${RESET}"
+    _unload_env_file
+    return 1
+  fi
+
+  # Block local deploys while a group deploy is running from this machine
+  if [[ -z "${MUSTER_DEPLOY_SOURCE:-}" && -f "$HOME/.muster/.group_deploying" ]]; then
+    local _group_src
+    _group_src=$(cat "$HOME/.muster/.group_deploying" 2>/dev/null)
+    err "Deploy blocked — group deploy in progress: ${_group_src:-unknown}"
+    _unload_env_file
+    return 1
+  fi
+
   # Acquire deploy lock (skip for dry runs)
   if [[ "$dry_run" == "false" ]]; then
     if [[ "$_force" == "true" ]]; then

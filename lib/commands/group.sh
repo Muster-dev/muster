@@ -981,9 +981,19 @@ _group_cmd_deploy() {
   local log_dir="$HOME/.muster/logs"
   mkdir -p "$log_dir"
 
+  # Acquire group deploy lock
+  local _group_lock="$HOME/.muster/.group_deploying"
+  if [[ -f "$_group_lock" ]]; then
+    local _lock_group
+    _lock_group=$(cat "$_group_lock" 2>/dev/null)
+    err "Group deploy already in progress: ${_lock_group:-unknown}"
+    return 1
+  fi
+  printf '%s' "$group_name" > "$_group_lock"
+
   # Catch Ctrl+C so we don't falsely report success
   local _group_interrupted=false
-  trap '_group_interrupted=true' INT
+  trap '_group_interrupted=true; rm -f "'"$_group_lock"'"' INT
 
   echo ""
   printf '  %b%bGroup Deploy%b — %s (%d project%s)\n' \
@@ -1541,7 +1551,7 @@ _group_cmd_deploy() {
             _tp_i=$(( _tp_i + 1 ))
           done
 
-          sleep 1
+          sleep 0.2
         done
 
         wait "$_remote_pid" 2>/dev/null
@@ -1604,6 +1614,7 @@ _group_cmd_deploy() {
         echo ""
         _group_deploy_summary "$succeeded" "$skipped" "$failed" "$total"
         trap - INT
+        rm -f "$_group_lock"
         return 130
       fi
 
@@ -1663,6 +1674,7 @@ _group_cmd_deploy() {
             echo ""
             _group_deploy_summary "$succeeded" "$skipped" "$failed" "$total"
             trap - INT
+            rm -f "$_group_lock"
             return 1
             ;;
         esac
@@ -1673,6 +1685,7 @@ _group_cmd_deploy() {
   done
 
   trap - INT
+  rm -f "$_group_lock"
   echo ""
   _group_deploy_summary "$succeeded" "$skipped" "$failed" "$total"
 }

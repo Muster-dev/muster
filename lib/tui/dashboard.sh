@@ -612,8 +612,75 @@ cmd_dashboard() {
       echo ""
     fi
 
-    # Fleet membership info
-    if [[ -n "$_fleet_display" ]]; then
+    # Fleet info with remote machine status
+    if [[ -n "$_fleet_key" ]] && has_cmd jq; then
+      printf '  %b○%b %bFleet:%b %s\n' "${ACCENT}" "${RESET}" "${DIM}" "${RESET}" "$_fleet_display"
+
+      # Show remote machines with status
+      local _fleet_total _fi=0
+      _fleet_total=$(groups_project_count "$_fleet_key")
+      local _status_dir="$HOME/.muster/.fleet_status"
+      mkdir -p "$_status_dir" 2>/dev/null
+
+      while (( _fi < _fleet_total )); do
+        local _ftype
+        _ftype=$(jq -r --arg g "$_fleet_key" --argjson i "$_fi" \
+          '.groups[$g].projects[$i].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+
+        if [[ "$_ftype" == "remote" ]]; then
+          local _fhost _fuser _fport _fcloud
+          _fhost=$(jq -r --arg g "$_fleet_key" --argjson i "$_fi" \
+            '.groups[$g].projects[$i].host' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+          _fuser=$(jq -r --arg g "$_fleet_key" --argjson i "$_fi" \
+            '.groups[$g].projects[$i].user' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+          _fport=$(jq -r --arg g "$_fleet_key" --argjson i "$_fi" \
+            '.groups[$g].projects[$i].port // 22' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+          _fcloud=$(jq -r --arg g "$_fleet_key" --argjson i "$_fi" \
+            '.groups[$g].projects[$i].cloud // false' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+
+          local _cache_key="${_fuser}_${_fhost}_${_fport}"
+          local _cache_file="${_status_dir}/${_cache_key}"
+          local _machine_status="unknown"
+
+          # Read cached status
+          if [[ -f "$_cache_file" ]]; then
+            _machine_status=$(cat "$_cache_file" 2>/dev/null)
+          fi
+
+          # Kick off background check (non-blocking, refreshes cache)
+          if [[ "$_fcloud" != "true" ]]; then
+            ( ssh -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+                -p "$_fport" "${_fuser}@${_fhost}" "echo online" >"$_cache_file" 2>/dev/null \
+              || printf 'offline' >"$_cache_file" ) &
+          fi
+
+          local _status_icon _status_color
+          case "$_machine_status" in
+            online)  _status_icon="●"; _status_color="$GREEN" ;;
+            offline) _status_icon="●"; _status_color="$RED" ;;
+            *)       _status_icon="○"; _status_color="$GRAY" ;;
+          esac
+
+          local _machine_label="${_fuser}@${_fhost}"
+          [[ "$_fport" != "22" ]] && _machine_label="${_machine_label}:${_fport}"
+
+          printf '    %b%s%b %s %b%s%b\n' \
+            "$_status_color" "$_status_icon" "${RESET}" \
+            "$_machine_label" "${DIM}" "$_machine_status" "${RESET}"
+        fi
+
+        _fi=$(( _fi + 1 ))
+      done
+
+      # Show group deploy lock status on host
+      if [[ -f "$HOME/.muster/.group_deploying" ]]; then
+        local _gd_name
+        _gd_name=$(cat "$HOME/.muster/.group_deploying" 2>/dev/null)
+        printf '    %b⟳ deploying %s%b\n' "${YELLOW}" "${_gd_name:-...}" "${RESET}"
+      fi
+
+      echo ""
+    elif [[ -n "$_fleet_display" ]]; then
       printf '  %b○%b %bFleet:%b %s\n' "${ACCENT}" "${RESET}" "${DIM}" "${RESET}" "$_fleet_display"
       echo ""
     fi
@@ -625,6 +692,16 @@ cmd_dashboard() {
     local services
     services=$(config_services)
 
+    # Check for active fleet deploy
+    local _fleet_deploying_now=false _fleet_deploy_src=""
+    if [[ -f "${project_dir}/.muster/.fleet_deploying" ]]; then
+      _fleet_deploying_now=true
+      _fleet_deploy_src=$(cat "${project_dir}/.muster/.fleet_deploying" 2>/dev/null)
+    fi
+
+    if [[ "$_fleet_deploying_now" == "true" ]]; then
+      actions[${#actions[@]}]="Cancel fleet deploy"
+    fi
     actions[${#actions[@]}]="Deploy"
 
     local has_rollback=false has_logs=false
@@ -790,6 +867,17 @@ cmd_dashboard() {
     case "$MENU_RESULT" in
       "__timeout__")
         continue
+        ;;
+      "Cancel fleet deploy")
+        local _cancel_file="${project_dir}/.muster/.fleet_deploying"
+        if [[ -f "$_cancel_file" ]]; then
+          rm -f "$_cancel_file"
+          ok "Fleet deploy cancelled"
+          printf '  %bThe remote deployer will see the deploy as failed.%b\n' "${DIM}" "${RESET}"
+        else
+          info "No fleet deploy in progress"
+        fi
+        _dashboard_pause
         ;;
       Deploy)
         source "$MUSTER_ROOT/lib/commands/deploy.sh"
