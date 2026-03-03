@@ -14,8 +14,14 @@ _history_log_event() {
   mkdir -p "$log_dir"
   local ts
   ts=$(date '+%Y-%m-%d %H:%M:%S')
-  printf '{"ts":"%s","service":"%s","action":"%s","status":"%s","commit":"%s"}\n' \
-    "$ts" "$svc" "$action" "$status" "$commit" >> "${log_dir}/deploy-events.log"
+  local source="${MUSTER_DEPLOY_SOURCE:-}"
+  if [[ -n "$source" ]]; then
+    printf '{"ts":"%s","service":"%s","action":"%s","status":"%s","commit":"%s","source":"%s"}\n' \
+      "$ts" "$svc" "$action" "$status" "$commit" "$source" >> "${log_dir}/deploy-events.log"
+  else
+    printf '{"ts":"%s","service":"%s","action":"%s","status":"%s","commit":"%s"}\n' \
+      "$ts" "$svc" "$action" "$status" "$commit" >> "${log_dir}/deploy-events.log"
+  fi
 }
 
 # ── History display ──
@@ -84,6 +90,7 @@ cmd_history() {
   local actions=()
   local statuses=()
   local commits=()
+  local sources=()
 
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -92,16 +99,18 @@ cmd_history() {
 
     local commit=""
 
+    local source=""
+
     if [[ "$line" == "{"* ]]; then
       # NDJSON format
       local _parsed
-      _parsed=$(printf '%s' "$line" | jq -r '[.ts,.service,.action,.status,.commit] | join("|")' 2>/dev/null) || continue
+      _parsed=$(printf '%s' "$line" | jq -r '[.ts,.service,.action,.status,.commit,.source // ""] | join("|")' 2>/dev/null) || continue
       [[ -z "$_parsed" ]] && continue
       ts="${_parsed%%|*}"; local _r="${_parsed#*|}"
       svc="${_r%%|*}"; _r="${_r#*|}"
       action="${_r%%|*}"; _r="${_r#*|}"
-      status="${_r%%|*}"
-      commit="${_r#*|}"
+      status="${_r%%|*}"; _r="${_r#*|}"
+      commit="${_r%%|*}"; source="${_r#*|}"
     elif [[ "$line" == *"|"* ]]; then
       # Legacy pipe-delimited: YYYY-MM-DD HH:MM:SS|service|action|status[|commit]
       ts="${line%%|*}"
@@ -142,6 +151,7 @@ cmd_history() {
     actions[${#actions[@]}]="$action"
     statuses[${#statuses[@]}]="$status"
     commits[${#commits[@]}]="$commit"
+    sources[${#sources[@]}]="$source"
   done < "$log_file"
 
   local count=${#timestamps[@]}
@@ -216,7 +226,12 @@ cmd_history() {
       color="$RED"
     fi
 
-    printf "  %-20s  %-12s  %-10s  ${color}%-8s${RESET}  ${DIM}%-9s${RESET}\n" "$ts" "$svc" "$action" "$st" "$cm"
+    local src="${sources[$i]:-}"
+    if [[ -n "$src" ]]; then
+      printf "  %-20s  %-12s  %-10s  ${color}%-8s${RESET}  ${DIM}%-9s${RESET}  ${DIM}via %s${RESET}\n" "$ts" "$svc" "$action" "$st" "$cm" "$src"
+    else
+      printf "  %-20s  %-12s  %-10s  ${color}%-8s${RESET}  ${DIM}%-9s${RESET}\n" "$ts" "$svc" "$action" "$st" "$cm"
+    fi
   done
 
   echo ""

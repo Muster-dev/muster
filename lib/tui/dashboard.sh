@@ -133,8 +133,19 @@ _dashboard_header() {
     fi
   done <<< "$services"
 
+  # Check if a fleet deploy is in progress
+  local _fleet_deploying="" _fleet_deploy_source=""
+  if [[ -f "${project_dir}/.muster/.fleet_deploying" ]]; then
+    _fleet_deploying="true"
+    _fleet_deploy_source=$(cat "${project_dir}/.muster/.fleet_deploying" 2>/dev/null)
+  fi
+
   # Section header
-  printf '  %b%bServices%b\n' "${BOLD}" "${WHITE}" "${RESET}"
+  printf '  %b%bServices%b' "${BOLD}" "${WHITE}" "${RESET}"
+  if [[ "$_fleet_deploying" == "true" ]]; then
+    printf '  %b⟳ deploying via %s%b' "${YELLOW}" "${_fleet_deploy_source:-remote}" "${RESET}"
+  fi
+  printf '\n'
 
   # Render each service from cached health status
   local _idx=0
@@ -143,7 +154,10 @@ _dashboard_header() {
 
     # Read from persistent cache
     local status_icon status_color status_label
-    if [[ -f "${_HEALTH_CACHE_DIR}/${svc}" ]]; then
+    if [[ "$_fleet_deploying" == "true" ]]; then
+      # Fleet deploy in progress — show deploying status
+      status_icon="◆"; status_color="$YELLOW"; status_label="deploying"
+    elif [[ -f "${_HEALTH_CACHE_DIR}/${svc}" ]]; then
       local _result
       _result=$(cat "${_HEALTH_CACHE_DIR}/${svc}")
       case "$_result" in

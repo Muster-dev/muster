@@ -1501,7 +1501,21 @@ _group_cmd_deploy() {
         printf '\033[J'
         _section_h=$(( 1 + ${#_result_lines[@]} ))
 
-        if (( rc != 0 )); then
+        if (( rc == 0 )); then
+          # Show remote deploy details (services deployed)
+          if [[ -s "$log_file" ]]; then
+            local _detail_count=0
+            while IFS= read -r _dline; do
+              _dline=$(printf '%s' "$_dline" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r')
+              [[ -z "$_dline" ]] && continue
+              # Skip empty or noise lines
+              [[ "$_dline" == "ok" ]] && continue
+              printf '    %b%s%b\n' "${DIM}" "$_dline" "${RESET}"
+              _section_h=$(( _section_h + 1 ))
+              _detail_count=$(( _detail_count + 1 ))
+            done < <(tail -8 "$log_file")
+          fi
+        else
           echo ""
           _section_h=$(( _section_h + 1 ))
           if [[ -s "$log_file" ]]; then
@@ -1605,8 +1619,23 @@ _group_deploy_remote() {
     _groups_load_ssh_password
   fi
 
-  # Use full path or ensure ~/.local/bin is in PATH (non-interactive SSH skips .bashrc)
-  local cmd='export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"; muster deploy --quiet'
+  # Build remote deploy command:
+  # 1. Fix PATH for non-interactive SSH (muster installs to ~/.local/bin)
+  # 2. Write .fleet_deploying so remote dashboard shows "deploying" status
+  # 3. Export source info so remote history tracks who triggered the deploy
+  # 4. Clean up .fleet_deploying on exit (even on failure)
+  local _source_host
+  _source_host=$(hostname 2>/dev/null || echo "unknown")
+  local _source_label="${USER:-unknown}@${_source_host}"
+  local cmd
+  cmd="$(cat <<'REMOTECMD'
+export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
+REMOTECMD
+  )"
+  cmd="${cmd}; export MUSTER_DEPLOY_SOURCE='${_source_label}'"
+  cmd="${cmd}; mkdir -p .muster; printf '%s\n' '${_source_label}' > .muster/.fleet_deploying"
+  cmd="${cmd}; _rc=0; muster deploy --quiet || _rc=\$?"
+  cmd="${cmd}; rm -f .muster/.fleet_deploying; exit \$_rc"
 
   if [[ "$_GP_CLOUD" == "true" ]]; then
     # Cloud transport — pass cwd natively (agent handles directory change)
