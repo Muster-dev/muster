@@ -375,10 +375,32 @@ _setup_deploy_target_intro() {
       echo ""
       printf '%b\n' "  ${YELLOW}!${RESET} ${BOLD}muster-agent not installed${RESET}"
       echo ""
-      printf '%b\n' "  ${DIM}Cloud transport requires the muster-agent daemon. Install it:${RESET}"
-      printf '%b\n' "    ${WHITE}curl -fsSL https://getmuster.dev/cloud | bash -s -- --agent${RESET}"
+      printf '%b\n' "  ${DIM}Cloud transport requires the muster-agent daemon.${RESET}"
       echo ""
-      printf '%b\n' "  ${DIM}You can set up the agent later. Continuing to project setup...${RESET}"
+
+      menu_select "Install muster-agent now?" \
+        "Yes — install muster-agent" \
+        "Later — I'll install it myself"
+
+      if [[ "$MENU_RESULT" == *"Yes"* ]]; then
+        echo ""
+        printf '%b\n' "  ${DIM}Installing muster-agent...${RESET}"
+        echo ""
+        if command -v curl >/dev/null 2>&1; then
+          bash <(curl -fsSL https://raw.githubusercontent.com/Muster-dev/muster-fleet-cloud/main/install.sh) --agent </dev/tty
+        elif command -v wget >/dev/null 2>&1; then
+          bash <(wget -qO- https://raw.githubusercontent.com/Muster-dev/muster-fleet-cloud/main/install.sh) --agent </dev/tty
+        else
+          printf '%b\n' "  ${RED}x${RESET} curl or wget required to install muster-agent"
+          printf '%b\n' "  ${DIM}Install manually:${RESET}"
+          printf '%b\n' "    ${WHITE}curl -fsSL https://getmuster.dev/cloud | bash -s -- --agent${RESET}"
+        fi
+        echo ""
+      else
+        echo ""
+        printf '%b\n' "  ${DIM}Install later with:${RESET}"
+        printf '%b\n' "    ${WHITE}curl -fsSL https://getmuster.dev/cloud | bash -s -- --agent${RESET}"
+      fi
     else
       # Agent installed — run the join flow
       _setup_remote_agent
