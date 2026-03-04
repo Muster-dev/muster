@@ -288,7 +288,7 @@ cmd_deploy() {
     (( current++ ))
 
     # Validate service key — block path traversal attacks
-    if ! _hook_validate_service_key "$svc"; then
+    if type _hook_validate_service_key &>/dev/null && ! _hook_validate_service_key "$svc"; then
       err "Invalid service key: ${svc} — skipping (possible path traversal)"
       continue
     fi

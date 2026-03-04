@@ -153,7 +153,7 @@ _hook_validate_service_key() {
   esac
   # Only allow alphanumeric, hyphens, underscores (portable — no regex)
   local _stripped
-  _stripped=$(printf '%s' "$key" | tr -d 'a-zA-Z0-9_-')
+  _stripped=$(printf '%s' "$key" | LC_ALL=C tr -d 'a-zA-Z0-9_\-')
   if [[ -n "$_stripped" ]]; then
     return 1
   fi

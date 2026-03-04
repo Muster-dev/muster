@@ -319,7 +319,7 @@ for k in data.get('services', {}):
     esac
     # Only allow alphanumeric, hyphens, underscores (portable — no regex)
     local _stripped
-    _stripped=$(printf '%s' "$_key" | tr -d 'a-zA-Z0-9_-')
+    _stripped=$(printf '%s' "$_key" | LC_ALL=C tr -d 'a-zA-Z0-9_\-')
     [[ -n "$_stripped" ]] && continue
     printf '%s\n' "$_key"
   done <<< "$_raw_keys"

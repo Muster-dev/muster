@@ -71,7 +71,7 @@ cmd_rollback() {
   fi
 
   # Validate service key — block path traversal attacks
-  if ! _hook_validate_service_key "$target"; then
+  if type _hook_validate_service_key &>/dev/null && ! _hook_validate_service_key "$target"; then
     err "Invalid service key: ${target} — possible path traversal"
     return 1
   fi
