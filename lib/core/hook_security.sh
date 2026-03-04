@@ -115,6 +115,9 @@ _hook_validate_path() {
   local hook_path="$1" project_dir="$2"
   local expected_base="${project_dir}/.muster/hooks"
 
+  # If hooks directory doesn't exist yet (fresh setup), allow
+  [[ ! -d "$expected_base" ]] && return 0
+
   # Resolve to absolute path (macOS bash 3.2 compatible — no readlink -f)
   local resolved="$hook_path"
 
@@ -144,12 +147,14 @@ _hook_validate_service_key() {
     return 1
   fi
   case "$key" in
-    *..*)   return 1 ;;  # Path traversal
-    /*)     return 1 ;;  # Absolute path
-    *$'\0'*) return 1 ;; # Null byte injection
+    *..*)    return 1 ;;  # Path traversal
+    /*)      return 1 ;;  # Absolute path
+    *$'\0'*) return 1 ;;  # Null byte injection
   esac
-  # Only allow alphanumeric, hyphens, underscores
-  if [[ "$key" =~ [^a-zA-Z0-9_-] ]]; then
+  # Only allow alphanumeric, hyphens, underscores (portable — no regex)
+  local _stripped
+  _stripped=$(printf '%s' "$key" | tr -d 'a-zA-Z0-9_-')
+  if [[ -n "$_stripped" ]]; then
     return 1
   fi
   return 0
@@ -538,12 +543,14 @@ _env_integrity_check() {
   local manifest_file="${project_dir}/.muster/hooks.manifest"
 
   [[ ! -f "$manifest_file" ]] && return 2
-  [[ ! -f "${project_dir}/.env" ]] && return 0
   has_cmd jq || return 0
 
   local expected_sha
   expected_sha=$(jq -r '.["_config/.env"].sha256 // empty' "$manifest_file" 2>/dev/null)
   [[ -z "$expected_sha" ]] && return 2
+
+  # .env was tracked but now deleted
+  [[ ! -f "${project_dir}/.env" ]] && return 1
 
   local actual_sha
   actual_sha=$(shasum -a 256 "${project_dir}/.env" 2>/dev/null | cut -d' ' -f1)

@@ -7,6 +7,7 @@ source "$MUSTER_ROOT/lib/core/credentials.sh"
 source "$MUSTER_ROOT/lib/core/remote.sh"
 source "$MUSTER_ROOT/lib/core/k8s_diag.sh"
 source "$MUSTER_ROOT/lib/core/just_runner.sh"
+source "$MUSTER_ROOT/lib/core/hook_security.sh"
 source "$MUSTER_ROOT/lib/skills/manager.sh"
 source "$MUSTER_ROOT/lib/commands/history.sh"
 
@@ -70,7 +71,7 @@ cmd_rollback() {
   fi
 
   # Validate service key — block path traversal attacks
-  if type _hook_validate_service_key &>/dev/null && ! _hook_validate_service_key "$target"; then
+  if ! _hook_validate_service_key "$target"; then
     err "Invalid service key: ${target} — possible path traversal"
     return 1
   fi
@@ -117,7 +118,6 @@ cmd_rollback() {
   fi
 
   # Security gate
-  source "$MUSTER_ROOT/lib/core/hook_security.sh"
   local _rb_check_path="$hook"
   [[ "$_use_just" == "true" ]] && _rb_check_path="${_rb_hook_dir}/justfile"
   if ! _hook_security_check "$_rb_check_path" "$project_dir"; then

@@ -677,6 +677,15 @@ ${_k8s_env_lines}"
         local _deploy_start_time
         _deploy_start_time=$(date +%s)
 
+        # Security gate: verify hook integrity + scan for dangerous commands
+        local _hook_check_path="$hook"
+        [[ "$_use_just" == "true" ]] && _hook_check_path="${_hook_dir}/justfile"
+        if ! _hook_security_check "$_hook_check_path" "$project_dir"; then
+          warn "Skipping ${name} — hook blocked by security check"
+          break
+        fi
+
+        local rc=0
         if remote_is_enabled "$svc"; then
           # ── Remote deploy via SSH ──
           info "Deploying ${name} remotely ($(remote_desc "$svc"))"
@@ -699,19 +708,13 @@ ${_k8s_env_lines}"
             done <<< "$_cred_env_lines"
           fi
 
-          # Security gate: verify hook integrity + scan for dangerous commands
-          local _hook_check_path="$hook"
-          [[ "$_use_just" == "true" ]] && _hook_check_path="${_hook_dir}/justfile"
-          if ! _hook_security_check "$_hook_check_path" "$project_dir"; then
-            warn "Skipping ${name} — hook blocked by security check"
-            rc=1
-          elif [[ "$_use_just" == "true" ]]; then
+          if [[ "$_use_just" == "true" ]]; then
             _deploy_run_hook "$name" "$log_file" _run_with_timeout "$_hook_timeout" just --justfile "${_hook_dir}/justfile" deploy
           else
             _deploy_run_hook "$name" "$log_file" _run_with_timeout "$_hook_timeout" "$hook"
           fi
         fi
-        local rc=$?
+        rc=$?
         unset _SIB_REDRAW_FN
 
         if (( rc == 0 )); then
