@@ -871,7 +871,7 @@ cmd_dashboard() {
       "Cancel fleet deploy")
         local _cancel_file="${project_dir}/.muster/.fleet_deploying"
         if [[ -f "$_cancel_file" ]]; then
-          # Kill the running deploy process via deploy lock PID
+          # Kill the running deploy process tree via deploy lock PID
           local _lock_file="${project_dir}/.muster/deploy.lock"
           if [[ -f "$_lock_file" ]]; then
             local _deploy_pid=""
@@ -881,13 +881,26 @@ cmd_dashboard() {
               _deploy_pid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('pid',''))" "$_lock_file" 2>/dev/null)
             fi
             if [[ -n "$_deploy_pid" ]] && kill -0 "$_deploy_pid" 2>/dev/null; then
-              kill -TERM "$_deploy_pid" 2>/dev/null
-              # Wait briefly for cleanup
+              # Kill entire process tree recursively
+              _cancel_kill_tree() {
+                local _pid="$1"
+                local _child
+                for _child in $(pgrep -P "$_pid" 2>/dev/null); do
+                  _cancel_kill_tree "$_child"
+                done
+                kill -TERM "$_pid" 2>/dev/null
+              }
+              _cancel_kill_tree "$_deploy_pid"
+              # Wait briefly, then force kill
               local _kw=0
-              while (( _kw < 10 )) && kill -0 "$_deploy_pid" 2>/dev/null; do
+              while (( _kw < 15 )) && kill -0 "$_deploy_pid" 2>/dev/null; do
                 sleep 0.2
                 _kw=$(( _kw + 1 ))
               done
+              if kill -0 "$_deploy_pid" 2>/dev/null; then
+                kill -KILL -"$_deploy_pid" 2>/dev/null
+                kill -KILL "$_deploy_pid" 2>/dev/null
+              fi
             fi
           fi
           rm -f "$_cancel_file"
