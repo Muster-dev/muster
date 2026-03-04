@@ -590,9 +590,11 @@ cmd_dashboard() {
   fi
 
   # Save dashboard PID so fleet deploys can signal us to refresh
-  printf '%s\n' "$$" > "${project_dir}/.muster/.dashboard_pid"
+  local _dash_proj_dir
+  _dash_proj_dir="$(dirname "$CONFIG_FILE")"
+  printf '%s\n' "$$" > "${_dash_proj_dir}/.muster/.dashboard_pid"
   # Clean up PID file on exit
-  trap 'rm -f "'"${project_dir}"'/.muster/.dashboard_pid"; cleanup_term' EXIT
+  trap 'rm -f "'"${_dash_proj_dir}"'/.muster/.dashboard_pid"; cleanup_term' EXIT
   # Trap USR1 — interrupts read -t on Linux, triggering immediate refresh
   trap 'true' USR1
 
@@ -897,10 +899,11 @@ cmd_dashboard() {
               _deploy_pid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('pid',''))" "$_lock_file" 2>/dev/null)
             fi
             if [[ -n "$_deploy_pid" ]] && kill -0 "$_deploy_pid" 2>/dev/null; then
+              # Kill deploy process and its direct children only.
+              # Do NOT use pkill -f — it matches the SSH wrapper's command
+              # line too, preventing it from exiting cleanly with code 130.
               kill -KILL "$_deploy_pid" 2>/dev/null
               pkill -KILL -P "$_deploy_pid" 2>/dev/null
-              pkill -KILL -f "muster deploy" 2>/dev/null
-              pkill -KILL -f "docker build" 2>/dev/null
             fi
             rm -f "$_lock_file"
           fi
