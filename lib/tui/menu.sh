@@ -75,8 +75,8 @@ menu_select_desc() {
   (( _menu_w > 50 )) && _menu_w=50
   (( _menu_w < 20 )) && _menu_w=20
 
-  # Total lines = options + blank + desc (2 lines for desc box)
-  local _total_lines=$(( count + 3 ))
+  # Track actual drawn lines (updated after each draw)
+  local _last_drawn_lines=0
 
   muster_tui_enter
   tput civis
@@ -105,12 +105,20 @@ menu_select_desc() {
     done
     # Description box
     echo ""
+    # Calculate how many terminal lines the description wraps to
+    local _desc_visible_len=$(( 2 + ${#descs[$selected]} ))
+    local _tw=${TERM_COLS:-80}
+    (( _tw < 1 )) && _tw=80
+    local _desc_wrap=$(( (_desc_visible_len + _tw - 1) / _tw ))
+    (( _desc_wrap < 1 )) && _desc_wrap=1
     printf '  %b%s%b\n' "${DIM}" "${descs[$selected]}" "${RESET}"
     echo ""
+    # options + blank + desc wrapped lines + trailing blank
+    _last_drawn_lines=$(( count + 1 + _desc_wrap + 1 ))
   }
 
   _msd_clear() {
-    (( _total_lines > 0 )) && printf '\033[%dA' "$_total_lines"
+    (( _last_drawn_lines > 0 )) && printf '\033[%dA' "$_last_drawn_lines"
     printf '\033[J'
   }
 
