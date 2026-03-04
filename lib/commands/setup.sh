@@ -1182,10 +1182,13 @@ cmd_setup() {
   printf '%b\n' "  ${DIM}What environment is this?${RESET}"
   echo ""
 
-  menu_select "Environment" \
-    "Production        — Health checks, monitoring, longer timeouts" \
-    "Staging           — Pre-production, mirrors prod" \
-    "Development       — Local dev, lighter defaults"
+  menu_select_desc "Environment" \
+    "Production" \
+    "Live environment serving real users. Enables thorough health checks (30s timeout), session-based credentials for secrets, and deploy notifications." \
+    "Staging" \
+    "Pre-production environment that mirrors prod. Moderate health checks (15s timeout) and session credentials. Good for testing before going live." \
+    "Development" \
+    "Local development machine. Lightweight defaults — fast health checks (5s), no credentials, dev stack. Optimized for quick iteration."
 
   case "$MENU_RESULT" in
     *Production*)

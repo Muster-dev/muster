@@ -69,9 +69,11 @@ cmd_fleet_setup() {
   printf '%b\n' "  ${DIM}Let's set up deployment to multiple machines.${RESET}"
   echo ""
 
-  menu_select "What are you setting up?" \
-    "One project -> multiple machines    — Scale horizontally" \
-    "Multiple projects -> coordinated    — Deploy several apps together"
+  menu_select_desc "What are you setting up?" \
+    "One project -> multiple machines" \
+    "Deploy the same project to multiple servers. Example: 3 API servers behind a load balancer, or staging + production." \
+    "Multiple projects -> coordinated" \
+    "Deploy several different apps together in the right order. Example: API + frontend + worker that depend on each other."
 
   local _fleet_mode="single"
   case "$MENU_RESULT" in
@@ -198,9 +200,11 @@ cmd_fleet_setup() {
     printf '%b\n' "  ${DIM}How should deploys work on ${BOLD}${_mname}${RESET}${DIM}?${RESET}"
     echo ""
 
-    menu_select "Hook management" \
-      "Set up from here  — Muster creates deploy scripts, syncs them" \
-      "Already set up    — Remote has its own muster setup"
+    menu_select_desc "Hook management" \
+      "Set up from here" \
+      "Muster creates deploy scripts locally and syncs them to the remote before each deploy. You edit hooks on your machine, muster pushes them automatically." \
+      "Already set up" \
+      "The remote machine has its own muster installation with hooks configured. You manage hooks directly on the remote by running 'muster setup' there."
 
     case "$MENU_RESULT" in
       *"Set up from here"*)
@@ -449,10 +453,13 @@ cmd_fleet_setup() {
   printf '%b\n' "  ${DIM}How should fleet deploys run across machines?${RESET}"
   echo ""
 
-  menu_select "Strategy" \
-    "Sequential    — One machine at a time (safest)" \
-    "Parallel      — All machines at once (fastest)" \
-    "Rolling       — Deploy to one, verify health, then continue"
+  menu_select_desc "Strategy" \
+    "Sequential" \
+    "Deploy to one machine at a time. If something fails, you can retry or abort before it affects other machines. Best for critical production deployments." \
+    "Parallel" \
+    "Deploy to all machines at once. Fastest option, but if something goes wrong it affects everything simultaneously. Good for staging or non-critical services." \
+    "Rolling" \
+    "Deploy to one machine, verify it's healthy, then move to the next. Combines safety with speed — unhealthy deploys are caught before they spread."
 
   local _strategy="sequential"
   case "$MENU_RESULT" in
