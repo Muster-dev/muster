@@ -1561,6 +1561,10 @@ _group_cmd_deploy() {
         if (( rc == 0 )); then
           _steps_done=$(( _steps_done + 1 ))
           _result_lines[${#_result_lines[@]}]="$(printf '  %b✓%b %s  %b%s%b' "${GREEN}" "${RESET}" "$_pname" "${DIM}" "$_pdesc" "${RESET}")"
+        elif (( rc == 130 )); then
+          # Exit 130 = cancelled from remote dashboard
+          _result_lines[${#_result_lines[@]}]="$(printf '  %b-%b %s  %bcancelled%b' "${YELLOW}" "${RESET}" "$_pname" "${DIM}" "${RESET}")"
+          _bar_state="error"
         else
           _result_lines[${#_result_lines[@]}]="$(printf '  %b✗%b %s  %b%s%b' "${RED}" "${RESET}" "$_pname" "${DIM}" "$_pdesc" "${RESET}")"
           _bar_state="error"
@@ -1592,6 +1596,9 @@ _group_cmd_deploy() {
               _detail_count=$(( _detail_count + 1 ))
             done < <(tail -8 "$log_file")
           fi
+        elif (( rc == 130 )); then
+          # Cancelled — no error log needed
+          :
         else
           echo ""
           _section_h=$(( _section_h + 1 ))
@@ -1620,6 +1627,12 @@ _group_cmd_deploy() {
 
       if (( rc == 0 )); then
         succeeded=$(( succeeded + 1 ))
+        break
+      elif (( rc == 130 )); then
+        # Remote deploy was cancelled from dashboard
+        echo ""
+        warn "Deploy cancelled on ${_pname}"
+        skipped=$(( skipped + 1 ))
         break
       else
         # Bar already turned red in service/remote handler above
@@ -1756,11 +1769,11 @@ REMOTECMD
   cmd="${cmd}     pkill -KILL -f 'muster deploy' 2>/dev/null;"
   cmd="${cmd}     pkill -KILL -f 'docker build' 2>/dev/null;"
   cmd="${cmd}     wait \$_dpid 2>/dev/null;"
-  cmd="${cmd}     rm -f .muster/.fleet_deploying;"
+  cmd="${cmd}     rm -f .muster/.fleet_deploying .muster/deploy.lock;"
   cmd="${cmd}     exit 130;"
   cmd="${cmd}   fi; sleep 1;"
   cmd="${cmd} done"
-  cmd="${cmd}; wait \$_dpid; _rc=\$?"
+  cmd="${cmd}; wait \$_dpid 2>/dev/null; _rc=\$?"
   cmd="${cmd}; rm -f .muster/.fleet_deploying; exit \$_rc"
 
   if [[ "$_GP_CLOUD" == "true" ]]; then
