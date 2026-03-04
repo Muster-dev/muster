@@ -1744,7 +1744,23 @@ REMOTECMD
   )"
   cmd="${cmd}; export MUSTER_DEPLOY_SOURCE='${_source_label}'"
   cmd="${cmd}; mkdir -p .muster; printf '%s\n' '${_source_label}' > .muster/.fleet_deploying"
-  cmd="${cmd}; _rc=0; muster deploy --force || _rc=\$?"
+  # Run deploy in background with a cancel watcher.
+  # The watcher checks .fleet_deploying every second — when the remote
+  # dashboard removes it (cancel), the watcher kills all session processes
+  # and exits, which closes the SSH connection and stops the host.
+  cmd="${cmd}; muster deploy --force & _dpid=\$!"
+  cmd="${cmd}; while kill -0 \$_dpid 2>/dev/null; do"
+  cmd="${cmd}   if [ ! -f .muster/.fleet_deploying ]; then"
+  cmd="${cmd}     kill -KILL \$_dpid 2>/dev/null;"
+  cmd="${cmd}     pkill -KILL -P \$_dpid 2>/dev/null;"
+  cmd="${cmd}     pkill -KILL -f 'muster deploy' 2>/dev/null;"
+  cmd="${cmd}     pkill -KILL -f 'docker build' 2>/dev/null;"
+  cmd="${cmd}     wait \$_dpid 2>/dev/null;"
+  cmd="${cmd}     rm -f .muster/.fleet_deploying;"
+  cmd="${cmd}     exit 130;"
+  cmd="${cmd}   fi; sleep 1;"
+  cmd="${cmd} done"
+  cmd="${cmd}; wait \$_dpid; _rc=\$?"
   cmd="${cmd}; rm -f .muster/.fleet_deploying; exit \$_rc"
 
   if [[ "$_GP_CLOUD" == "true" ]]; then

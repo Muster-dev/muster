@@ -871,7 +871,12 @@ cmd_dashboard() {
       "Cancel fleet deploy")
         local _cancel_file="${project_dir}/.muster/.fleet_deploying"
         if [[ -f "$_cancel_file" ]]; then
-          # Kill the running deploy process via deploy lock PID
+          # Remove the fleet marker — the SSH command's cancel watcher
+          # detects this within 1 second and kills all deploy processes,
+          # closing the SSH connection and stopping the host controller
+          rm -f "$_cancel_file"
+
+          # Also try direct process kill for faster response
           local _lock_file="${project_dir}/.muster/deploy.lock"
           if [[ -f "$_lock_file" ]]; then
             local _deploy_pid=""
@@ -881,38 +886,14 @@ cmd_dashboard() {
               _deploy_pid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('pid',''))" "$_lock_file" 2>/dev/null)
             fi
             if [[ -n "$_deploy_pid" ]] && kill -0 "$_deploy_pid" 2>/dev/null; then
-              # Kill by SESSION ID — this reaches ALL processes spawned by
-              # the SSH session, even those in different process groups
-              # (GNU timeout creates new groups via setpgid, so PGID kill
-              # alone misses deploy hooks and docker build)
-              local _sid=""
-              _sid=$(ps -o sid= -p "$_deploy_pid" 2>/dev/null | tr -d ' ')
-              local _my_sid=""
-              _my_sid=$(ps -o sid= -p $$ 2>/dev/null | tr -d ' ')
-
-              # Kill all processes in the deploy's session (not our own)
-              if [[ -n "$_sid" && "$_sid" != "0" && "$_sid" != "1" && "$_sid" != "$_my_sid" ]]; then
-                pkill -KILL -s "$_sid" 2>/dev/null
-              fi
-
-              # Also kill process group as fallback
-              local _pgid=""
-              _pgid=$(ps -o pgid= -p "$_deploy_pid" 2>/dev/null | tr -d ' ')
-              if [[ -n "$_pgid" && "$_pgid" != "0" && "$_pgid" != "1" ]]; then
-                kill -KILL -"$_pgid" 2>/dev/null
-              fi
-
-              # Direct kill
               kill -KILL "$_deploy_pid" 2>/dev/null
-
-              # Catch any remaining muster deploy processes
+              pkill -KILL -P "$_deploy_pid" 2>/dev/null
               pkill -KILL -f "muster deploy" 2>/dev/null
+              pkill -KILL -f "docker build" 2>/dev/null
             fi
+            rm -f "$_lock_file"
           fi
-          rm -f "$_cancel_file"
-          rm -f "$_lock_file"
           ok "Fleet deploy cancelled"
-          printf '  %bDeploy process and SSH session killed.%b\n' "${DIM}" "${RESET}"
         else
           info "No fleet deploy in progress"
         fi
