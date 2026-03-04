@@ -5,6 +5,27 @@
 
 MENU_RESULT=""
 
+# Read a single keypress (handles arrow key escape sequences)
+_menu_read_key() {
+  local key _rc=0
+  if [[ "${MENU_TIMEOUT:-0}" -gt 0 ]]; then
+    IFS= read -rsn1 -t "$MENU_TIMEOUT" key || _rc=$?
+    if [[ "$_rc" -ne 0 && -z "$key" ]]; then
+      REPLY="__timeout__"
+      return
+    fi
+  else
+    IFS= read -rsn1 key || true
+  fi
+  if [[ "$key" == $'\x1b' ]]; then
+    local seq1 seq2
+    IFS= read -rsn1 -t 1 seq1 || true
+    IFS= read -rsn1 -t 1 seq2 || true
+    key="${key}${seq1}${seq2}"
+  fi
+  REPLY="$key"
+}
+
 # Menu with description box that updates on selection change
 # Usage: menu_select_desc "title" "label1" "desc1" "label2" "desc2" ...
 # Descriptions appear below the options in a dim box
@@ -219,26 +240,6 @@ menu_select() {
   _menu_clear() {
     (( count > 0 )) && printf '\033[%dA' "$count"
     printf '\033[J'
-  }
-
-  _menu_read_key() {
-    local key _rc=0
-    if [[ "${MENU_TIMEOUT:-0}" -gt 0 ]]; then
-      IFS= read -rsn1 -t "$MENU_TIMEOUT" key || _rc=$?
-      if [[ "$_rc" -ne 0 && -z "$key" ]]; then
-        REPLY="__timeout__"
-        return
-      fi
-    else
-      IFS= read -rsn1 key || true
-    fi
-    if [[ "$key" == $'\x1b' ]]; then
-      local seq1 seq2
-      IFS= read -rsn1 -t 1 seq1 || true
-      IFS= read -rsn1 -t 1 seq2 || true
-      key="${key}${seq1}${seq2}"
-    fi
-    REPLY="$key"
   }
 
   _menu_draw_header
