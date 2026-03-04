@@ -72,6 +72,11 @@ muster setup --help                                     # see all flags
 | `muster settings` | Project settings + global muster preferences |
 | `muster settings --global` | View/edit global settings (color, log retention, etc.) |
 | `muster uninstall` | Remove muster from project |
+| `muster verify` | Verify file integrity of muster installation |
+| `muster fleet` | Fleet manager — deploy to multiple machines |
+| `muster fleet deploy` | Deploy project to fleet machines |
+| `muster fleet status` | Check health across fleet |
+| `muster group` | Group orchestration — coordinate multi-project deploys |
 | `muster skill add <url>` | Install a skill addon |
 | `muster skill list` | List installed skills |
 | `muster skill remove <name>` | Remove a skill |
@@ -195,6 +200,49 @@ muster setup --scan --remote api=deploy@prod.example.com:/opt/myapp
 ```
 
 Remote services use `ssh user@host "bash -s" < hook.sh` — credentials are exported on the remote side, never sent over the wire as arguments. Health checks and rollbacks also run remotely. Toggle remote on/off in `muster settings`.
+
+## Fleet — Multi-Machine Deployment
+
+Deploy your entire project to multiple machines with a single command. Fleet supports SSH and cloud relay transports with two deploy modes.
+
+```bash
+muster fleet init                    # create remotes.json
+muster fleet add prod-1 deploy@10.0.1.10 --mode muster --path /opt/myapp
+muster fleet add prod-2 deploy@10.0.1.11 --mode push
+muster fleet group web prod-1 prod-2 # group machines
+muster fleet deploy                  # deploy to all machines
+muster fleet deploy web              # deploy to a group
+muster fleet deploy --parallel       # all machines in parallel
+muster fleet status                  # check health across fleet
+muster fleet rollback                # rollback across fleet
+```
+
+**Two deploy modes:**
+- **`muster` mode** — remote has muster installed, runs `muster deploy` remotely
+- **`push` mode** — no muster needed, pipes your hook scripts over SSH
+
+**Two transports:**
+- **SSH** (default) — direct connection, works on any reachable host
+- **Cloud** — WebSocket relay for machines behind NATs/firewalls, end-to-end encrypted (X25519 + NaCl box)
+
+Fleet machines are configured in `remotes.json` alongside your `deploy.json`. The dashboard shows a Fleet panel with live connectivity status. See [FLEET.md](FLEET.md) for the full guide.
+
+## Groups — Multi-Project Orchestration
+
+Groups coordinate deploys across multiple projects on multiple machines:
+
+```bash
+muster group create production                    # create a group
+muster group add production api /opt/api          # add projects
+muster group add production frontend /opt/web
+muster group deploy production                    # deploy all projects in order
+```
+
+| | Fleet | Groups |
+|---|---|---|
+| **What** | One project → many machines | Many projects → one coordinated deploy |
+| **Config** | `remotes.json` (per-project) | `~/.muster/groups.json` (global) |
+| **Use case** | Scale horizontally | Monorepo, multi-service orchestration |
 
 ## Credentials
 
@@ -402,6 +450,21 @@ muster --minimal deploy api   # build context warnings to stderr as comments
 ```
 
 Minimal mode outputs plain text to stdout and warnings as `# comment`-style lines to stderr, making it easy to pipe and parse.
+
+## App Integrity Verification
+
+muster verifies its own source files haven't been tampered with. On every launch, it checks a SHA256 manifest of all tracked files against what's on disk.
+
+```bash
+muster verify              # full file-by-file integrity check
+muster verify --quick      # signature-only (fast)
+muster verify --json       # machine-readable output
+muster --no-verify ...     # bypass startup check
+```
+
+The manifest is generated automatically during install and updates. If tampering is detected, muster shows which files changed and offers to repair via `git checkout`.
+
+The startup check uses an inline bootstrap trust chain — it verifies the integrity libraries themselves (via raw `openssl` + `shasum`) before sourcing them, so no muster code runs unchecked.
 
 ## Philosophy
 

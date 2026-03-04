@@ -1,5 +1,7 @@
 # Fleet — Multi-Machine Deployment
 
+> For a quick overview, see [FLEET.md](../FLEET.md) in the project root.
+
 Deploy your project to multiple machines. Fleet supports two transports and two deploy modes:
 
 **Transports:**
