@@ -16,25 +16,11 @@ done
 MUSTER_ROOT="$(cd "$(dirname "$_muster_self")/.." && pwd)"
 unset _muster_self _muster_dir
 
-# ── App integrity check (pre-library, minimal deps) ──
-if [[ -f "$MUSTER_ROOT/.muster.manifest.sig" ]]; then
-  source "$MUSTER_ROOT/lib/core/payload_sign.sh"
-  source "$MUSTER_ROOT/lib/core/app_verify.sh"
-  if ! _app_verify_quick; then
-    printf '\033[31m  ✗ App integrity check failed\033[0m\n' >&2
-    printf '\033[2m  Run "muster verify" for details\033[0m\n' >&2
-    # Strict mode check (inline grep — config.sh not loaded yet)
-    if [[ -f "$HOME/.muster/settings.json" ]]; then
-      _strict=$(grep -o '"integrity_strict"[[:space:]]*:[[:space:]]*true' "$HOME/.muster/settings.json" 2>/dev/null || true)
-      [[ -n "$_strict" ]] && exit 1
-    fi
-  fi
-fi
-
 # ── Global flags ──
 MUSTER_QUIET="${MUSTER_QUIET:-false}"
 MUSTER_VERBOSE="${MUSTER_VERBOSE:-false}"
 MUSTER_MINIMAL="${MUSTER_MINIMAL:-false}"
+MUSTER_NO_VERIFY="${MUSTER_NO_VERIFY:-false}"
 
 _muster_args=()
 for _arg in "$@"; do
@@ -42,12 +28,113 @@ for _arg in "$@"; do
     --quiet|-q) MUSTER_QUIET=true ;;
     --verbose)  MUSTER_VERBOSE=true ;;
     --minimal)  MUSTER_MINIMAL=true ;;
+    --no-verify) MUSTER_NO_VERIFY=true ;;
     *)          _muster_args[${#_muster_args[@]}]="$_arg" ;;
   esac
 done
 set -- "${_muster_args[@]+"${_muster_args[@]}"}"
 unset _muster_args _arg
-export MUSTER_QUIET MUSTER_VERBOSE MUSTER_MINIMAL
+export MUSTER_QUIET MUSTER_VERBOSE MUSTER_MINIMAL MUSTER_NO_VERIFY
+
+# ── App integrity check (inline — no sourced deps for trust bootstrap) ──
+if [[ -f "$MUSTER_ROOT/.muster.manifest" && "${MUSTER_NO_VERIFY}" != "true" ]]; then
+  _integrity_fail=false
+
+  # Step 1: Verify manifest signature (inline openssl — no sourced code)
+  _m_sig_file="$MUSTER_ROOT/.muster.manifest.sig"
+  _m_pubkey="$HOME/.muster/fleet/keys/payload.pub.pem"
+  if [[ -f "$_m_sig_file" && -f "$_m_pubkey" ]]; then
+    _m_tmp_sig="/tmp/.muster_boot_sig_$$"
+    cat "$_m_sig_file" | base64 -d > "$_m_tmp_sig" 2>/dev/null
+    if ! openssl pkeyutl -verify -pubin -inkey "$_m_pubkey" \
+      -in "$MUSTER_ROOT/.muster.manifest" -sigfile "$_m_tmp_sig" >/dev/null 2>&1; then
+      _integrity_fail=true
+    fi
+    rm -f "$_m_tmp_sig"
+  fi
+
+  # Step 2: Verify critical libs before sourcing (inline shasum — no sourced code)
+  _m_tampered_files=""
+  if [[ "$_integrity_fail" == "false" ]]; then
+    _m_manifest=$(cat "$MUSTER_ROOT/.muster.manifest" 2>/dev/null)
+    for _m_lib in lib/core/app_verify.sh lib/core/payload_sign.sh; do
+      _m_file="$MUSTER_ROOT/$_m_lib"
+      [[ ! -f "$_m_file" ]] && continue
+      # Extract expected hash from single-line JSON manifest
+      _m_expected=$(printf '%s' "$_m_manifest" \
+        | grep -o "\"${_m_lib}\":{\"sha256\":\"[a-f0-9]*\"" \
+        | sed 's/.*"sha256":"//;s/"//')
+      [[ -z "$_m_expected" ]] && continue
+      _m_actual=$(shasum -a 256 "$_m_file" 2>/dev/null | cut -d' ' -f1)
+      if [[ "$_m_actual" != "$_m_expected" ]]; then
+        _integrity_fail=true
+        _m_tampered_files="$_m_lib"
+        break
+      fi
+    done
+  fi
+
+  # Step 3: If bootstrap passed, source libs and run full verify
+  if [[ "$_integrity_fail" == "false" ]]; then
+    source "$MUSTER_ROOT/lib/core/payload_sign.sh"
+    source "$MUSTER_ROOT/lib/core/app_verify.sh"
+    if ! _app_verify_full >/dev/null 2>&1; then
+      _integrity_fail=true
+      # Collect tampered/missing file names
+      _m_i=0
+      while (( _m_i < ${#_APP_VERIFY_FILES[@]} )); do
+        case "${_APP_VERIFY_RESULTS[$_m_i]}" in
+          tampered|missing)
+            [[ -n "$_m_tampered_files" ]] && _m_tampered_files="${_m_tampered_files}|"
+            _m_tampered_files="${_m_tampered_files}${_APP_VERIFY_FILES[$_m_i]}"
+            ;;
+        esac
+        _m_i=$(( _m_i + 1 ))
+      done
+    fi
+  fi
+
+  # Step 4: Handle failure — warn + show tampered files + offer repair
+  if [[ "$_integrity_fail" == "true" ]]; then
+    printf '\n\033[31m  ✗ App integrity check failed — files may have been tampered with\033[0m\n' >&2
+    # Show tampered files
+    if [[ -n "$_m_tampered_files" ]]; then
+      IFS='|'
+      for _m_tf in $_m_tampered_files; do
+        printf '\033[31m    ✗ %s\033[0m\n' "$_m_tf" >&2
+      done
+      unset IFS
+    fi
+    printf '\033[2m  --no-verify to skip\033[0m\n\n' >&2
+    if [[ -t 0 && -d "$MUSTER_ROOT/.git" ]]; then
+      printf '  Repair from git and regenerate manifest? [Y/n] '
+      IFS= read -rsn1 _repair || true
+      printf '\n'
+      case "$_repair" in
+        n|N)
+          printf '\033[33m  ⚠ Continuing with unverified files\033[0m\n\n' >&2
+          ;;
+        *)
+          if (cd "$MUSTER_ROOT" && git checkout -- . 2>/dev/null); then
+            # Source fresh (trusted) libs to regenerate manifest
+            source "$MUSTER_ROOT/lib/core/app_verify.sh"
+            _app_manifest_generate
+            if [[ -f "$HOME/.muster/fleet/keys/payload.key.pem" ]]; then
+              source "$MUSTER_ROOT/lib/core/payload_sign.sh"
+              _app_manifest_sign 2>/dev/null
+            fi
+            printf '\033[32m  ✓ Files restored and manifest regenerated\033[0m\n\n'
+            exec "$MUSTER_ROOT/bin/muster" "$@"
+          else
+            printf '\033[31m  ✗ Git repair failed\033[0m\n' >&2
+            printf '\033[2m  Try: cd %s && git checkout -- .\033[0m\n\n' "$MUSTER_ROOT" >&2
+          fi
+          ;;
+      esac
+    fi
+  fi
+  unset _integrity_fail _m_sig_file _m_pubkey _m_tmp_sig _m_manifest _m_lib _m_file _m_expected _m_actual _repair
+fi
 
 # ── Fast path: no lib loading needed ──
 case "${1:-}" in
@@ -237,6 +324,7 @@ case "${1:-}" in
     echo "  -q, --quiet     Suppress info output (errors and warnings still shown)"
     echo "  --verbose       Show debug output"
     echo "  --minimal       Plain text output, numbered menus, no TUI"
+    echo "  --no-verify     Skip app file integrity check"
     echo "  -h, --help      Show this help"
     echo ""
     echo "To always use minimal mode:"
