@@ -4,7 +4,7 @@
 # https://getmuster.dev | https://github.com/Muster-dev/muster
 set -uo pipefail
 
-MUSTER_VERSION="0.5.41"
+MUSTER_VERSION="0.5.42"
 
 # Resolve symlinks (macOS bash 3.2 has no readlink -f)
 _muster_self="${BASH_SOURCE[0]}"

@@ -1756,7 +1756,11 @@ export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
 REMOTECMD
   )"
   cmd="${cmd}; export MUSTER_DEPLOY_SOURCE='${_source_label}'"
-  cmd="${cmd}; mkdir -p .muster; printf '%s\n' '${_source_label}' > .muster/.fleet_deploying"
+  # Write fleet marker with source label (line 1) and event log line count (line 2)
+  # so cancel knows exactly which services were deployed in THIS session
+  cmd="${cmd}; mkdir -p .muster .muster/logs"
+  cmd="${cmd}; _evt_before=\$(wc -l < .muster/logs/deploy-events.log 2>/dev/null || echo 0)"
+  cmd="${cmd}; printf '%s\n%s\n' '${_source_label}' \"\$_evt_before\" > .muster/.fleet_deploying"
   # Run deploy in background with a cancel watcher.
   # The watcher checks .fleet_deploying every second — when the remote
   # dashboard removes it (cancel), the watcher kills all session processes

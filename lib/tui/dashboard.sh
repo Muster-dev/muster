@@ -871,12 +871,16 @@ cmd_dashboard() {
       "Cancel fleet deploy")
         local _cancel_file="${project_dir}/.muster/.fleet_deploying"
         if [[ -f "$_cancel_file" ]]; then
-          # Remove the fleet marker — the SSH command's cancel watcher
-          # detects this within 1 second and kills all deploy processes,
-          # closing the SSH connection and stopping the host controller
+          # Read fleet marker: line 1 = source, line 2 = event log offset
+          local _fleet_source="" _evt_before=0
+          _fleet_source=$(head -1 "$_cancel_file" 2>/dev/null)
+          _evt_before=$(sed -n '2p' "$_cancel_file" 2>/dev/null)
+          [[ -z "$_evt_before" ]] && _evt_before=0
+
+          # Remove fleet marker → SSH cancel watcher detects within 1s
           rm -f "$_cancel_file"
 
-          # Also try direct process kill for faster response
+          # Direct process kill for immediate stop
           local _lock_file="${project_dir}/.muster/deploy.lock"
           if [[ -f "$_lock_file" ]]; then
             local _deploy_pid=""
@@ -893,7 +897,31 @@ cmd_dashboard() {
             fi
             rm -f "$_lock_file"
           fi
+
           ok "Fleet deploy cancelled"
+
+          # Rollback services that were already deployed in this session
+          local _events_file="${project_dir}/.muster/logs/deploy-events.log"
+          if [[ -f "$_events_file" ]] && has_cmd jq; then
+            local _rollback_svcs=()
+            while IFS= read -r _rsvc; do
+              [[ -n "$_rsvc" ]] && _rollback_svcs[${#_rollback_svcs[@]}]="$_rsvc"
+            done < <(tail -n +"$(( _evt_before + 1 ))" "$_events_file" 2>/dev/null \
+              | jq -r 'select(.action=="deploy" and .status=="ok") | .service' 2>/dev/null \
+              | sort -u)
+
+            if [[ ${#_rollback_svcs[@]} -gt 0 ]]; then
+              echo ""
+              warn "Rolling back ${#_rollback_svcs[@]} deployed service(s)..."
+              source "$MUSTER_ROOT/lib/commands/rollback.sh"
+              local _rsvc
+              for _rsvc in "${_rollback_svcs[@]}"; do
+                cmd_rollback "$_rsvc"
+              done
+            else
+              printf '  %bNo services were fully deployed yet.%b\n' "${DIM}" "${RESET}"
+            fi
+          fi
         else
           info "No fleet deploy in progress"
         fi
