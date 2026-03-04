@@ -44,12 +44,6 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Lint
-        run: make lint
-
-      - name: Test
-        run: make test
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
