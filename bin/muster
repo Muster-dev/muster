@@ -53,11 +53,14 @@ if [[ -f "$MUSTER_ROOT/.muster.manifest" && "${MUSTER_NO_VERIFY}" != "true" ]]; 
   _m_loading_msg="${_m_msgs[$_m_msg_idx]}"
   (
     _lc=(166 172 178 208 214 220 226 220 214 208 178 172)
+    _ls=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     _li=0
+    _si=0
     while true; do
-      printf '\r\033[38;5;%dm  %s\033[0m' "${_lc[$_li]}" "$_m_loading_msg"
+      printf '\r\033[38;5;%dm  %s %s\033[0m' "${_lc[$_li]}" "${_ls[$_si]}" "$_m_loading_msg"
       _li=$(( (_li + 1) % ${#_lc[@]} ))
-      sleep 0.12
+      _si=$(( (_si + 1) % ${#_ls[@]} ))
+      sleep 0.1
     done
   ) &
   _m_anim_pid=$!
