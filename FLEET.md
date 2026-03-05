@@ -21,7 +21,7 @@ Fleet has two transports and two deploy modes:
 ## Quick Start
 
 ```bash
-# 1. Initialize fleet in your project
+# 1. Initialize fleet
 muster fleet init
 
 # 2. Add machines
@@ -42,7 +42,7 @@ muster fleet deploy --dry-run     # preview without executing
 
 | Command | Description |
 |---------|-------------|
-| `muster fleet init` | Create `remotes.json` in project root |
+| `muster fleet init` | Create fleet config directory |
 | `muster fleet add <name> user@host` | Add a machine |
 | `muster fleet remove <name>` | Remove a machine |
 | `muster fleet group <name> <machines...>` | Create a machine group |
@@ -53,6 +53,13 @@ muster fleet deploy --dry-run     # preview without executing
 | `muster fleet status [target]` | Check health across fleet |
 | `muster fleet rollback [target]` | Rollback across fleet |
 | `muster fleet pair <name> --token <t>` | Manually pair a muster-mode machine |
+| `muster fleet skill list <fleet>` | Show skills enabled for a fleet |
+| `muster fleet skill enable <fleet> <skill>` | Enable a skill for fleet events |
+| `muster fleet skill disable <fleet> <skill>` | Disable a fleet skill |
+| `muster fleet skill configure <fleet> <skill>` | Set fleet-specific skill config |
+| `muster fleet keygen` | Generate fleet encryption keypair |
+| `muster fleet install-agent <machine>` | Install agent daemon on remote |
+| `muster fleet agent-status` | Check agent health across fleet |
 
 ### Add Flags
 
@@ -78,32 +85,35 @@ muster fleet add <name> user@host [flags]
 
 ## Configuration
 
-Fleet config lives in `remotes.json` alongside your `deploy.json`:
+Fleet config lives in `~/.muster/fleets/<fleet>/` as a directory structure:
+
+```
+~/.muster/fleets/
+└── production/
+    ├── fleet.json            ← fleet metadata
+    ├── skills.json           ← per-fleet skill config (optional)
+    ├── keys/                 ← encryption keypair
+    └── web/                  ← group
+        ├── prod-1/
+        │   └── project.json  ← machine config
+        └── prod-2/
+            └── project.json
+```
+
+Machine config (`project.json`):
 
 ```json
 {
-  "machines": {
-    "prod-1": {
-      "host": "10.0.1.10",
-      "user": "deploy",
-      "port": 22,
-      "identity_file": "~/.ssh/prod-key",
-      "project_dir": "/opt/myapp",
-      "mode": "muster"
-    },
-    "prod-2": {
-      "host": "10.0.1.11",
-      "user": "deploy",
-      "port": 2222,
-      "mode": "push"
-    }
-  },
-  "groups": {
-    "web": ["prod-1", "prod-2"]
-  },
-  "deploy_order": ["web"]
+  "host": "10.0.1.10",
+  "user": "deploy",
+  "port": 22,
+  "identity_file": "~/.ssh/prod-key",
+  "project_dir": "/opt/myapp",
+  "mode": "muster"
 }
 ```
+
+Legacy `remotes.json` format is auto-migrated to fleet directories on first use.
 
 ### Machine Fields
 
@@ -125,7 +135,7 @@ Machines in `muster` mode need an auth token so fleet can run `muster deploy` on
 1. Tests SSH connectivity
 2. Checks remote has muster installed
 3. Creates a deploy-scoped token on the remote
-4. Stores the token locally at `~/.muster/fleet-tokens.json` (600 permissions)
+4. Stores the token locally at `~/.muster/tokens/fleet.json` (600 permissions)
 
 **Manual pair** if auto-pair fails:
 
@@ -240,6 +250,28 @@ Stored in `~/.muster/settings.json`:
 ```
 
 Cloud and SSH machines can coexist in the same fleet. Each machine uses its configured transport independently.
+
+## Fleet Skills
+
+Skills fire during fleet operations — notifications, monitoring, automation. Skills always execute on your machine (the orchestrator), so secrets never leave your machine.
+
+```bash
+muster fleet skill enable production discord     # enable Discord for production fleet
+muster fleet skill configure production discord  # set production-specific channel ID
+muster fleet skill list production               # show enabled skills
+```
+
+Per-fleet config lets you point the same skill at different targets per fleet (e.g., production → `#production-deploys`, staging → `#staging-deploys`). Config is stored in `~/.muster/fleets/<fleet>/skills.json`.
+
+Fleet hooks: `fleet-deploy-start`, `fleet-deploy-end`, `fleet-machine-deploy-start`, `fleet-machine-deploy-end`, `fleet-rollback-start`, `fleet-rollback-end`.
+
+See [docs/fleet/skills.md](docs/fleet/skills.md) for the full guide.
+
+## Fleet Encryption
+
+Fleet uses RSA-4096 keypairs per fleet for encrypted agent reports. Hybrid encryption: AES-256-CBC session keys wrapped with RSA-4096 OAEP+SHA-256. Generate keys with `muster fleet keygen`.
+
+See [docs/security/encryption.md](docs/security/encryption.md) for details.
 
 ## Fleet Sync (Beta)
 

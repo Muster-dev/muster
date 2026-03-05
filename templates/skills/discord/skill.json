@@ -1,0 +1,30 @@
+{
+  "name": "discord",
+  "version": "1.1.0",
+  "description": "Send deploy and fleet notifications to Discord",
+  "author": "muster",
+  "hooks": [
+    "post-deploy",
+    "post-rollback",
+    "fleet-deploy-start",
+    "fleet-deploy-end",
+    "fleet-machine-deploy-start",
+    "fleet-machine-deploy-end",
+    "fleet-rollback-start",
+    "fleet-rollback-end"
+  ],
+  "requires": ["curl"],
+  "config": [
+    {
+      "key": "MUSTER_DISCORD_BOT_TOKEN",
+      "label": "Discord Bot Token",
+      "hint": "discord.com/developers/applications > Bot > Token",
+      "secret": true
+    },
+    {
+      "key": "MUSTER_DISCORD_CHANNEL_ID",
+      "label": "Channel ID",
+      "hint": "Right-click channel > Copy Channel ID"
+    }
+  ]
+}

@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.57] - 2026-03-04
+
+### Added
+- Built-in skill templates: Discord, Slack, Webhook — all with fleet hook support
+- `muster skill create discord/slack/webhook` copies from built-in templates instead of blank stub
+- Skill create output now lists available built-in templates
+
+### Changed
+- Updated README.md: fleet skills section, fleet encryption/agents, documentation table, expanded commands table
+- Updated FLEET.md: fleet skills section, fleet encryption, fleet skill/agent commands
+- Updated docs/skills/skills.md: full fleet-aware Discord example, built-in templates section
+- Reorganized docs into feature subfolders (deploy, fleet, skills, security, agent)
+
+## [0.5.56] - 2026-03-04
+
+### Added
+- Fleet skill hooks: skills now fire during fleet deploy/rollback operations
+- New fleet hooks: `fleet-deploy-start`, `fleet-deploy-end`, `fleet-machine-deploy-start`, `fleet-machine-deploy-end`, `fleet-rollback-start`, `fleet-rollback-end`
+- Per-fleet skill configuration via `skills.json` (enable/disable skills per fleet, override config)
+- Fleet env vars for skills: `MUSTER_FLEET_NAME`, `MUSTER_FLEET_MACHINE`, `MUSTER_FLEET_HOST`, `MUSTER_FLEET_STRATEGY`, `MUSTER_FLEET_MODE`
+- `muster fleet skill list/enable/disable/configure` commands
+- `run_fleet_skill_hooks()` in `lib/skills/manager.sh` — fleet-aware skill runner with config overlay
+
 ## [0.5.55] - 2026-03-04
 
 ### Added

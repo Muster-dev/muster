@@ -9,6 +9,9 @@ _FLEET_DEPLOY_FORCE_SYNC="false"
 # ── deploy ──
 
 _fleet_cmd_deploy() {
+  # Source skill manager for fleet skill hooks
+  source "$MUSTER_ROOT/lib/skills/manager.sh"
+
   # shellcheck disable=SC2034
   local target="" parallel=false dry_run=false json_mode=false force_sync=false rolling=false
   local _strategy_override=""
@@ -152,15 +155,32 @@ _fleet_cmd_deploy() {
   printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Fleet Deploy${RESET} — ${total} machine(s)"
   echo ""
 
+  # Fire fleet-level skill hooks
+  local _fleet_name="${_first_fleet:-}"
+  MUSTER_FLEET_NAME="$_fleet_name"
+  MUSTER_FLEET_STRATEGY="$_cfg_strategy"
+  run_fleet_skill_hooks "fleet-deploy-start" "" "$_fleet_name"
+
+  local _fleet_rc=0
   if [[ "$rolling" == "true" ]]; then
-    _fleet_deploy_rolling "${machines[@]}"
+    _fleet_deploy_rolling "${machines[@]}" || _fleet_rc=$?
   elif [[ "$parallel" == "true" ]]; then
-    _fleet_deploy_parallel "${machines[@]}"
+    _fleet_deploy_parallel "${machines[@]}" || _fleet_rc=$?
   else
-    _fleet_deploy_sequential "${machines[@]}"
+    _fleet_deploy_sequential "${machines[@]}" || _fleet_rc=$?
   fi
 
+  # Fire fleet-deploy-end with status
+  if (( _fleet_rc == 0 )); then
+    MUSTER_DEPLOY_STATUS="ok"
+  else
+    MUSTER_DEPLOY_STATUS="failed"
+  fi
+  run_fleet_skill_hooks "fleet-deploy-end" "" "$_fleet_name"
+  unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_NAME MUSTER_FLEET_STRATEGY 2>/dev/null
+
   _unload_env_file
+  return $_fleet_rc
 }
 
 # ── Deploy: dry run ──
@@ -255,6 +275,12 @@ _fleet_deploy_sequential() {
     current=$(( current + 1 ))
     _fleet_load_machine "$machine"
 
+    # Per-machine skill context
+    MUSTER_FLEET_MACHINE="$machine"
+    MUSTER_FLEET_HOST="${_FM_USER}@${_FM_HOST}"
+    MUSTER_FLEET_MODE="${_FM_MODE:-push}"
+    run_fleet_skill_hooks "fleet-machine-deploy-start" "$machine" "${MUSTER_FLEET_NAME:-}"
+
     progress_bar "$current" "$total" "Fleet: ${machine}..."
     echo ""
 
@@ -274,6 +300,9 @@ _fleet_deploy_sequential() {
       if (( rc == 0 )); then
         ok "${machine} deployed"
         _history_log_event "fleet:${machine}" "deploy" "ok" ""
+        MUSTER_DEPLOY_STATUS="ok"
+        run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
+        unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
         succeeded=$(( succeeded + 1 ))
         break
       else
@@ -297,10 +326,16 @@ _fleet_deploy_sequential() {
             log_file="${log_dir}/fleet-${machine}-$(date +%Y%m%d-%H%M%S).log"
             ;; # loop continues
           "Skip and continue")
+            MUSTER_DEPLOY_STATUS="failed"
+            run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
+            unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
             failed=$(( failed + 1 ))
             break
             ;;
           "Abort")
+            MUSTER_DEPLOY_STATUS="failed"
+            run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
+            unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
             failed=$(( failed + 1 ))
             echo ""
             _fleet_deploy_summary "$succeeded" "$failed" "$total"
@@ -464,6 +499,12 @@ _fleet_deploy_rolling() {
     current=$((current + 1))
     _fleet_load_machine "$machine"
 
+    # Per-machine skill context
+    MUSTER_FLEET_MACHINE="$machine"
+    MUSTER_FLEET_HOST="${_FM_USER}@${_FM_HOST}"
+    MUSTER_FLEET_MODE="${_FM_MODE:-push}"
+    run_fleet_skill_hooks "fleet-machine-deploy-start" "$machine" "${MUSTER_FLEET_NAME:-}"
+
     printf '%b\n' "  ${BOLD}[${current}/${total}]${RESET} ${machine} (${_FM_USER}@${_FM_HOST})"
 
     # Sync hooks if needed
@@ -478,6 +519,10 @@ _fleet_deploy_rolling() {
     if [[ $svc_rc -ne 0 ]]; then
       printf '%b\n' "  ${RED}x${RESET} Deploy failed on ${machine}"
       failed=$((failed + 1))
+
+      MUSTER_DEPLOY_STATUS="failed"
+      run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
+      unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
 
       # Rolling: stop on first failure
       echo ""
@@ -497,6 +542,11 @@ _fleet_deploy_rolling() {
           ;;
       esac
     fi
+
+    # Fire success hook for this machine
+    MUSTER_DEPLOY_STATUS="ok"
+    run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
+    unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
 
     # Rolling: verify health after successful deploy
     if (( current < total )); then
@@ -591,12 +641,21 @@ _fleet_deploy_parallel() {
 
       (
         _fleet_load_machine "$machine"
+
+        # Per-machine skill context (in subshell, safe)
+        MUSTER_FLEET_MACHINE="$machine"
+        MUSTER_FLEET_HOST="${_FM_USER}@${_FM_HOST}"
+        MUSTER_FLEET_MODE="${_FM_MODE:-push}"
+        run_fleet_skill_hooks "fleet-machine-deploy-start" "$machine" "${MUSTER_FLEET_NAME:-}"
+
         local _rc=0
         local _start
         _start=$(date +%s)
 
         # Auto-sync hooks before deploy if needed
         if ! _fleet_deploy_auto_sync "$machine"; then
+          MUSTER_DEPLOY_STATUS="failed"
+          run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
           echo "1|0" > "$status_file"
           _history_log_event "fleet:${machine}" "deploy" "failed" "sync failed"
           exit 1
@@ -645,9 +704,13 @@ ${_ke}"
         local _duration=$(( _end - _start ))
 
         if (( _rc == 0 )); then
+          MUSTER_DEPLOY_STATUS="ok"
+          run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
           echo "0|${_duration}" > "$status_file"
           _history_log_event "fleet:${machine}" "deploy" "ok" ""
         else
+          MUSTER_DEPLOY_STATUS="failed"
+          run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "${MUSTER_FLEET_NAME:-}"
           echo "1|${_duration}" > "$status_file"
           _history_log_event "fleet:${machine}" "deploy" "failed" ""
         fi

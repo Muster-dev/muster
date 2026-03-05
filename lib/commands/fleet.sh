@@ -105,6 +105,11 @@ cmd_fleet() {
       source "$MUSTER_ROOT/lib/commands/fleet_setup.sh"
       cmd_fleet_setup "$@"
       ;;
+    skill)
+      shift
+      source "$MUSTER_ROOT/lib/skills/manager.sh"
+      _fleet_cmd_skill "$@"
+      ;;
     --help|-h)
       _fleet_cmd_help
       ;;
@@ -156,6 +161,12 @@ _fleet_cmd_help() {
   echo "  trust-key <name>              Distribute public key to target"
   echo "  list-keys [name]              Show trusted signing keys on target"
   echo "  revoke-key <name> --label X   Remove a signing key from target"
+  echo ""
+  echo "Skills:"
+  echo "  skill list [fleet]            Show skills enabled for a fleet"
+  echo "  skill enable <fleet> <skill>  Enable a skill for a fleet"
+  echo "  skill disable <fleet> <skill> Disable a skill for a fleet"
+  echo "  skill configure <fleet> <sk>  Set fleet-specific skill config"
   echo ""
   echo "Agent:"
   echo "  install-agent <name>          Install monitoring agent on target"
@@ -1604,9 +1615,284 @@ _fleet_status_json() {
   printf ']\n'
 }
 
+# ── fleet skill management ──
+
+_fleet_cmd_skill() {
+  local action="${1:-list}"
+  shift 2>/dev/null || true
+
+  case "$action" in
+    --help|-h)
+      echo "Usage: muster fleet skill <command> [fleet] [skill]"
+      echo ""
+      echo "Manage per-fleet skill configuration."
+      echo ""
+      echo "Commands:"
+      echo "  list [fleet]                 Show enabled skills for a fleet"
+      echo "  enable <fleet> <skill>       Enable a skill for fleet events"
+      echo "  disable <fleet> <skill>      Disable a skill for fleet events"
+      echo "  configure <fleet> <skill>    Set fleet-specific config overrides"
+      return 0
+      ;;
+    list|ls)
+      _fleet_skill_list "$@"
+      ;;
+    enable)
+      _fleet_skill_enable "$@"
+      ;;
+    disable)
+      _fleet_skill_disable "$@"
+      ;;
+    configure|config)
+      _fleet_skill_configure "$@"
+      ;;
+    *)
+      err "Unknown fleet skill command: ${action}"
+      echo "Run 'muster fleet skill --help' for usage."
+      return 1
+      ;;
+  esac
+}
+
+_fleet_skill_list() {
+  local fleet_name="${1:-}"
+
+  # If no fleet specified, use the first available
+  if [[ -z "$fleet_name" ]]; then
+    if fleet_cfg_has_any 2>/dev/null; then
+      fleet_name=$(fleets_list 2>/dev/null | head -1)
+    fi
+  fi
+
+  if [[ -z "$fleet_name" ]]; then
+    err "No fleet found. Run 'muster fleet setup' first."
+    return 1
+  fi
+
+  local skills_json="${FLEETS_BASE_DIR}/${fleet_name}/skills.json"
+
+  echo ""
+  printf '%b\n' "  ${BOLD}Fleet Skills: ${fleet_name}${RESET}"
+  echo ""
+
+  if [[ ! -f "$skills_json" ]]; then
+    printf '%b\n' "  ${DIM}No fleet skills configured.${RESET}"
+    printf '%b\n' "  ${DIM}Fleet uses global/project skill settings.${RESET}"
+    echo ""
+    printf '%b\n' "  ${DIM}Enable a skill: muster fleet skill enable ${fleet_name} <skill>${RESET}"
+    echo ""
+    return 0
+  fi
+
+  if ! has_cmd jq; then
+    err "jq required for fleet skill management"
+    return 1
+  fi
+
+  local enabled
+  enabled=$(jq -r '.enabled // [] | .[]' "$skills_json" 2>/dev/null)
+
+  if [[ -z "$enabled" ]]; then
+    printf '%b\n' "  ${DIM}No skills enabled for this fleet.${RESET}"
+  else
+    local _sk
+    while IFS= read -r _sk; do
+      [[ -z "$_sk" ]] && continue
+      local _has_config=""
+      _has_config=$(jq -r --arg n "$_sk" '.config[$n] // {} | length' "$skills_json" 2>/dev/null)
+      if [[ "$_has_config" != "0" && -n "$_has_config" ]]; then
+        printf '%b\n' "  ${ACCENT}${_sk}${RESET}  ${DIM}(fleet config)${RESET}"
+      else
+        printf '%b\n' "  ${ACCENT}${_sk}${RESET}"
+      fi
+    done <<< "$enabled"
+  fi
+  echo ""
+}
+
+_fleet_skill_enable() {
+  local fleet_name="${1:-}" skill_name="${2:-}"
+
+  if [[ -z "$fleet_name" || -z "$skill_name" ]]; then
+    err "Usage: muster fleet skill enable <fleet> <skill>"
+    return 1
+  fi
+
+  local fleet_dir="${FLEETS_BASE_DIR}/${fleet_name}"
+  if [[ ! -d "$fleet_dir" ]]; then
+    err "Fleet '${fleet_name}' not found"
+    return 1
+  fi
+
+  # Check skill exists somewhere
+  local _found=false
+  [[ -d "${GLOBAL_SKILLS_DIR}/${skill_name}" ]] && _found=true
+  if [[ "$_found" == "false" && -n "${CONFIG_FILE:-}" ]]; then
+    local _proj_skills="$(dirname "$CONFIG_FILE")/.muster/skills"
+    [[ -d "${_proj_skills}/${skill_name}" ]] && _found=true
+  fi
+  if [[ "$_found" == "false" ]]; then
+    warn "Skill '${skill_name}' not found in global or project skills (enabling anyway)"
+  fi
+
+  if ! has_cmd jq; then
+    err "jq required for fleet skill management"
+    return 1
+  fi
+
+  local skills_json="${fleet_dir}/skills.json"
+
+  # Create skills.json if it doesn't exist
+  if [[ ! -f "$skills_json" ]]; then
+    printf '{"enabled":[],"config":{}}\n' > "$skills_json"
+  fi
+
+  # Check if already enabled
+  local _already=""
+  _already=$(jq -r --arg n "$skill_name" '.enabled // [] | map(select(. == $n)) | length' "$skills_json" 2>/dev/null)
+  if [[ "$_already" != "0" && -n "$_already" ]]; then
+    info "Skill '${skill_name}' already enabled for fleet '${fleet_name}'"
+    return 0
+  fi
+
+  # Add to enabled array
+  local _tmp="${skills_json}.tmp"
+  jq --arg n "$skill_name" '.enabled = (.enabled // []) + [$n]' "$skills_json" > "$_tmp" && mv "$_tmp" "$skills_json"
+
+  ok "Skill '${skill_name}' enabled for fleet '${fleet_name}'"
+}
+
+_fleet_skill_disable() {
+  local fleet_name="${1:-}" skill_name="${2:-}"
+
+  if [[ -z "$fleet_name" || -z "$skill_name" ]]; then
+    err "Usage: muster fleet skill disable <fleet> <skill>"
+    return 1
+  fi
+
+  local skills_json="${FLEETS_BASE_DIR}/${fleet_name}/skills.json"
+  if [[ ! -f "$skills_json" ]]; then
+    err "No skills configured for fleet '${fleet_name}'"
+    return 1
+  fi
+
+  if ! has_cmd jq; then
+    err "jq required for fleet skill management"
+    return 1
+  fi
+
+  local _tmp="${skills_json}.tmp"
+  jq --arg n "$skill_name" '.enabled = [.enabled[] | select(. != $n)]' "$skills_json" > "$_tmp" && mv "$_tmp" "$skills_json"
+
+  ok "Skill '${skill_name}' disabled for fleet '${fleet_name}'"
+}
+
+_fleet_skill_configure() {
+  local fleet_name="${1:-}" skill_name="${2:-}"
+
+  if [[ -z "$fleet_name" || -z "$skill_name" ]]; then
+    err "Usage: muster fleet skill configure <fleet> <skill>"
+    return 1
+  fi
+
+  local fleet_dir="${FLEETS_BASE_DIR}/${fleet_name}"
+  if [[ ! -d "$fleet_dir" ]]; then
+    err "Fleet '${fleet_name}' not found"
+    return 1
+  fi
+
+  if ! has_cmd jq; then
+    err "jq required for fleet skill configuration"
+    return 1
+  fi
+
+  local skills_json="${fleet_dir}/skills.json"
+  if [[ ! -f "$skills_json" ]]; then
+    printf '{"enabled":[],"config":{}}\n' > "$skills_json"
+  fi
+
+  # Find the skill to read its config schema
+  local skill_json_file=""
+  if [[ -f "${GLOBAL_SKILLS_DIR}/${skill_name}/skill.json" ]]; then
+    skill_json_file="${GLOBAL_SKILLS_DIR}/${skill_name}/skill.json"
+  elif [[ -n "${CONFIG_FILE:-}" ]]; then
+    local _proj_skills="$(dirname "$CONFIG_FILE")/.muster/skills"
+    if [[ -f "${_proj_skills}/${skill_name}/skill.json" ]]; then
+      skill_json_file="${_proj_skills}/${skill_name}/skill.json"
+    fi
+  fi
+
+  if [[ -z "$skill_json_file" ]]; then
+    err "Skill '${skill_name}' not found — install it first"
+    return 1
+  fi
+
+  local config_count
+  config_count=$(jq '.config // [] | length' "$skill_json_file")
+
+  if [[ "$config_count" -eq 0 ]]; then
+    info "Skill '${skill_name}' has no configurable options"
+    return 0
+  fi
+
+  echo ""
+  printf '%b\n' "  ${BOLD}Fleet Config: ${skill_name} → ${fleet_name}${RESET}"
+  printf '%b\n' "  ${DIM}These values override the skill's base config for this fleet.${RESET}"
+  printf '%b\n' "  ${DIM}Press enter to keep current value.${RESET}"
+  echo ""
+
+  local i=0
+  while (( i < config_count )); do
+    local key label hint is_secret
+    key=$(jq -r ".config[$i].key" "$skill_json_file")
+    label=$(jq -r ".config[$i].label // .config[$i].key" "$skill_json_file")
+    hint=$(jq -r ".config[$i].hint // \"\"" "$skill_json_file")
+    is_secret=$(jq -r ".config[$i].secret // false" "$skill_json_file")
+
+    # Read current fleet override
+    local current_val=""
+    current_val=$(jq -r --arg n "$skill_name" --arg k "$key" \
+      '.config[$n][$k] // ""' "$skills_json" 2>/dev/null)
+
+    printf '%b\n' "  ${ACCENT}${label}${RESET}"
+    [[ -n "$hint" ]] && printf '%b\n' "  ${DIM}${hint}${RESET}"
+
+    if [[ -n "$current_val" ]]; then
+      if [[ "$is_secret" == "true" ]]; then
+        printf '%b\n' "  ${DIM}Current: ****${RESET}"
+      else
+        printf '%b\n' "  ${DIM}Current: ${current_val}${RESET}"
+      fi
+    fi
+
+    printf '%b' "  > "
+    local input=""
+    if [[ "$is_secret" == "true" ]]; then
+      read -rs input
+      echo ""
+    else
+      read -r input
+    fi
+
+    if [[ -n "$input" ]]; then
+      local _tmp="${skills_json}.tmp"
+      jq --arg n "$skill_name" --arg k "$key" --arg v "$input" \
+        '.config[$n] = ((.config[$n] // {}) + {($k): $v})' "$skills_json" > "$_tmp" && mv "$_tmp" "$skills_json"
+    fi
+
+    i=$(( i + 1 ))
+    echo ""
+  done
+
+  ok "Fleet config updated for '${skill_name}' → '${fleet_name}'"
+}
+
 # ── rollback ──
 
 _fleet_cmd_rollback() {
+  # Source skill manager for fleet skill hooks
+  source "$MUSTER_ROOT/lib/skills/manager.sh"
+
   # shellcheck disable=SC2034
   local target="" parallel=false
 
@@ -1660,12 +1946,26 @@ _fleet_cmd_rollback() {
   printf '%b\n' "  ${BOLD}${YELLOW}Fleet Rollback${RESET} — ${total} machine(s)"
   echo ""
 
+  # Resolve fleet name for skill hooks
+  local _fleet_name=""
+  if fleet_cfg_has_any 2>/dev/null; then
+    _fleet_name=$(fleets_list 2>/dev/null | head -1)
+  fi
+  MUSTER_FLEET_NAME="$_fleet_name"
+  MUSTER_FLEET_STRATEGY="sequential"
+  run_fleet_skill_hooks "fleet-rollback-start" "" "$_fleet_name"
+
   local succeeded=0 failed=0
   local current=0
 
   for machine in "${machines[@]}"; do
     current=$(( current + 1 ))
     _fleet_load_machine "$machine"
+
+    # Per-machine skill context
+    MUSTER_FLEET_MACHINE="$machine"
+    MUSTER_FLEET_HOST="${_FM_USER}@${_FM_HOST}"
+    MUSTER_FLEET_MODE="${_FM_MODE:-push}"
 
     progress_bar "$current" "$total" "Rollback: ${machine}..."
     echo ""
@@ -1706,10 +2006,16 @@ _fleet_cmd_rollback() {
     if (( rc == 0 )); then
       ok "${machine} rolled back"
       _history_log_event "fleet:${machine}" "rollback" "ok" ""
+      MUSTER_DEPLOY_STATUS="ok"
+      run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
+      unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
       succeeded=$(( succeeded + 1 ))
     else
       err "${machine} rollback failed"
       _history_log_event "fleet:${machine}" "rollback" "failed" ""
+      MUSTER_DEPLOY_STATUS="failed"
+      run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
+      unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
       failed=$(( failed + 1 ))
     fi
   done
@@ -1717,9 +2023,13 @@ _fleet_cmd_rollback() {
   echo ""
   if (( failed == 0 )); then
     ok "Fleet rollback complete — ${succeeded}/${total} succeeded"
+    MUSTER_DEPLOY_STATUS="ok"
   else
     warn "Fleet rollback — ${succeeded} succeeded, ${failed} failed (${total} total)"
+    MUSTER_DEPLOY_STATUS="failed"
   fi
+  run_fleet_skill_hooks "fleet-rollback-end" "" "$_fleet_name"
+  unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_NAME MUSTER_FLEET_STRATEGY 2>/dev/null
   echo ""
 }
 

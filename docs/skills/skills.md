@@ -53,7 +53,7 @@ my-skill/
 | `version` | yes | Semver version string |
 | `description` | yes | One-line description shown in `muster skill list` and marketplace |
 | `author` | no | Who made it |
-| `hooks` | no | When to auto-run: `pre-deploy`, `post-deploy`, `pre-rollback`, `post-rollback` |
+| `hooks` | no | When to auto-run (see Hooks and Fleet Hooks sections below) |
 | `requires` | no | External commands that must be available (muster warns if missing) |
 | `config` | no | Array of configuration values the user needs to provide (see below) |
 
@@ -146,6 +146,92 @@ Use this to send different notifications for success vs failure.
 
 Skills start as manual after install. Users enable them after configuring.
 
+## Fleet Hooks
+
+Skills can also fire during fleet operations (`muster fleet deploy`, `muster fleet rollback`). Fleet hooks run on your local machine (the orchestrator) — secrets never leave your machine.
+
+### Fleet Hook Names
+
+| Hook | When it fires |
+|------|---------------|
+| `fleet-deploy-start` | Before fleet deploy begins (once per fleet deploy) |
+| `fleet-deploy-end` | After fleet deploy finishes (once) |
+| `fleet-machine-deploy-start` | Before deploying to each machine |
+| `fleet-machine-deploy-end` | After deploying to each machine |
+| `fleet-rollback-start` | Before fleet rollback begins |
+| `fleet-rollback-end` | After fleet rollback finishes |
+
+### Fleet Environment Variables
+
+Fleet hooks get all the standard env vars plus:
+
+| Variable | Description |
+|----------|-------------|
+| `MUSTER_FLEET_NAME` | Fleet name (e.g. "production") |
+| `MUSTER_FLEET_MACHINE` | Machine identifier (per-machine hooks) |
+| `MUSTER_FLEET_HOST` | `user@host` of the machine |
+| `MUSTER_FLEET_STRATEGY` | `sequential`, `parallel`, or `rolling` |
+| `MUSTER_FLEET_MODE` | `muster` or `push` |
+| `MUSTER_DEPLOY_STATUS` | `ok` or `failed` (on `*-end` hooks) |
+
+### Per-Fleet Skill Config
+
+Each fleet can enable specific skills and override their config:
+
+```bash
+muster fleet skill enable production discord
+muster fleet skill configure production discord
+```
+
+This creates `~/.muster/fleets/production/skills.json`:
+
+```json
+{
+  "enabled": ["discord"],
+  "config": {
+    "discord": {
+      "MUSTER_DISCORD_CHANNEL_ID": "123456789"
+    }
+  }
+}
+```
+
+Fleet config values override the skill's base `config.env`. This lets you point the same Discord skill at different channels per fleet (production → `#production-deploys`, staging → `#staging-deploys`).
+
+If no `skills.json` exists for a fleet, the standard global/project skill settings are used.
+
+### Example: Fleet-Aware Discord Skill
+
+```json
+{
+  "name": "discord",
+  "hooks": ["post-deploy", "post-rollback", "fleet-deploy-end", "fleet-machine-deploy-end"],
+  "config": [...]
+}
+```
+
+```bash
+#!/usr/bin/env bash
+set -eo pipefail
+
+# Detect if this is a fleet event
+if [[ -n "${MUSTER_FLEET_NAME:-}" ]]; then
+  case "$MUSTER_HOOK" in
+    fleet-deploy-end)
+      TITLE="Fleet ${MUSTER_FLEET_NAME}: deploy ${MUSTER_DEPLOY_STATUS}"
+      ;;
+    fleet-machine-deploy-end)
+      TITLE="${MUSTER_FLEET_MACHINE}: ${MUSTER_DEPLOY_STATUS}"
+      ;;
+  esac
+else
+  # Standard local deploy
+  TITLE="${MUSTER_SERVICE}: deploy ${MUSTER_DEPLOY_STATUS}"
+fi
+
+# ... send to Discord
+```
+
 ## Skill Lifecycle
 
 ```
@@ -189,18 +275,35 @@ Add your skill to [muster-skills](https://github.com/Muster-dev/muster-skills):
 
 Once merged, your skill appears in `muster skill marketplace` for everyone.
 
+## Built-in Skill Templates
+
+muster ships with ready-to-use skill templates for common integrations. Install them with `muster skill create`:
+
+| Skill | Description |
+|-------|-------------|
+| `discord` | Discord bot notifications (embeds with color-coded status) |
+| `slack` | Slack incoming webhook notifications (attachments with mrkdwn) |
+| `webhook` | Generic JSON webhook (works with any HTTP endpoint) |
+
+All three support both local deploy hooks and fleet hooks out of the box.
+
 ## Example: Discord Notifications
 
-A complete skill that sends context-aware deploy notifications:
+A complete skill that sends context-aware deploy and fleet notifications:
 
 **skill.json:**
 
 ```json
 {
   "name": "discord",
-  "version": "1.0.0",
-  "description": "Send deploy notifications to Discord",
-  "hooks": ["post-deploy", "post-rollback"],
+  "version": "1.1.0",
+  "description": "Send deploy and fleet notifications to Discord",
+  "hooks": [
+    "post-deploy", "post-rollback",
+    "fleet-deploy-start", "fleet-deploy-end",
+    "fleet-machine-deploy-start", "fleet-machine-deploy-end",
+    "fleet-rollback-start", "fleet-rollback-end"
+  ],
   "requires": ["curl"],
   "config": [
     {
@@ -227,24 +330,80 @@ set -eo pipefail
 [[ -z "${MUSTER_DISCORD_BOT_TOKEN:-}" ]] && exit 0
 [[ -z "${MUSTER_DISCORD_CHANNEL_ID:-}" ]] && exit 0
 
-SERVICE="${MUSTER_SERVICE_NAME:-${MUSTER_SERVICE:-unknown}}"
+HOOK="${MUSTER_HOOK:-unknown}"
 STATUS="${MUSTER_DEPLOY_STATUS:-unknown}"
+SERVICE="${MUSTER_SERVICE_NAME:-${MUSTER_SERVICE:-}}"
+FLEET="${MUSTER_FLEET_NAME:-}"
+MACHINE="${MUSTER_FLEET_MACHINE:-}"
+HOST="${MUSTER_FLEET_HOST:-}"
+STRATEGY="${MUSTER_FLEET_STRATEGY:-}"
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-case "${MUSTER_HOOK}:${STATUS}" in
-  post-deploy:success) COLOR=3066993;  TITLE="Deployed ${SERVICE}" ;;
-  post-deploy:failed)  COLOR=15158332; TITLE="Deploy FAILED: ${SERVICE}" ;;
-  post-rollback:*)     COLOR=15105570; TITLE="Rolled back ${SERVICE}" ;;
-  *)                   COLOR=9807270;  TITLE="${MUSTER_HOOK}: ${SERVICE}" ;;
+COLOR_GREEN=3066993; COLOR_RED=15158332
+COLOR_ORANGE=15105570; COLOR_BLUE=3447003; COLOR_GREY=9807270
+COLOR=$COLOR_GREY; TITLE=""; DESC=""
+
+case "$HOOK" in
+  fleet-deploy-start)
+    COLOR=$COLOR_BLUE; TITLE="Fleet deploy started: ${FLEET}"; DESC="Strategy: ${STRATEGY}" ;;
+  fleet-deploy-end)
+    [[ "$STATUS" == "ok" ]] && { COLOR=$COLOR_GREEN; TITLE="Fleet deploy complete: ${FLEET}"; } \
+                             || { COLOR=$COLOR_RED;   TITLE="Fleet deploy FAILED: ${FLEET}"; }
+    DESC="Strategy: ${STRATEGY}" ;;
+  fleet-machine-deploy-start)
+    COLOR=$COLOR_BLUE; TITLE="Deploying to ${MACHINE}"; DESC="Host: ${HOST}" ;;
+  fleet-machine-deploy-end)
+    [[ "$STATUS" == "ok" ]] && { COLOR=$COLOR_GREEN; TITLE="Deployed to ${MACHINE}"; } \
+                             || { COLOR=$COLOR_RED;   TITLE="Deploy FAILED: ${MACHINE}"; }
+    DESC="Host: ${HOST}" ;;
+  fleet-rollback-start)
+    COLOR=$COLOR_ORANGE; TITLE="Fleet rollback started: ${FLEET}" ;;
+  fleet-rollback-end)
+    [[ "$STATUS" == "ok" ]] && { COLOR=$COLOR_GREEN; TITLE="Fleet rollback complete: ${FLEET}"; } \
+                             || { COLOR=$COLOR_RED;   TITLE="Fleet rollback FAILED: ${FLEET}"; } ;;
+  post-deploy)
+    case "$STATUS" in
+      success) COLOR=$COLOR_GREEN; TITLE="Deployed ${SERVICE}" ;;
+      failed)  COLOR=$COLOR_RED;   TITLE="Deploy FAILED: ${SERVICE}" ;;
+      skipped) COLOR=$COLOR_GREY;  TITLE="Deploy skipped: ${SERVICE}" ;;
+    esac ;;
+  post-rollback)
+    case "$STATUS" in
+      success) COLOR=$COLOR_GREEN;  TITLE="Rolled back ${SERVICE}" ;;
+      failed)  COLOR=$COLOR_RED;    TITLE="Rollback FAILED: ${SERVICE}" ;;
+      *)       COLOR=$COLOR_ORANGE; TITLE="Rollback ${STATUS}: ${SERVICE}" ;;
+    esac ;;
+  *) TITLE="${HOOK}: ${SERVICE:-fleet}" ;;
 esac
+
+TITLE="${TITLE//\"/\\\"}"; DESC="${DESC//\"/\\\"}"
+EMBED="{\"title\":\"${TITLE}\",\"color\":${COLOR},\"timestamp\":\"${TIMESTAMP}\""
+[[ -n "$DESC" ]]  && EMBED="${EMBED},\"description\":\"${DESC}\""
+[[ -n "$FLEET" ]] && EMBED="${EMBED},\"footer\":{\"text\":\"Fleet: ${FLEET}\"}"
+EMBED="${EMBED}}"
 
 curl -sf -X POST \
   "https://discord.com/api/v10/channels/${MUSTER_DISCORD_CHANNEL_ID}/messages" \
   -H "Authorization: Bot ${MUSTER_DISCORD_BOT_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d "{\"embeds\":[{\"title\":\"${TITLE}\",\"color\":${COLOR}}]}" \
+  -d "{\"embeds\":[${EMBED}]}" \
   > /dev/null 2>&1 || true
 
 exit 0
+```
+
+### Per-fleet Discord channels
+
+Use fleet skill config to send production deploys to `#production-deploys` and staging to `#staging-deploys`:
+
+```bash
+muster fleet skill enable production discord
+muster fleet skill configure production discord
+# Set MUSTER_DISCORD_CHANNEL_ID to the production channel
+
+muster fleet skill enable staging discord
+muster fleet skill configure staging discord
+# Set MUSTER_DISCORD_CHANNEL_ID to the staging channel
 ```
 
 ## Testing Your Skill

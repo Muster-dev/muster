@@ -1,0 +1,30 @@
+{
+  "name": "webhook",
+  "version": "1.0.0",
+  "description": "Send deploy and fleet events to any webhook endpoint",
+  "author": "muster",
+  "hooks": [
+    "post-deploy",
+    "post-rollback",
+    "fleet-deploy-start",
+    "fleet-deploy-end",
+    "fleet-machine-deploy-start",
+    "fleet-machine-deploy-end",
+    "fleet-rollback-start",
+    "fleet-rollback-end"
+  ],
+  "requires": ["curl"],
+  "config": [
+    {
+      "key": "MUSTER_WEBHOOK_URL",
+      "label": "Webhook URL",
+      "hint": "e.g. https://example.com/hooks/deploy"
+    },
+    {
+      "key": "MUSTER_WEBHOOK_SECRET",
+      "label": "Webhook Secret (optional)",
+      "hint": "Sent as X-Webhook-Secret header for signature verification",
+      "secret": true
+    }
+  ]
+}

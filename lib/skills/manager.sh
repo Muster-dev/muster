@@ -3,6 +3,10 @@
 # Skills are per-project (.muster/skills/) with global fallback (~/.muster/skills/).
 
 GLOBAL_SKILLS_DIR="${HOME}/.muster/skills"
+FLEETS_BASE_DIR="${HOME}/.muster/fleets"
+
+# Fleet skills state (set by run_fleet_skill_hooks, read by run_skill_hooks)
+_FLEET_SKILLS_JSON=""
 
 # Resolve the active skills directory:
 # - Inside a project: .muster/skills/ (per-project)
@@ -217,8 +221,16 @@ skill_create() {
 
   mkdir -p "${SKILLS_DIR}/${name}"
 
-  # Write skill.json
-  cat > "${SKILLS_DIR}/${name}/skill.json" << SKILLJSON
+  # Check for built-in template
+  local _tpl_dir="${MUSTER_ROOT}/templates/skills/${name}"
+  if [[ -d "$_tpl_dir" && -f "${_tpl_dir}/skill.json" && -f "${_tpl_dir}/run.sh" ]]; then
+    cp "${_tpl_dir}/skill.json" "${SKILLS_DIR}/${name}/skill.json"
+    cp "${_tpl_dir}/run.sh" "${SKILLS_DIR}/${name}/run.sh"
+    chmod +x "${SKILLS_DIR}/${name}/run.sh"
+    ok "Skill '${name}' created from built-in template"
+  else
+    # Write skill.json
+    cat > "${SKILLS_DIR}/${name}/skill.json" << SKILLJSON
 {
   "name": "${name}",
   "version": "1.0.0",
@@ -229,32 +241,61 @@ skill_create() {
 }
 SKILLJSON
 
-  # Write run.sh stub
-  cat > "${SKILLS_DIR}/${name}/run.sh" << 'RUNSH'
+    # Write run.sh stub
+    cat > "${SKILLS_DIR}/${name}/run.sh" << 'RUNSH'
 #!/usr/bin/env bash
 # run.sh — skill entry point
 #
 # Environment variables available:
 #   MUSTER_PROJECT_DIR   — path to the project root
-#   MUSTER_CONFIG_FILE   — path to muster.json
+#   MUSTER_CONFIG_FILE   — path to deploy.json
 #   MUSTER_SERVICE       — current service name (if run per-service)
 #   MUSTER_HOOK          — which hook triggered this (e.g. "post-deploy")
+#
+# Fleet hooks also get:
+#   MUSTER_FLEET_NAME    — fleet name (e.g. "production")
+#   MUSTER_FLEET_MACHINE — machine identifier
+#   MUSTER_FLEET_HOST    — user@host
+#   MUSTER_FLEET_STRATEGY — sequential/parallel/rolling
+#   MUSTER_FLEET_MODE    — muster/push
+#   MUSTER_DEPLOY_STATUS — ok/failed (on *-end hooks)
 
 echo "Hello from skill!"
 
 # Your logic here
 RUNSH
-  chmod +x "${SKILLS_DIR}/${name}/run.sh"
-
-  ok "Skill '${name}' created"
+    chmod +x "${SKILLS_DIR}/${name}/run.sh"
+    ok "Skill '${name}' created"
+  fi
   echo ""
   printf '  %b%s/%s/%b\n' "${DIM}" "$SKILLS_DIR" "$name" "${RESET}"
   printf '  %b  skill.json  — edit name, description, hooks%b\n' "${DIM}" "${RESET}"
   printf '  %b  run.sh      — add your logic%b\n' "${DIM}" "${RESET}"
   echo ""
-  printf '  %bHooks: add "pre-deploy", "post-deploy", "pre-rollback",%b\n' "${DIM}" "${RESET}"
-  printf '  %b       "post-rollback" to the hooks array in skill.json%b\n' "${DIM}" "${RESET}"
+  printf '  %bLocal hooks:  "pre-deploy", "post-deploy", "pre-rollback", "post-rollback"%b\n' "${DIM}" "${RESET}"
+  printf '  %bFleet hooks:  "fleet-deploy-start", "fleet-deploy-end",%b\n' "${DIM}" "${RESET}"
+  printf '  %b              "fleet-machine-deploy-start", "fleet-machine-deploy-end",%b\n' "${DIM}" "${RESET}"
+  printf '  %b              "fleet-rollback-start", "fleet-rollback-end"%b\n' "${DIM}" "${RESET}"
   echo ""
+  # List available templates if this was a blank scaffold
+  if [[ ! -d "${MUSTER_ROOT}/templates/skills/${name}" ]]; then
+    local _tpls=""
+    if [[ -d "${MUSTER_ROOT}/templates/skills" ]]; then
+      local _d
+      for _d in "${MUSTER_ROOT}/templates/skills"/*/; do
+        [[ -d "$_d" ]] || continue
+        local _bn
+        _bn=$(basename "$_d")
+        [[ -n "$_tpls" ]] && _tpls="${_tpls}, "
+        _tpls="${_tpls}${_bn}"
+      done
+    fi
+    if [[ -n "$_tpls" ]]; then
+      printf '  %bBuilt-in templates: %s%b\n' "${DIM}" "$_tpls" "${RESET}"
+      echo ""
+    fi
+  fi
+  printf '  %bNext: muster skill configure %s%b\n' "${DIM}" "$name" "${RESET}"
   printf '  %bTest: muster skill run %s%b\n' "${DIM}" "$name" "${RESET}"
   echo ""
 }
@@ -616,6 +657,17 @@ run_skill_hooks() {
       local skill_name
       skill_name=$(basename "$skill_dir")
 
+      # Fleet scoping: if fleet skills.json is active, only run listed skills
+      if [[ -n "$_FLEET_SKILLS_JSON" && -f "$_FLEET_SKILLS_JSON" ]] && has_cmd jq; then
+        local _fleet_match=""
+        _fleet_match=$(jq -r --arg n "$skill_name" \
+          '.enabled // [] | map(select(. == $n)) | length' \
+          "$_FLEET_SKILLS_JSON" 2>/dev/null)
+        if [[ "$_fleet_match" == "0" || -z "$_fleet_match" ]]; then
+          continue
+        fi
+      fi
+
       # Skip if already ran (project version takes priority over global)
       case " $_ran_skills " in
         *" $skill_name "*) continue ;;
@@ -657,13 +709,25 @@ print('yes' if sys.argv[2] in d.get('hooks',[]) else 'no')
         export MUSTER_SERVICE="$svc_name"
         export MUSTER_HOOK="$hook_name"
 
+        # Export fleet context if set by caller
+        [[ -n "${MUSTER_FLEET_NAME:-}" ]]     && export MUSTER_FLEET_NAME
+        [[ -n "${MUSTER_FLEET_MACHINE:-}" ]]  && export MUSTER_FLEET_MACHINE
+        [[ -n "${MUSTER_FLEET_HOST:-}" ]]     && export MUSTER_FLEET_HOST
+        [[ -n "${MUSTER_FLEET_STRATEGY:-}" ]] && export MUSTER_FLEET_STRATEGY
+        [[ -n "${MUSTER_FLEET_MODE:-}" ]]     && export MUSTER_FLEET_MODE
+        [[ -n "${MUSTER_DEPLOY_STATUS:-}" ]]  && export MUSTER_DEPLOY_STATUS
+
         _load_env_file
         _skill_load_config "${skill_dir%/}"
+
+        # Overlay fleet-specific config if available
+        _fleet_skill_load_config "$skill_name"
 
         "${skill_dir}/run.sh" 2>&1 || {
           warn "Skill '${skill_name}' failed on ${hook_name} (non-fatal)"
         }
 
+        _fleet_skill_unload_config
         _skill_unload_config
         _unload_env_file
         unset MUSTER_PROJECT_DIR MUSTER_CONFIG_FILE MUSTER_SERVICE MUSTER_HOOK 2>/dev/null
@@ -671,6 +735,66 @@ print('yes' if sys.argv[2] in d.get('hooks',[]) else 'no')
     done
   done
   IFS="$IFS_SAVE"
+}
+
+# ---------------------------------------------------------------------------
+# Fleet skill config overlay
+# ---------------------------------------------------------------------------
+
+_FLEET_SKILL_CONFIG_KEYS=""
+
+# Load fleet-specific config overrides for a skill
+# Reads from _FLEET_SKILLS_JSON .config.<skill_name> and exports key=value pairs
+_fleet_skill_load_config() {
+  local skill_name="$1"
+  _FLEET_SKILL_CONFIG_KEYS=""
+
+  [[ -z "$_FLEET_SKILLS_JSON" || ! -f "$_FLEET_SKILLS_JSON" ]] && return 0
+  ! has_cmd jq && return 0
+
+  local _keys=""
+  _keys=$(jq -r --arg n "$skill_name" \
+    '.config[$n] // {} | keys[]' "$_FLEET_SKILLS_JSON" 2>/dev/null) || return 0
+
+  local _k
+  for _k in $_keys; do
+    local _v=""
+    _v=$(jq -r --arg n "$skill_name" --arg k "$_k" \
+      '.config[$n][$k] // ""' "$_FLEET_SKILLS_JSON" 2>/dev/null)
+    if [[ -n "$_v" ]]; then
+      export "$_k=$_v"
+      _FLEET_SKILL_CONFIG_KEYS="${_FLEET_SKILL_CONFIG_KEYS} ${_k}"
+    fi
+  done
+}
+
+# Unload fleet-specific config vars
+_fleet_skill_unload_config() {
+  local _fk
+  for _fk in $_FLEET_SKILL_CONFIG_KEYS; do
+    unset "$_fk" 2>/dev/null
+  done
+  _FLEET_SKILL_CONFIG_KEYS=""
+}
+
+# ---------------------------------------------------------------------------
+# Fleet-aware skill hook runner
+# ---------------------------------------------------------------------------
+
+# run_fleet_skill_hooks(hook_name, svc_name, fleet_name)
+# Like run_skill_hooks but respects fleet skills.json for enablement + config
+run_fleet_skill_hooks() {
+  local hook_name="$1" svc_name="${2:-}" fleet_name="${3:-}"
+
+  if [[ -n "$fleet_name" ]]; then
+    local skills_json="${FLEETS_BASE_DIR}/${fleet_name}/skills.json"
+    if [[ -f "$skills_json" ]]; then
+      _FLEET_SKILLS_JSON="$skills_json"
+    fi
+  fi
+
+  run_skill_hooks "$hook_name" "$svc_name"
+  _FLEET_SKILLS_JSON=""
 }
 
 # ---------------------------------------------------------------------------

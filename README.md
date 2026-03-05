@@ -76,9 +76,17 @@ muster setup --help                                     # see all flags
 | `muster fleet` | Fleet manager — deploy to multiple machines |
 | `muster fleet deploy` | Deploy project to fleet machines |
 | `muster fleet status` | Check health across fleet |
+| `muster fleet rollback` | Rollback across fleet |
+| `muster fleet skill list <fleet>` | Show skills enabled for a fleet |
+| `muster fleet skill enable <fleet> <skill>` | Enable a skill for fleet events |
+| `muster fleet skill disable <fleet> <skill>` | Disable a fleet skill |
+| `muster fleet skill configure <fleet> <skill>` | Set fleet-specific skill config |
 | `muster group` | Group orchestration — coordinate multi-project deploys |
 | `muster skill add <url>` | Install a skill addon |
 | `muster skill list` | List installed skills |
+| `muster skill create <name>` | Scaffold a new skill |
+| `muster skill configure <name>` | Set API keys, webhooks, etc. |
+| `muster skill enable <name>` | Enable auto-run on hooks |
 | `muster skill remove <name>` | Remove a skill |
 
 ## How It Works
@@ -225,7 +233,13 @@ muster fleet rollback                # rollback across fleet
 - **SSH** (default) — direct connection, works on any reachable host
 - **Cloud** — WebSocket relay for machines behind NATs/firewalls, end-to-end encrypted (X25519 + NaCl box)
 
-Fleet machines are configured in `remotes.json` alongside your `deploy.json`. The dashboard shows a Fleet panel with live connectivity status. See [FLEET.md](FLEET.md) for the full guide.
+**Security:** Fleet uses RSA-4096 keypairs per fleet for encrypted agent reports (AES-256-CBC session keys wrapped with RSA-4096). Ed25519 payload signing with RSA-2048 fallback for tamper detection. Secrets never leave your machine.
+
+**Agents:** Optional scout daemons on remote machines that push encrypted health reports back to HQ. Install with `muster fleet install-agent`.
+
+Fleet machines are configured in `~/.muster/fleets/<fleet>/` directory structure. The dashboard shows a Fleet panel with live connectivity status. See [FLEET.md](FLEET.md) for the full guide.
+
+**Fleet docs:** [Setup Wizard](docs/fleet/setup-wizard.md) | [Deploy Strategies](docs/fleet/deploy-strategies.md) | [Fleet Skills](docs/fleet/skills.md) | [Cloud Transport](docs/fleet/cloud-transport.md) | [Encryption](docs/security/encryption.md) | [Agents](docs/agent/agent.md)
 
 ## Groups — Multi-Project Orchestration
 
@@ -292,14 +306,32 @@ muster settings --global scanner_exclude add old # add exclude pattern
 
 ## Skills
 
-Community addons that extend muster:
+Addons that extend muster — notifications, monitoring, automation, anything. Skills are bash scripts with a `skill.json` manifest that fire on deploy, rollback, and fleet events.
+
+```bash
+muster skill create discord          # scaffold from built-in template
+muster skill configure discord       # set API keys
+muster skill enable discord          # auto-run on deploy/rollback hooks
+```
+
+**Built-in templates:** Discord, Slack, and generic Webhook — all support fleet hooks out of the box. Install community skills from git URLs:
 
 ```bash
 muster skill add https://github.com/someone/muster-skill-ssl
-muster skill add https://github.com/someone/muster-skill-notify
 ```
 
-Skills are bash scripts with a `skill.json` manifest. Install from git URLs or local paths — muster reads the `name` field from `skill.json`. Installed skills appear automatically in the dashboard Actions menu. See [docs/skills.md](docs/skills.md) for how to create one.
+### Fleet Skills
+
+Skills fire during fleet operations too. Per-fleet config lets you send production deploys to `#production-deploys` and staging to `#staging-deploys`:
+
+```bash
+muster fleet skill enable production discord
+muster fleet skill configure production discord    # override channel ID per fleet
+```
+
+Fleet hooks: `fleet-deploy-start`, `fleet-deploy-end`, `fleet-machine-deploy-start`, `fleet-machine-deploy-end`, `fleet-rollback-start`, `fleet-rollback-end`. Skills always execute on your machine — secrets never leave the orchestrator.
+
+See [docs/skills/skills.md](docs/skills/skills.md) for the full skill authoring guide.
 
 ## MCP Integration
 
@@ -406,7 +438,7 @@ When a deploy fails, muster doesn't just abort — it shows interactive recovery
 
 On k8s services, muster auto-diagnoses failures before showing the menu — inspecting pod events, logs, and matching 11 known error patterns (ImagePullBackOff, ErrImagePull, ErrImageNeverPull, InvalidImageName, OOMKilled, CrashLoopBackOff, CreateContainerConfigError, RunContainerError, Unschedulable, missing secrets/PVCs, version mismatch). K8s deploy hooks also detect terminal errors early (within ~10s) instead of waiting for the full rollout timeout, and show rolling progress (`"2/3 pods ready"`).
 
-Skills with `post-deploy` hooks (like Discord notifications) fire immediately when a deploy fails — before the recovery menu appears — so your team gets alerted right away.
+Skills with `post-deploy` hooks (like Discord notifications) fire immediately when a deploy fails — before the recovery menu appears — so your team gets alerted right away. Fleet skills fire on fleet events too — `fleet-deploy-end` notifies your team when a multi-machine deploy completes or fails.
 
 ## Doctor
 
@@ -465,6 +497,18 @@ muster --no-verify ...     # bypass startup check
 The manifest is generated automatically during install and updates. If tampering is detected, muster shows which files changed and offers to repair via `git checkout`.
 
 The startup check uses an inline bootstrap trust chain — it verifies the integrity libraries themselves (via raw `openssl` + `shasum`) before sourcing them, so no muster code runs unchecked.
+
+## Documentation
+
+| Topic | Guide |
+|-------|-------|
+| **Deploy** | [Deploy Flow](docs/deploy/deploy.md) · [Hooks](docs/deploy/hooks.md) · [Setup Wizard](docs/deploy/setup-wizard.md) |
+| **Fleet** | [Fleet Guide](docs/fleet/fleet.md) · [Setup Wizard](docs/fleet/setup-wizard.md) · [Deploy Strategies](docs/fleet/deploy-strategies.md) · [Cloud Transport](docs/fleet/cloud-transport.md) |
+| **Skills** | [Authoring Guide](docs/skills/skills.md) · [Marketplace](docs/skills/marketplace.md) · [Fleet Skills](docs/fleet/skills.md) |
+| **Security** | [Encryption](docs/security/encryption.md) · [Signing](docs/security/signing.md) · [Integrity](docs/security/integrity.md) |
+| **Agents** | [Agent Guide](docs/agent/agent.md) · [Installation](docs/agent/installation.md) |
+
+See [docs/docs-index.md](docs/docs-index.md) for the full index.
 
 ## Philosophy
 
