@@ -149,7 +149,7 @@ ${_k8s_env_lines}"
     elif [[ "$_use_just" == "true" ]]; then
       _run_with_timeout "$_rb_timeout" just --justfile "${_rb_hook_dir}/justfile" rollback >> "$log_file" 2>&1
     else
-      _run_with_timeout "$_rb_timeout" "$hook" >> "$log_file" 2>&1
+      _run_with_timeout "$_rb_timeout" bash "$hook" >> "$log_file" 2>&1
     fi
     local rc=$?
     stop_spinner
@@ -205,7 +205,7 @@ ${_k8s_env_lines}"
             elif _just_available "$_rb_hook_dir" && _just_has_recipe "$_rb_hook_dir" "cleanup"; then
               _run_with_timeout "$_rb_timeout" just --justfile "${_rb_hook_dir}/justfile" cleanup >> "${log_dir}/${target}-cleanup-$(date +%Y%m%d-%H%M%S).log" 2>&1
             else
-              _run_with_timeout "$_rb_timeout" "$cleanup_hook" >> "${log_dir}/${target}-cleanup-$(date +%Y%m%d-%H%M%S).log" 2>&1
+              _run_with_timeout "$_rb_timeout" bash "$cleanup_hook" >> "${log_dir}/${target}-cleanup-$(date +%Y%m%d-%H%M%S).log" 2>&1
             fi
             stop_spinner
             ok "${name} cleaned up"

@@ -113,6 +113,36 @@ _group_validate_ssh_key() {
   fi
 }
 
+# ── Fleet-dir project loader ──
+# Load project at flat index within a fleet (group_name)
+# Sets _FP_* vars via fleet_cfg_project_load
+# After calling: _FP_TRANSPORT == "local" for local, "ssh"/"cloud" for remote
+#                _FP_PATH for local project path
+#                _FP_HOST, _FP_USER, _FP_PORT for remote
+#                _FP_FLEET, _FP_GROUP, _FP_PROJECT for save operations
+_group_load_project_at() {
+  local name="$1" index="$2"
+  local _i=0
+  local group project
+  for group in $(fleet_cfg_groups "$name"); do
+    for project in $(fleet_cfg_group_projects "$name" "$group"); do
+      if (( _i == index )); then
+        fleet_cfg_project_load "$name" "$group" "$project"
+        return 0
+      fi
+      _i=$(( _i + 1 ))
+    done
+  done
+  return 1
+}
+
+# Check if project at index is local (returns 0) or remote (returns 1)
+_group_project_is_local() {
+  local name="$1" index="$2"
+  _group_load_project_at "$name" "$index" || return 1
+  [[ "$_FP_TRANSPORT" == "local" ]]
+}
+
 # ── Main entry ──
 
 cmd_group() {
@@ -210,7 +240,18 @@ _group_cmd_list() {
   if [[ "$json_mode" == "true" ]]; then
     source "$MUSTER_ROOT/lib/core/auth.sh"
     _json_auth_gate "read" || return 1
-    jq '.' "$GROUPS_CONFIG_FILE"
+    # Build JSON from fleet dirs
+    local _json="{}"
+    local _g
+    for _g in $(groups_list); do
+      local _total _display
+      _total=$(groups_project_count "$_g")
+      fleet_cfg_load "$_g" 2>/dev/null
+      _display="${_FL_NAME:-$_g}"
+      _json=$(printf '%s' "$_json" | jq --arg g "$_g" --arg d "$_display" --argjson t "$_total" \
+        '. + {($g): {name: $d, project_count: $t}}')
+    done
+    printf '%s\n' "$_json" | jq '.'
     return 0
   fi
 
@@ -233,9 +274,8 @@ _group_cmd_list() {
   local gi=0
   while (( gi < ${#group_names[@]} )); do
     local gname="${group_names[$gi]}"
-    local display_name
-    display_name=$(groups_get ".groups.\"${gname}\".name")
-    [[ "$display_name" == "null" || -z "$display_name" ]] && display_name="$gname"
+    local display_name="$gname"
+    fleet_cfg_load "$gname" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && display_name="$_FL_NAME"
 
     local total
     total=$(groups_project_count "$gname")
@@ -246,17 +286,20 @@ _group_cmd_list() {
 
     local pi=0
     while (( pi < total )); do
-      local _type _desc _pname
-      _type=$(jq -r --arg n "$gname" --argjson i "$pi" \
-        '.groups[$n].projects[$i].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+      local _desc _pname
       _desc=$(groups_project_desc "$gname" "$pi")
       _pname=$(groups_project_name "$gname" "$pi")
 
+      local _is_local=false
+      if _group_project_is_local "$gname" "$pi"; then
+        _is_local=true
+      fi
+
       local _display_desc="$_desc"
-      [[ "$_type" == "local" ]] && _display_desc="${_desc/#$HOME/~}"
+      [[ "$_is_local" == "true" ]] && _display_desc="${_desc/#$HOME/~}"
 
       local _icon _color
-      if [[ "$_type" == "local" ]]; then
+      if [[ "$_is_local" == "true" ]]; then
         _icon="●"
         if [[ -d "$_desc" ]]; then
           _color="${GREEN}"
@@ -810,11 +853,7 @@ _group_cmd_edit_cli() {
     return 1
   fi
 
-  local _type
-  _type=$(jq -r --arg n "$group_name" --argjson i "$index" \
-    '.groups[$n].projects[$i].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-
-  if [[ "$_type" != "remote" ]]; then
+  if _group_project_is_local "$group_name" "$index"; then
     err "Only remote projects can be edited via CLI (local projects: remove and re-add)"
     return 1
   fi
@@ -870,27 +909,31 @@ _group_cmd_edit_cli() {
     esac
   fi
 
-  # Apply only specified fields
-  local tmp="${GROUPS_CONFIG_FILE}.tmp"
+  # Apply to fleet dir project.json
+  _group_load_project_at "$group_name" "$index" || { err "Project not found"; return 1; }
+
+  local _pcfg
+  _pcfg="$(fleet_cfg_project_dir "$_FP_FLEET" "$_FP_GROUP" "$_FP_PROJECT")/project.json"
+
   local jq_expr=""
-  [[ -n "$new_host" ]] && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].host = \$host"
-  [[ -n "$new_user" ]] && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].user = \$user"
-  [[ -n "$new_port" ]] && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].port = (\$port | tonumber)"
-  [[ -n "$new_key" ]]  && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].auth.identity_file = \$key"
-  [[ -n "$new_dir" ]]  && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].project_dir = \$dir"
-  [[ "$new_cloud" == "true" ]]  && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].cloud = true"
-  [[ "$new_cloud" == "false" ]] && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].cloud = false"
-  [[ -n "$new_auth" ]] && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].auth.method = \$auth"
-  [[ -n "$new_auth_mode" ]] && jq_expr="${jq_expr} | .groups[\$g].projects[\$i].auth.mode = \$authmode"
+  [[ -n "$new_host" ]] && jq_expr="${jq_expr} | .machine.host = \$host"
+  [[ -n "$new_user" ]] && jq_expr="${jq_expr} | .machine.user = \$user"
+  [[ -n "$new_port" ]] && jq_expr="${jq_expr} | .machine.port = (\$port | tonumber)"
+  [[ -n "$new_key" ]]  && jq_expr="${jq_expr} | .machine.identity_file = \$key"
+  [[ -n "$new_dir" ]]  && jq_expr="${jq_expr} | .remote_path = \$dir"
+  [[ "$new_cloud" == "true" ]]  && jq_expr="${jq_expr} | .machine.transport = \"cloud\""
+  [[ "$new_cloud" == "false" ]] && jq_expr="${jq_expr} | .machine.transport = \"ssh\""
+  [[ -n "$new_auth" ]] && jq_expr="${jq_expr} | .auth.method = \$auth"
+  [[ -n "$new_auth_mode" ]] && jq_expr="${jq_expr} | .auth.mode = \$authmode"
 
   # Strip leading " | "
   jq_expr="${jq_expr# | }"
 
-  jq --arg g "$group_name" --argjson i "$index" \
-    --arg host "${new_host:-}" --arg user "${new_user:-}" \
+  local tmp="${_pcfg}.tmp"
+  jq --arg host "${new_host:-}" --arg user "${new_user:-}" \
     --arg port "${new_port:-0}" --arg key "${new_key:-}" --arg dir "${new_dir:-}" \
     --arg auth "${new_auth:-}" --arg authmode "${new_auth_mode:-}" \
-    "$jq_expr" "$GROUPS_CONFIG_FILE" > "$tmp" && mv "$tmp" "$GROUPS_CONFIG_FILE"
+    "$jq_expr" "$_pcfg" > "$tmp" && mv "$tmp" "$_pcfg"
 
   ok "Updated remote project at index ${index}"
 }
@@ -983,9 +1026,8 @@ _group_cmd_deploy() {
     return 0
   fi
 
-  local display_name
-  display_name=$(groups_get ".groups.\"${group_name}\".name")
-  [[ "$display_name" == "null" || -z "$display_name" ]] && display_name="$group_name"
+  local display_name="$group_name"
+  fleet_cfg_load "$group_name" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && display_name="$_FL_NAME"
 
   local succeeded=0 failed=0 skipped=0
   local log_dir="$HOME/.muster/logs"
@@ -1016,13 +1058,8 @@ _group_cmd_deploy() {
   local _steps_done=0
   local _pi=0
   while (( _pi < total )); do
-    local _pt
-    _pt=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    if [[ "$_pt" == "local" ]]; then
-      local _pp
-      _pp=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-        '.groups[$n].projects[$idx].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    if _group_project_is_local "$group_name" "$_pi"; then
+      local _pp="$_FP_PATH"
       local _pc=""
       [[ -f "${_pp}/deploy.json" ]] && _pc="${_pp}/deploy.json"
       [[ -z "$_pc" && -f "${_pp}/muster.json" ]] && _pc="${_pp}/muster.json"
@@ -1044,13 +1081,8 @@ _group_cmd_deploy() {
   local _any_sudo_global=false
   _pi=0
   while (( _pi < total )); do
-    local _pt
-    _pt=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    if [[ "$_pt" == "local" ]]; then
-      local _pp
-      _pp=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-        '.groups[$n].projects[$idx].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    if _group_project_is_local "$group_name" "$_pi"; then
+      local _pp="$_FP_PATH"
       if [[ -d "${_pp:-}" && -d "${_pp}/.muster/hooks" ]]; then
         if grep -rq 'sudo' "${_pp}/.muster/hooks" 2>/dev/null; then
           _any_sudo_global=true; break
@@ -1082,15 +1114,11 @@ _group_cmd_deploy() {
   local _needs_sshpass=false
   _pi=0
   while (( _pi < total )); do
-    local _pt _am _cl
-    _pt=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    _cl=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].cloud // false' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    _am=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].auth.method // "key"' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    if [[ "$_pt" == "remote" && "$_cl" != "true" && "$_am" == "password" ]]; then
-      _needs_sshpass=true; break
+    if ! _group_project_is_local "$group_name" "$_pi"; then
+      _groups_load_remote "$group_name" "$_pi"
+      if [[ "$_GP_CLOUD" != "true" && "$_GP_AUTH_METHOD" == "password" ]]; then
+        _needs_sshpass=true; break
+      fi
     fi
     _pi=$(( _pi + 1 ))
   done
@@ -1101,10 +1129,7 @@ _group_cmd_deploy() {
   local _prompted_hosts=()
   _pi=0
   while (( _pi < total )); do
-    local _pt
-    _pt=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    if [[ "$_pt" == "remote" ]]; then
+    if ! _group_project_is_local "$group_name" "$_pi"; then
       _groups_load_remote "$group_name" "$_pi"
       if [[ "$_GP_CLOUD" != "true" && "$_GP_AUTH_METHOD" == "password" ]]; then
         local _host_key="${_GP_USER}@${_GP_HOST}:${_GP_PORT}"
@@ -1143,13 +1168,10 @@ _group_cmd_deploy() {
   local _has_cloud=false
   _pi=0
   while (( _pi < total )); do
-    local _pt _cl
-    _pt=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    _cl=$(jq -r --arg n "$group_name" --argjson idx "$_pi" \
-      '.groups[$n].projects[$idx].cloud // false' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-    if [[ "$_pt" == "remote" && "$_cl" == "true" ]]; then
-      _has_cloud=true; break
+    if ! _group_project_is_local "$group_name" "$_pi"; then
+      if [[ "$_FP_TRANSPORT" == "cloud" ]]; then
+        _has_cloud=true; break
+      fi
     fi
     _pi=$(( _pi + 1 ))
   done
@@ -1183,9 +1205,9 @@ _group_cmd_deploy() {
     # shellcheck disable=SC2034
     local current=$(( i + 1 ))
 
-    local _type _pname _pdesc
-    _type=$(jq -r --arg n "$group_name" --argjson idx "$i" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    local _is_local_proj=false _pname _pdesc
+    _group_load_project_at "$group_name" "$i"
+    [[ "$_FP_TRANSPORT" == "local" ]] && _is_local_proj=true
     _pname=$(groups_project_name "$group_name" "$i")
     _pdesc=$(groups_project_desc "$group_name" "$i")
     [[ "${_pdesc:0:1}" == "/" ]] && _pdesc="${_pdesc/#$HOME/~}"
@@ -1200,11 +1222,9 @@ _group_cmd_deploy() {
 
     while true; do
 
-      if [[ "$_type" == "local" ]]; then
+      if [[ "$_is_local_proj" == "true" ]]; then
         # ── Local project: iterate services individually ──
-        local _path
-        _path=$(jq -r --arg n "$group_name" --argjson idx "$i" \
-          '.groups[$n].projects[$idx].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+        local _path="$_FP_PATH"
 
         # Pre-flight checks
         if [[ -z "$_path" || "$_path" == "null" ]]; then
@@ -1466,15 +1486,138 @@ _group_cmd_deploy() {
               _preflight_ok=true
               break
             fi
+            # Key auth failed — offer to switch to password
+            if [[ "$_ssh_err" == *"Permission denied"* ]]; then
+              echo ""
+              printf '  %b!%b SSH key auth failed for %s@%s\n' "${YELLOW}" "${RESET}" "$_GP_USER" "$_GP_HOST"
+              _section_h=$(( _section_h + 2 ))
+              menu_select "SSH auth failed" \
+                "Switch to password auth" "Enter SSH key path" "Skip" "Abort"
+              _section_h=$(( _section_h + 3 ))
+
+              case "$MENU_RESULT" in
+                "Switch to password auth")
+                  if has_cmd sshpass; then
+                    _GP_AUTH_METHOD="password"
+                    _GP_PASSWORD=$(_cred_prompt_password "SSH password for ${_GP_USER}@${_GP_HOST}")
+                    _section_h=$(( _section_h + 1 ))
+                    if [[ -n "$_GP_PASSWORD" ]]; then
+                      local _cred_key="ssh_${_GP_USER}@${_GP_HOST}:${_GP_PORT}"
+                      _cred_session_set "$_cred_key" "$_GP_PASSWORD"
+                      # Update project config to remember password auth
+                      local _pcfg
+                      _pcfg="$(fleet_cfg_project_dir "$_FP_FLEET" "$_FP_GROUP" "$_FP_PROJECT")/project.json"
+                      if [[ -f "$_pcfg" ]]; then
+                        local _ptmp="${_pcfg}.tmp"
+                        jq '.auth = {method: "password", mode: "save"}' "$_pcfg" > "$_ptmp" && mv "$_ptmp" "$_pcfg"
+                      fi
+                      # Save to keychain
+                      _cred_keychain_save "groups" "$_cred_key" "$_GP_PASSWORD" 2>/dev/null || true
+                      # Rebuild SSH opts without BatchMode for password
+                      _GROUPS_SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+                      [[ "$_GP_PORT" != "22" ]] && _GROUPS_SSH_OPTS="${_GROUPS_SSH_OPTS} -p ${_GP_PORT}"
+                      export SSHPASS="$_GP_PASSWORD"
+                      # shellcheck disable=SC2086
+                      if sshpass -e ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "echo ok" &>/dev/null; then
+                        unset SSHPASS
+                        _preflight_ok=true
+                        ok "Connected with password auth"
+                        _section_h=$(( _section_h + 1 ))
+                        # Copy SSH key to remote for future key auth
+                        printf '  %bCopy SSH key to server for future logins? (y/N): %b' "${DIM}" "${RESET}"
+                        local _copy_key=""
+                        IFS= read -rsn1 _copy_key 2>/dev/null || true
+                        _section_h=$(( _section_h + 1 ))
+                        if [[ "$_copy_key" == "y" || "$_copy_key" == "Y" ]]; then
+                          printf '\n'
+                          export SSHPASS="$_GP_PASSWORD"
+                          local _key_to_copy=""
+                          [[ -f "$HOME/.ssh/id_ed25519.pub" ]] && _key_to_copy="$HOME/.ssh/id_ed25519.pub"
+                          [[ -z "$_key_to_copy" && -f "$HOME/.ssh/id_rsa.pub" ]] && _key_to_copy="$HOME/.ssh/id_rsa.pub"
+                          if [[ -n "$_key_to_copy" ]]; then
+                            local _pub_key
+                            _pub_key=$(cat "$_key_to_copy")
+                            # shellcheck disable=SC2086
+                            if sshpass -e ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" \
+                              "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${_pub_key}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null; then
+                              ok "SSH key copied — future deploys will use key auth"
+                              # Revert config to key auth since key is now installed
+                              if [[ -f "$_pcfg" ]]; then
+                                local _ptmp="${_pcfg}.tmp"
+                                jq 'del(.auth)' "$_pcfg" > "$_ptmp" && mv "$_ptmp" "$_pcfg"
+                              fi
+                            else
+                              warn "Could not copy SSH key (password auth will be used)"
+                            fi
+                          else
+                            warn "No SSH public key found (~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub)"
+                          fi
+                          unset SSHPASS
+                          _section_h=$(( _section_h + 1 ))
+                        else
+                          printf '\n'
+                        fi
+                      else
+                        unset SSHPASS
+                        warn "Password auth also failed"
+                        _section_h=$(( _section_h + 1 ))
+                      fi
+                    fi
+                  else
+                    warn "sshpass not installed — cannot use password auth"
+                    printf '  %bInstall: brew install hudochenkov/sshpass/sshpass%b\n' "${DIM}" "${RESET}"
+                    _section_h=$(( _section_h + 2 ))
+                  fi
+                  ;;
+                "Enter SSH key path")
+                  printf '  SSH key path: '
+                  local _new_key_path; IFS= read -r _new_key_path
+                  _section_h=$(( _section_h + 1 ))
+                  if [[ -n "$_new_key_path" ]]; then
+                    local _resolved="$_new_key_path"
+                    case "$_resolved" in "~"/*) _resolved="${HOME}/${_resolved#\~/}" ;; esac
+                    if [[ -f "$_resolved" ]]; then
+                      _GP_IDENTITY="$_new_key_path"
+                      # Update project config
+                      local _pcfg
+                      _pcfg="$(fleet_cfg_project_dir "$_FP_FLEET" "$_FP_GROUP" "$_FP_PROJECT")/project.json"
+                      if [[ -f "$_pcfg" ]]; then
+                        local _ptmp="${_pcfg}.tmp"
+                        jq --arg k "$_new_key_path" '.machine.identity_file = $k' "$_pcfg" > "$_ptmp" && mv "$_ptmp" "$_pcfg"
+                      fi
+                      _groups_build_ssh_opts
+                      # shellcheck disable=SC2086
+                      if ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "echo ok" &>/dev/null; then
+                        _preflight_ok=true
+                        ok "Connected with key: ${_new_key_path}"
+                        _section_h=$(( _section_h + 1 ))
+                      else
+                        warn "Key auth still failed with ${_new_key_path}"
+                        _section_h=$(( _section_h + 1 ))
+                      fi
+                    else
+                      warn "Key file not found: ${_new_key_path}"
+                      _section_h=$(( _section_h + 1 ))
+                    fi
+                  fi
+                  ;;
+                "Abort"|"__back__")
+                  break
+                  ;;
+                "Skip")
+                  break
+                  ;;
+              esac
+              if [[ "$_preflight_ok" == "true" ]]; then break; fi
+            fi
           fi
-          # Non-password failure — don't retry
+          # Non-recoverable failure — don't retry
           break
         done
 
         if [[ "$_preflight_ok" != "true" ]]; then
           printf 'Cannot reach %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
           [[ -n "$_ssh_err" ]] && printf '%s\n' "$_ssh_err" >> "$log_file"
-          [[ "$_GP_AUTH_METHOD" == "key" ]] && printf 'Hint: auth method is "key" — use --auth password if this host requires a password\n' >> "$log_file"
           rc=1
 
           _result_lines[${#_result_lines[@]}]="$(printf '  %b✗%b %s  %b%s%b' "${RED}" "${RESET}" "$_pname" "${DIM}" "$_pdesc" "${RESET}")"
@@ -1772,6 +1915,7 @@ REMOTECMD
   # Write fleet marker with source label (line 1) and event log line count (line 2)
   # so cancel knows exactly which services were deployed in THIS session
   cmd="${cmd}; mkdir -p .muster .muster/logs"
+  cmd="${cmd}; touch .muster/logs/deploy-events.log"
   cmd="${cmd}; _evt_before=\$(wc -l < .muster/logs/deploy-events.log 2>/dev/null || echo 0)"
   cmd="${cmd}; printf '%s\n%s\n' '${_source_label}' \"\$_evt_before\" > .muster/.fleet_deploying"
   # Signal the remote dashboard to refresh (if running) so "Cancel" appears immediately
@@ -1844,14 +1988,15 @@ _group_deploy_dry_run() {
 
   local i=0
   while (( i < total )); do
-    local _type _pname _desc
-    _type=$(jq -r --arg n "$group_name" --argjson idx "$i" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    local _pname _desc
     _pname=$(groups_project_name "$group_name" "$i")
     _desc=$(groups_project_desc "$group_name" "$i")
 
+    local _is_local_dr=false
+    _group_load_project_at "$group_name" "$i" && [[ "$_FP_TRANSPORT" == "local" ]] && _is_local_dr=true
+
     local _icon _color _tag
-    if [[ "$_type" == "local" ]]; then
+    if [[ "$_is_local_dr" == "true" ]]; then
       _tag="local"
       if [[ -d "$_desc" ]]; then
         _icon="●"; _color="${GREEN}"
@@ -1956,8 +2101,8 @@ _group_cmd_status() {
   fi
 
   local display_name
-  display_name=$(groups_get ".groups.\"${group_name}\".name")
-  [[ "$display_name" == "null" || -z "$display_name" ]] && display_name="$group_name"
+  display_name="$group_name"
+  fleet_cfg_load "$group_name" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && display_name="$_FL_NAME"
 
   echo ""
   printf '  %b%bGroup Status%b — %s\n' "${BOLD}" "${ACCENT_BRIGHT}" "${RESET}" "$display_name"
@@ -1965,19 +2110,17 @@ _group_cmd_status() {
 
   local i=0
   while (( i < total )); do
-    local _type _pname _pdesc
-    _type=$(jq -r --arg n "$group_name" --argjson idx "$i" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    local _pname _pdesc
     _pname=$(groups_project_name "$group_name" "$i")
     _pdesc=$(groups_project_desc "$group_name" "$i")
     [[ "${_pdesc:0:1}" == "/" ]] && _pdesc="${_pdesc/#$HOME/~}"
 
     local _icon _color _tag _result=""
+    local _is_local_st=false
+    _group_load_project_at "$group_name" "$i" && [[ "$_FP_TRANSPORT" == "local" ]] && _is_local_st=true
 
-    if [[ "$_type" == "local" ]]; then
-      local _path
-      _path=$(jq -r --arg n "$group_name" --argjson idx "$i" \
-        '.groups[$n].projects[$idx].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    if [[ "$_is_local_st" == "true" ]]; then
+      local _path="$_FP_PATH"
 
       if [[ -z "$_path" || "$_path" == "null" || ! -d "$_path" ]]; then
         _icon="●"; _color="${RED}"; _tag="missing"
@@ -2018,7 +2161,7 @@ _group_cmd_status() {
     if [[ -n "$_result" ]] && printf '%s' "$_result" | jq -e '.services' &>/dev/null; then
       # Use deploy_order for local projects, keys[] for remote/fallback
       _svc_keys=""
-      if [[ "$_type" == "local" && -n "${_path:-}" ]]; then
+      if [[ "$_is_local_st" == "true" && -n "${_path:-}" ]]; then
         local _svc_cfg=""
         [[ -f "${_path}/deploy.json" ]] && _svc_cfg="${_path}/deploy.json"
         [[ -z "$_svc_cfg" && -f "${_path}/muster.json" ]] && _svc_cfg="${_path}/muster.json"
@@ -2110,14 +2253,15 @@ _group_status_json() {
   local json_output="[]"
   local i=0
   while (( i < total )); do
-    local _type _pname _desc
-    _type=$(jq -r --arg n "$group_name" --argjson idx "$i" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    local _pname _desc
     _pname=$(groups_project_name "$group_name" "$i")
     _desc=$(groups_project_desc "$group_name" "$i")
 
+    local _is_local_json=false _type="remote"
+    _group_load_project_at "$group_name" "$i" && [[ "$_FP_TRANSPORT" == "local" ]] && { _is_local_json=true; _type="local"; }
+
     local _status="unknown"
-    if [[ "$_type" == "local" ]]; then
+    if [[ "$_is_local_json" == "true" ]]; then
       if [[ -d "$_desc" ]]; then
         _status="ok"
       else
@@ -2161,8 +2305,8 @@ _group_cmd_manager() {
       while (( gi < ${#group_names[@]} )); do
         local gname="${group_names[$gi]}"
         local display_name
-        display_name=$(groups_get ".groups.\"${gname}\".name")
-        [[ "$display_name" == "null" || -z "$display_name" ]] && display_name="$gname"
+        display_name="$gname"
+        fleet_cfg_load "$gname" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && display_name="$_FL_NAME"
         local total
         total=$(groups_project_count "$gname")
         printf '  %b●%b %b%s%b %b(%d project%s)%b\n' \
@@ -2181,8 +2325,8 @@ _group_cmd_manager() {
     local gi=0
     while (( gi < ${#group_names[@]} )); do
       local _dn
-      _dn=$(groups_get ".groups.\"${group_names[$gi]}\".name")
-      [[ "$_dn" == "null" || -z "$_dn" ]] && _dn="${group_names[$gi]}"
+      local _dn="${group_names[$gi]}"
+      fleet_cfg_load "${group_names[$gi]}" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && _dn="$_FL_NAME"
       actions[${#actions[@]}]="$_dn"
       gi=$(( gi + 1 ))
     done
@@ -2204,8 +2348,8 @@ _group_cmd_manager() {
         local mi=0
         while (( mi < ${#group_names[@]} )); do
           local _dn
-          _dn=$(groups_get ".groups.\"${group_names[$mi]}\".name")
-          [[ "$_dn" == "null" || -z "$_dn" ]] && _dn="${group_names[$mi]}"
+          local _dn="${group_names[$mi]}"
+          fleet_cfg_load "${group_names[$mi]}" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && _dn="$_FL_NAME"
           if [[ "$MENU_RESULT" == "$_dn" ]]; then
             _matched="${group_names[$mi]}"
             break
@@ -2226,8 +2370,8 @@ _group_cmd_manager() {
 _group_rename() {
   local group_name="$1"
   local display_name
-  display_name=$(groups_get ".groups.\"${group_name}\".name")
-  [[ "$display_name" == "null" || -z "$display_name" ]] && display_name="$group_name"
+  display_name="$group_name"
+  fleet_cfg_load "$group_name" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && display_name="$_FL_NAME"
 
   echo ""
   printf '  Current name: %b%s%b\n' "${WHITE}" "$display_name" "${RESET}"
@@ -2260,10 +2404,8 @@ _group_edit_project() {
   local options=()
   local pi=0
   while (( pi < total )); do
-    local _pname _desc _type
+    local _pname _desc
     _pname=$(groups_project_name "$group_name" "$pi")
-    _type=$(jq -r --arg n "$group_name" --argjson i "$pi" \
-      '.groups[$n].projects[$i].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
     _desc=$(groups_project_desc "$group_name" "$pi")
     [[ "${_desc:0:1}" == "/" ]] && _desc="${_desc/#$HOME/~}"
     options[${#options[@]}]="${_pname} (${_desc})"
@@ -2290,14 +2432,8 @@ _group_edit_project() {
   done
   (( sel_idx < 0 )) && return 0
 
-  local _type
-  _type=$(jq -r --arg n "$group_name" --argjson i "$sel_idx" \
-    '.groups[$n].projects[$i].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-
-  if [[ "$_type" == "local" ]]; then
-    local _path
-    _path=$(jq -r --arg n "$group_name" --argjson i "$sel_idx" \
-      '.groups[$n].projects[$i].path' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+  if _group_project_is_local "$group_name" "$sel_idx"; then
+    local _path="$_FP_PATH"
     echo ""
     printf '  %bLocal project%b\n' "${BOLD}" "${RESET}"
     printf '  Path: %b%s%b\n' "${WHITE}" "$_path" "${RESET}"
@@ -2313,29 +2449,20 @@ _group_edit_project() {
 _group_edit_remote_fields() {
   local group_name="$1" idx="$2"
 
-  local cur_host cur_user cur_port cur_key cur_dir cur_cloud cur_auth cur_auth_mode cur_hook_mode
-  cur_host=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].host // ""' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_user=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].user // ""' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_port=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].port // 22' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_key=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '(.groups[$n].projects[$i].auth.identity_file // .groups[$n].projects[$i].identity_file) // ""' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_dir=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].project_dir // ""' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_cloud=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].cloud // false' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_auth=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].auth.method // "key"' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_auth_mode=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].auth.mode // ""' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  cur_hook_mode=$(jq -r --arg n "$group_name" --argjson i "$idx" \
-    '.groups[$n].projects[$i].hook_mode // "manual"' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-  [[ "$cur_key" == "null" ]] && cur_key=""
-  [[ "$cur_dir" == "null" ]] && cur_dir=""
-  [[ "$cur_auth_mode" == "null" ]] && cur_auth_mode=""
-  [[ "$cur_hook_mode" == "null" ]] && cur_hook_mode="manual"
+  # Load current values from fleet dirs
+  _groups_load_remote "$group_name" "$idx" || { err "Project not found"; return 1; }
+
+  local cur_host="$_GP_HOST"
+  local cur_user="$_GP_USER"
+  local cur_port="$_GP_PORT"
+  local cur_key="$_GP_IDENTITY"
+  local cur_dir="$_GP_PROJECT_DIR"
+  local cur_cloud="false"
+  [[ "$_FP_TRANSPORT" == "cloud" ]] && cur_cloud="true"
+  local cur_auth="$_GP_AUTH_METHOD"
+  local cur_auth_mode="$_GP_AUTH_MODE"
+  local cur_hook_mode="$_FP_HOOK_MODE"
+  [[ -z "$cur_hook_mode" || "$cur_hook_mode" == "null" ]] && cur_hook_mode="manual"
 
   echo ""
   printf '  %bEdit Remote Project%b\n' "${BOLD}" "${RESET}"
@@ -2422,7 +2549,6 @@ _group_edit_remote_fields() {
 
   # Prompt for password now if switching to password auth with save/session
   if [[ "$new_auth" == "password" && "$new_auth_mode" != "always" ]]; then
-    source "$MUSTER_ROOT/lib/core/credentials.sh"
     local _cred_key="ssh_${new_user}@${new_host}:${new_port}"
     local _pw
     _pw=$(_cred_prompt_password "SSH password for ${new_user}@${new_host}")
@@ -2434,28 +2560,79 @@ _group_edit_remote_fields() {
     fi
   fi
 
-  # Save all fields via single jq update
-  local tmp="${GROUPS_CONFIG_FILE}.tmp"
-  jq --arg g "$group_name" --argjson i "$idx" \
-    --arg host "$new_host" --arg user "$new_user" --argjson port "$new_port" \
+  # Test connectivity with new settings
+  echo ""
+  printf '  %bTesting connection...%b ' "${DIM}" "${RESET}"
+  local _test_opts="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new"
+  local _test_transport="ssh"
+  [[ "$new_cloud" == "true" ]] && _test_transport="cloud"
+
+  if [[ "$_test_transport" != "cloud" ]]; then
+    if [[ "$new_auth" != "password" ]]; then
+      _test_opts="${_test_opts} -o BatchMode=yes"
+    fi
+    if [[ -n "$new_key" ]]; then
+      local _id_path="$new_key"
+      case "$_id_path" in "~"/*) _id_path="${HOME}/${_id_path#\~/}" ;; esac
+      _test_opts="${_test_opts} -i ${_id_path}"
+    fi
+    [[ "$new_port" != "22" ]] && _test_opts="${_test_opts} -p ${new_port}"
+
+    local _test_ok=false
+    if [[ "$new_auth" == "password" ]]; then
+      local _test_pw=""
+      _test_pw=$(_cred_session_get "ssh_${new_user}@${new_host}:${new_port}" 2>/dev/null) || true
+      if [[ -n "$_test_pw" ]]; then
+        export SSHPASS="$_test_pw"
+        # shellcheck disable=SC2086
+        if sshpass -e ssh $_test_opts "${new_user}@${new_host}" "echo ok" &>/dev/null; then
+          _test_ok=true
+        fi
+        unset SSHPASS
+      fi
+    else
+      # shellcheck disable=SC2086
+      if ssh $_test_opts "${new_user}@${new_host}" "echo ok" &>/dev/null; then
+        _test_ok=true
+      fi
+    fi
+
+    if [[ "$_test_ok" == "true" ]]; then
+      printf '%b✓%b\n' "${GREEN}" "${RESET}"
+    else
+      printf '%b✗%b\n' "${RED}" "${RESET}"
+      warn "Connection failed — settings will be saved anyway"
+      if [[ "$new_auth" == "key" ]]; then
+        printf '  %bHint: try switching auth to "password" if this host requires a password%b\n' "${DIM}" "${RESET}"
+      fi
+    fi
+  fi
+
+  # Save to fleet dir project.json
+  local _pcfg
+  _pcfg="$(fleet_cfg_project_dir "$_FP_FLEET" "$_FP_GROUP" "$_FP_PROJECT")/project.json"
+
+  local _new_transport="ssh"
+  [[ "$new_cloud" == "true" ]] && _new_transport="cloud"
+
+  local tmp="${_pcfg}.tmp"
+  jq --arg host "$new_host" --arg user "$new_user" --argjson port "$new_port" \
     --arg key "$new_key" --arg dir "$new_dir" \
-    --argjson cloud "$([ "$new_cloud" == "true" ] && echo true || echo false)" \
+    --arg transport "$_new_transport" \
     --arg auth "$new_auth" --arg authmode "$new_auth_mode" \
     --arg hookmode "$new_hook_mode" \
-    '.groups[$g].projects[$i].host = $host |
-     .groups[$g].projects[$i].user = $user |
-     .groups[$g].projects[$i].port = $port |
-     .groups[$g].projects[$i].cloud = $cloud |
-     .groups[$g].projects[$i].hook_mode = $hookmode |
-     .groups[$g].projects[$i].auth.method = $auth |
-     (if $auth == "key" and $key != "" then .groups[$g].projects[$i].auth.identity_file = $key
-      else del(.groups[$g].projects[$i].auth.identity_file) end) |
-     (if $auth == "password" and $authmode != "" then .groups[$g].projects[$i].auth.mode = $authmode
-      else del(.groups[$g].projects[$i].auth.mode) end) |
-     (if $dir != "" then .groups[$g].projects[$i].project_dir = $dir
-      else del(.groups[$g].projects[$i].project_dir) end) |
-     del(.groups[$g].projects[$i].identity_file)' \
-    "$GROUPS_CONFIG_FILE" > "$tmp" && mv "$tmp" "$GROUPS_CONFIG_FILE"
+    '.machine.host = $host |
+     .machine.user = $user |
+     .machine.port = $port |
+     .machine.transport = $transport |
+     .hook_mode = $hookmode |
+     (if $auth == "key" and $key != "" then .machine.identity_file = $key
+      else del(.machine.identity_file) end) |
+     (if $auth == "password" then .auth = {method: "password"} + (if $authmode != "" then {mode: $authmode} else {} end)
+      else del(.auth) end) |
+     (if $dir != "" then .remote_path = $dir
+      else del(.remote_path) end)' \
+    "$_pcfg" > "$tmp" && mv "$tmp" "$_pcfg"
 
   echo ""
   ok "Remote project updated"
@@ -2499,8 +2676,11 @@ _group_reorder() {
   local _ri=0
   while (( _ri < total )); do
     _ro_names[$_ri]=$(groups_project_name "$group_name" "$_ri")
-    _ro_types[$_ri]=$(jq -r --arg n "$group_name" --argjson idx "$_ri" \
-      '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+    if _group_project_is_local "$group_name" "$_ri"; then
+      _ro_types[$_ri]="local"
+    else
+      _ro_types[$_ri]="remote"
+    fi
     _ri=$((_ri + 1))
   done
 
@@ -2585,13 +2765,19 @@ _group_reorder() {
         fi
         # Swap selected with next (if not last project)
         if (( selected < total - 1 )); then
-          local tmp="${GROUPS_CONFIG_FILE}.tmp"
           local next=$(( selected + 1 ))
-          jq --arg g "$group_name" --argjson a "$selected" --argjson b "$next" '
-            .groups[$g].projects as $p |
-            .groups[$g].projects[$a] = $p[$b] |
-            .groups[$g].projects[$b] = $p[$a]
-          ' "$GROUPS_CONFIG_FILE" > "$tmp" && mv "$tmp" "$GROUPS_CONFIG_FILE"
+          # Swap in fleet dir deploy_order
+          local _ro_group
+          for _ro_group in $(fleet_cfg_groups "$group_name"); do
+            local _gcfg
+            _gcfg="$(fleet_cfg_group_dir "$group_name" "$_ro_group")/group.json"
+            if [[ -f "$_gcfg" ]]; then
+              local _gtmp="${_gcfg}.tmp"
+              jq --argjson a "$selected" --argjson b "$next" \
+                '.deploy_order as $o | .deploy_order[$a] = $o[$b] | .deploy_order[$b] = $o[$a]' \
+                "$_gcfg" > "$_gtmp" && mv "$_gtmp" "$_gcfg"
+            fi
+          done
           # Swap cached display data
           local _swap_n="${_ro_names[$selected]}" _swap_t="${_ro_types[$selected]}"
           _ro_names[$selected]="${_ro_names[$next]}"
@@ -2618,8 +2804,8 @@ _group_detail_menu() {
 
   while true; do
     local display_name
-    display_name=$(groups_get ".groups.\"${group_name}\".name")
-    [[ "$display_name" == "null" || -z "$display_name" ]] && display_name="$group_name"
+    display_name="$group_name"
+    fleet_cfg_load "$group_name" 2>/dev/null && [[ -n "$_FL_NAME" && "$_FL_NAME" != "null" ]] && display_name="$_FL_NAME"
 
     local total
     total=$(groups_project_count "$group_name")
@@ -2635,15 +2821,16 @@ _group_detail_menu() {
     if (( total > 0 )); then
       local pi=0
       while (( pi < total )); do
-        local _type _pname _desc
-        _type=$(jq -r --arg n "$group_name" --argjson idx "$pi" \
-          '.groups[$n].projects[$idx].type' "$GROUPS_CONFIG_FILE" 2>/dev/null)
+        local _pname _desc
         _pname=$(groups_project_name "$group_name" "$pi")
         _desc=$(groups_project_desc "$group_name" "$pi")
 
         local _icon _color
         local _hook_mode_badge=""
-        if [[ "$_type" == "local" ]]; then
+        local _is_local_dm=false
+        _group_load_project_at "$group_name" "$pi" && [[ "$_FP_TRANSPORT" == "local" ]] && _is_local_dm=true
+
+        if [[ "$_is_local_dm" == "true" ]]; then
           _icon="●"; _color="${GREEN}"
           _desc="${_desc/#$HOME/~}"
           local _raw_path
@@ -2651,10 +2838,7 @@ _group_detail_menu() {
           [[ ! -d "$_raw_path" ]] && _color="${RED}"
         else
           _icon="◆"; _color="${ACCENT}"
-          local _hm_val
-          _hm_val=$(jq -r --arg n "$group_name" --argjson idx "$pi" \
-            '.groups[$n].projects[$idx].hook_mode // "manual"' "$GROUPS_CONFIG_FILE" 2>/dev/null)
-          [[ "$_hm_val" == "sync" ]] && _hook_mode_badge=" sync"
+          [[ "$_FP_HOOK_MODE" == "sync" ]] && _hook_mode_badge=" sync"
         fi
 
         if [[ -n "$_hook_mode_badge" ]]; then

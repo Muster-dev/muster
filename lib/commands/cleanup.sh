@@ -66,7 +66,7 @@ cmd_cleanup() {
       ran_any=true
     elif [[ -x "$hook" ]]; then
       start_spinner "Cleaning up ${name}..."
-      "$hook" &>/dev/null
+      bash "$hook" &>/dev/null
       stop_spinner
       ok "${name} cleaned up"
       ran_any=true

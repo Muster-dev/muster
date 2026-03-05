@@ -468,7 +468,7 @@ ${_k8s_env_lines}"
         elif [[ "$_use_just" == "true" ]]; then
           _run_with_timeout "$_json_hook_timeout" just --justfile "${_hook_dir}/justfile" deploy 2>&1
         else
-          _run_with_timeout "$_json_hook_timeout" "$hook" 2>&1
+          _run_with_timeout "$_json_hook_timeout" bash "$hook" 2>&1
         fi
       } | while IFS= read -r _jline; do
         printf '%s\n' "$_jline" >> "$log_file"
@@ -788,7 +788,7 @@ ${_k8s_env_lines}"
           if [[ "$_use_just" == "true" ]]; then
             _deploy_run_hook "$name" "$log_file" _run_with_timeout "$_hook_timeout" just --justfile "${_hook_dir}/justfile" deploy
           else
-            _deploy_run_hook "$name" "$log_file" _run_with_timeout "$_hook_timeout" "$hook"
+            _deploy_run_hook "$name" "$log_file" _run_with_timeout "$_hook_timeout" bash "$hook"
           fi
         fi
         rc=$?
