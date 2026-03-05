@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.54] - 2026-03-04
+
+### Changed
+- Fleet setup wizard: SSH config import, remote auto-detection, existing fleet selection
+- Stack picker no longer shows duplicate entries when auto-detecting remote stack
+
 ## [0.5.53] - 2026-03-04
 
 ### Added
