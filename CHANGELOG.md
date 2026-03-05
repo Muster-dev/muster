@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.59] - 2026-03-05
+
+### Added
+- 7 new test files: deploy pipeline, rollback, status, doctor, build context, fleet deploy, dev stack (76+ new assertions)
+- All 19 test files now pass (272 total assertions)
+- CI: ShellCheck installation in GitHub Actions workflow
+- CI: macOS compatibility job for bash 3.2 testing
+
+## [0.5.58] - 2026-03-05
+
+### Added
+- Comprehensive test suite: fleet skills, fleet config, fleet crypto, skill lifecycle, skill templates, scanner, integrity (7 new test files, 120+ new tests)
+- All 12 test files now pass (196 total assertions)
+
+### Fixed
+- `config_services()` null byte case pattern bug — `$'\0'` in case expands to empty string matching all keys, silently skipping every service
+- Pre-existing `test_config.sh` failures (config_services lists api/redis)
+
 ## [0.5.57] - 2026-03-04
 
 ### Added

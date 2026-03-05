@@ -318,7 +318,7 @@ for k in data.get('services', {}):
     [[ -z "$_key" ]] && continue
     # Block path traversal
     case "$_key" in
-      *..*|/*|*$'\0'*) continue ;;
+      *..*|/*) continue ;;
     esac
     printf '%s\n' "$_key"
   done <<< "$_raw_keys"
