@@ -1189,6 +1189,160 @@ _group_cmd_deploy() {
     printf '  %b✓%b Cloud transport ready\n' "${GREEN}" "${RESET}"
   fi
 
+  # ── Service picker: fetch services from each project, let user select ──
+  # _group_svc_filter is an array: _group_svc_filter[project_index]="svc1 svc2" (empty = all)
+  local _group_svc_filter=()
+  local _show_picker=false
+
+  # Only show picker in interactive TTY with >0 projects
+  if [[ -t 0 && "$MUSTER_MINIMAL" != "true" && "$total" -gt 0 ]]; then
+    # Fetch service lists from all projects
+    local _picker_items=()
+    local _picker_project_map=()   # maps item index → project index
+    local _picker_svc_map=()       # maps item index → service key
+    local _fetch_ok=true
+
+    start_spinner "Fetching services..."
+    _pi=0
+    while (( _pi < total )); do
+      local _pk_pname _pk_pdesc
+      _pk_pname=$(groups_project_name "$group_name" "$_pi")
+      _pk_pdesc=$(groups_project_desc "$group_name" "$_pi")
+      [[ "${_pk_pdesc:0:1}" == "/" ]] && _pk_pdesc="${_pk_pdesc/#$HOME/~}"
+
+      _picker_items[${#_picker_items[@]}]="---:${_pk_pname}  ${_pk_pdesc}"
+
+      if _group_project_is_local "$group_name" "$_pi"; then
+        # Local: read deploy.json directly
+        local _pk_path="$_FP_PATH"
+        local _pk_cfg=""
+        [[ -f "${_pk_path}/deploy.json" ]] && _pk_cfg="${_pk_path}/deploy.json"
+        [[ -z "$_pk_cfg" && -f "${_pk_path}/muster.json" ]] && _pk_cfg="${_pk_path}/muster.json"
+        if [[ -n "$_pk_cfg" ]]; then
+          local _pk_svcs=""
+          _pk_svcs=$(jq -r '(.deploy_order[]? // empty)' "$_pk_cfg" 2>/dev/null)
+          if [[ -z "$_pk_svcs" ]]; then
+            _pk_svcs=$(jq -r '.services | keys[]' "$_pk_cfg" 2>/dev/null)
+          fi
+          local _pk_s
+          while IFS= read -r _pk_s; do
+            [[ -z "$_pk_s" ]] && continue
+            local _pk_skip=""
+            _pk_skip=$(jq -r ".services.\"${_pk_s}\".skip_deploy // false" "$_pk_cfg" 2>/dev/null)
+            [[ "$_pk_skip" == "true" ]] && continue
+            local _pk_sname=""
+            _pk_sname=$(jq -r ".services.\"${_pk_s}\".name // \"${_pk_s}\"" "$_pk_cfg" 2>/dev/null)
+            _picker_items[${#_picker_items[@]}]="$_pk_sname"
+            _picker_project_map[${#_picker_project_map[@]}]="$_pi"
+            _picker_svc_map[${#_picker_svc_map[@]}]="$_pk_s"
+          done <<< "$_pk_svcs"
+        fi
+      else
+        # Remote: SSH in and get service list
+        _groups_load_remote "$group_name" "$_pi"
+        if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
+          _groups_load_ssh_password
+        fi
+        local _pk_remote_svcs=""
+        local _pk_cmd="MUSTER_NO_VERIFY=true muster status --json 2>/dev/null"
+        if [[ -n "$_GP_PROJECT_DIR" ]]; then
+          local _pk_edir
+          printf -v _pk_edir '%q' "$_GP_PROJECT_DIR"
+          _pk_cmd="cd ${_pk_edir} && ${_pk_cmd}"
+        fi
+        _pk_remote_svcs=$(groups_remote_exec "$group_name" "$_pi" "$_pk_cmd" 2>/dev/null) || true
+
+        if [[ -n "$_pk_remote_svcs" ]] && printf '%s' "$_pk_remote_svcs" | jq -e '.services' &>/dev/null; then
+          local _pk_keys=""
+          _pk_keys=$(printf '%s' "$_pk_remote_svcs" | jq -r '.services | keys[]' 2>/dev/null)
+          local _pk_s
+          while IFS= read -r _pk_s; do
+            [[ -z "$_pk_s" ]] && continue
+            _picker_items[${#_picker_items[@]}]="$_pk_s"
+            _picker_project_map[${#_picker_project_map[@]}]="$_pi"
+            _picker_svc_map[${#_picker_svc_map[@]}]="$_pk_s"
+          done <<< "$_pk_keys"
+        else
+          # Can't fetch — add placeholder
+          _picker_items[${#_picker_items[@]}]="(all services)"
+          _picker_project_map[${#_picker_project_map[@]}]="$_pi"
+          _picker_svc_map[${#_picker_svc_map[@]}]="__all__"
+        fi
+      fi
+      _pi=$(( _pi + 1 ))
+    done
+    stop_spinner
+
+    # Only show picker if we found services
+    local _selectable_count=0
+    local _si=0
+    while (( _si < ${#_picker_items[@]} )); do
+      [[ "${_picker_items[$_si]}" != "---:"* ]] && _selectable_count=$(( _selectable_count + 1 ))
+      _si=$(( _si + 1 ))
+    done
+
+    if (( _selectable_count > 0 )); then
+      menu_select "Deploy scope" "All services" "Select services" "Back"
+      case "$MENU_RESULT" in
+        "Back"|"__back__")
+          rm -f "$_group_lock"
+          trap - INT
+          return 0
+          ;;
+        "Select services")
+          checklist_grouped_select "Select services to deploy" "${_picker_items[@]}"
+          if [[ "$CHECKLIST_RESULT" == "__back__" ]]; then
+            rm -f "$_group_lock"
+            trap - INT
+            return 0
+          fi
+
+          # Build per-project service filter from selections
+          _pi=0
+          while (( _pi < total )); do
+            _group_svc_filter[$_pi]=""
+            _pi=$(( _pi + 1 ))
+          done
+
+          # Map selected display names back to service keys and project indices
+          local _sel_i=0 _map_i=0
+          local _si=0
+          while (( _si < ${#_picker_items[@]} )); do
+            if [[ "${_picker_items[$_si]}" == "---:"* ]]; then
+              _si=$(( _si + 1 ))
+              continue
+            fi
+            # Check if this item was selected
+            local _item_name="${_picker_items[$_si]}"
+            local _was_selected=false
+            local _check_line
+            while IFS= read -r _check_line; do
+              [[ "$_check_line" == "$_item_name" ]] && { _was_selected=true; break; }
+            done <<< "$CHECKLIST_RESULT"
+
+            if [[ "$_was_selected" == "true" ]]; then
+              local _proj_idx="${_picker_project_map[$_map_i]}"
+              local _svc_key="${_picker_svc_map[$_map_i]}"
+              if [[ "$_svc_key" != "__all__" ]]; then
+                if [[ -n "${_group_svc_filter[$_proj_idx]}" ]]; then
+                  _group_svc_filter[$_proj_idx]="${_group_svc_filter[$_proj_idx]} ${_svc_key}"
+                else
+                  _group_svc_filter[$_proj_idx]="$_svc_key"
+                fi
+              fi
+            fi
+            _map_i=$(( _map_i + 1 ))
+            _si=$(( _si + 1 ))
+          done
+          echo ""
+          ;;
+        "All services"|*)
+          # All services — no filter
+          ;;
+      esac
+    fi
+  fi
+
   # Progress bar — printed once, updated via full-section redraw
   local _first_pname _first_pdesc
   _first_pname=$(groups_project_name "$group_name" "0")
@@ -1264,6 +1418,21 @@ _group_cmd_deploy() {
                 [[ "$_skip" == "true" ]] && continue
                 _services[${#_services[@]}]="$_svc_line"
               done < <(jq -r '.services | keys[]' "$_cfg" 2>/dev/null)
+            fi
+
+            # Apply service filter from picker
+            if [[ -n "${_group_svc_filter[$i]:-}" ]]; then
+              local _filtered_svcs=()
+              local _fs
+              for _fs in "${_services[@]}"; do
+                local _in_filter=false
+                local _fw
+                for _fw in ${_group_svc_filter[$i]}; do
+                  [[ "$_fw" == "$_fs" ]] && { _in_filter=true; break; }
+                done
+                [[ "$_in_filter" == "true" ]] && _filtered_svcs[${#_filtered_svcs[@]}]="$_fs"
+              done
+              _services=("${_filtered_svcs[@]}")
             fi
 
             _svc_total=${#_services[@]}
@@ -1649,7 +1818,7 @@ _group_cmd_deploy() {
         if [[ "$_preflight_ok" == "true" ]]; then
 
         : > "$log_file"
-        _group_deploy_remote "$group_name" "$i" "$log_file" &
+        _group_deploy_remote "$group_name" "$i" "$log_file" "${_group_svc_filter[$i]:-}" &
         local _remote_pid=$!
 
         update_term_size
@@ -1933,7 +2102,10 @@ _group_deploy_remote() {
 export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
 REMOTECMD
   )"
+  local _deploy_user
+  _deploy_user=$(_deploy_identity)
   cmd="${cmd}; export MUSTER_NO_VERIFY=true"
+  cmd="${cmd}; export MUSTER_DEPLOY_USER='${_deploy_user}'"
   cmd="${cmd}; export MUSTER_DEPLOY_SOURCE='${_source_label}'"
   # Write fleet marker with source label (line 1) and event log line count (line 2)
   # so cancel knows exactly which services were deployed in THIS session
@@ -1947,7 +2119,22 @@ REMOTECMD
   # The watcher checks .fleet_deploying every second — when the remote
   # dashboard removes it (cancel), the watcher kills all session processes
   # and exits, which closes the SSH connection and stops the host.
-  cmd="${cmd}; muster deploy --force & _dpid=\$!"
+  # Build deploy command — filter to selected services if provided
+  local _svc_filter="${4:-}"
+  local _deploy_cmd="muster deploy --force"
+  if [[ -n "$_svc_filter" ]]; then
+    # Chain individual service deploys
+    _deploy_cmd=""
+    local _sf
+    for _sf in $_svc_filter; do
+      if [[ -n "$_deploy_cmd" ]]; then
+        _deploy_cmd="${_deploy_cmd} && muster deploy --force ${_sf}"
+      else
+        _deploy_cmd="muster deploy --force ${_sf}"
+      fi
+    done
+  fi
+  cmd="${cmd}; ${_deploy_cmd} & _dpid=\$!"
   cmd="${cmd}; while kill -0 \$_dpid 2>/dev/null; do"
   cmd="${cmd}   if [ ! -f .muster/.fleet_deploying ]; then"
   cmd="${cmd}     kill -KILL \$_dpid 2>/dev/null;"

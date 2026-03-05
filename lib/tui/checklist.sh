@@ -5,6 +5,274 @@
 
 CHECKLIST_RESULT=""
 
+# Grouped checklist — items prefixed with "---:" are non-selectable group headers
+# Example: checklist_grouped_select "title" "---:Server A" "svc1" "svc2" "---:Server B" "svc3"
+# CHECKLIST_RESULT returns newline-separated selected items (without headers)
+checklist_grouped_select() {
+  if [[ ! -t 0 ]]; then
+    printf '%b\n' "${RED}Error: interactive terminal required${RESET}" >&2
+    return 1
+  fi
+
+  local title="$1"
+  shift
+  local items=("$@")
+  local count=${#items[@]}
+
+  # Track which items are headers (non-selectable)
+  local is_header=()
+  local i=0
+  while (( i < count )); do
+    if [[ "${items[$i]}" == "---:"* ]]; then
+      is_header[$i]=1
+    else
+      is_header[$i]=0
+    fi
+    i=$(( i + 1 ))
+  done
+
+  # ── Minimal mode ──
+  if [[ "$MUSTER_MINIMAL" == "true" ]]; then
+    echo ""
+    printf '  %s\n' "$title"
+    i=0
+    local _num=0
+    while (( i < count )); do
+      if (( is_header[i] == 1 )); then
+        printf '    %s\n' "${items[$i]#---:}"
+      else
+        _num=$(( _num + 1 ))
+        printf '    %d) [x] %s\n' "$_num" "${items[$i]}"
+      fi
+      i=$(( i + 1 ))
+    done
+    echo ""
+    printf '  Enter numbers to deselect (comma-separated), or Enter for all: '
+    local _input; read -r _input
+
+    local checked=()
+    i=0
+    while (( i < count )); do checked[$i]=1; i=$(( i + 1 )); done
+
+    if [[ -n "$_input" ]]; then
+      local _num_val _old_ifs="$IFS"
+      IFS=','
+      for _num_val in $_input; do
+        IFS="$_old_ifs"
+        _num_val="${_num_val// /}"
+        if [[ "$_num_val" =~ ^[0-9]+$ ]]; then
+          # Map display number to array index
+          local _mi=0 _mn=0
+          while (( _mi < count )); do
+            if (( is_header[_mi] == 0 )); then
+              _mn=$(( _mn + 1 ))
+              if (( _mn == _num_val )); then
+                checked[$_mi]=0
+                break
+              fi
+            fi
+            _mi=$(( _mi + 1 ))
+          done
+        fi
+      done
+      IFS="$_old_ifs"
+    fi
+
+    CHECKLIST_RESULT=""
+    i=0
+    while (( i < count )); do
+      if (( is_header[i] == 0 && checked[i] == 1 )); then
+        if [[ -n "$CHECKLIST_RESULT" ]]; then
+          CHECKLIST_RESULT="${CHECKLIST_RESULT}"$'\n'"${items[$i]}"
+        else
+          CHECKLIST_RESULT="${items[$i]}"
+        fi
+      fi
+      i=$(( i + 1 ))
+    done
+    return 0
+  fi
+
+  # ── TUI mode ──
+  # Find first selectable item
+  local selected=0
+  i=0
+  while (( i < count )); do
+    if (( is_header[i] == 0 )); then
+      selected=$i
+      break
+    fi
+    i=$(( i + 1 ))
+  done
+
+  local checked=()
+  i=0
+  while (( i < count )); do
+    if (( is_header[i] == 1 )); then
+      checked[$i]=0
+    else
+      checked[$i]=1
+    fi
+    i=$(( i + 1 ))
+  done
+
+  local _cl_w=$(( TERM_COLS - 4 ))
+  (( _cl_w > 56 )) && _cl_w=56
+  (( _cl_w < 20 )) && _cl_w=20
+
+  muster_tui_enter
+  tput civis
+
+  _gcl_draw_header() {
+    echo ""
+    printf '  %b%s%b\n' "${BOLD}" "$title" "${RESET}"
+    printf '  %b↑/↓ navigate  ␣ toggle  ⏎ confirm  q back%b\n' "${DIM}" "${RESET}"
+  }
+
+  local total_lines=$count
+
+  _gcl_draw() {
+    _cl_w=$(( TERM_COLS - 4 ))
+    (( _cl_w > 56 )) && _cl_w=56
+    (( _cl_w < 20 )) && _cl_w=20
+
+    local i=0
+    while (( i < count )); do
+      if (( is_header[i] == 1 )); then
+        # Group header — non-selectable separator
+        local hlabel="${items[$i]#---:}"
+        if (( i == selected )); then
+          printf '  %b%b── %s ──%b\n' "${BOLD}" "${ACCENT}" "$hlabel" "${RESET}"
+        else
+          printf '  %b── %s ──%b\n' "${DIM}" "$hlabel" "${RESET}"
+        fi
+      else
+        local mark="○" mcolor="${GRAY}"
+        if (( checked[i] == 1 )); then
+          mark="✓"
+          mcolor="${GREEN}"
+        fi
+        local label="${items[$i]}"
+        if (( i == selected )); then
+          local text="  ▸ ${mark} ${label}"
+          local text_len=${#text}
+          local bar_pad=$(( _cl_w - text_len ))
+          (( bar_pad < 0 )) && bar_pad=0
+          local pad
+          printf -v pad '%*s' "$bar_pad" ""
+          printf '\033[48;5;178m\033[38;5;0m%s%s\033[0m\n' "$text" "$pad"
+        else
+          printf '      %b%s%b %s\n' "$mcolor" "$mark" "${RESET}" "$label"
+        fi
+      fi
+      i=$(( i + 1 ))
+    done
+  }
+
+  _gcl_clear() {
+    (( total_lines > 0 )) && printf '\033[%dA' "$total_lines"
+    printf '\033[J'
+  }
+
+  _gcl_read_key() {
+    local key
+    IFS= read -rsn1 key || true
+    if [[ "$key" == $'\x1b' ]]; then
+      local seq1 seq2
+      IFS= read -rsn1 -t 1 seq1 || true
+      IFS= read -rsn1 -t 1 seq2 || true
+      key="${key}${seq1}${seq2}"
+    fi
+    REPLY="$key"
+  }
+
+  # Skip to next selectable item in direction (1=down, -1=up)
+  _gcl_skip() {
+    local dir="$1" cur="$selected"
+    while true; do
+      cur=$(( cur + dir ))
+      (( cur < 0 || cur >= count )) && return
+      if (( is_header[cur] == 0 )); then
+        selected=$cur
+        return
+      fi
+    done
+  }
+
+  _gcl_draw_header
+  _gcl_draw
+
+  while true; do
+    _gcl_read_key
+
+    if [[ "$_MUSTER_INPUT_DIRTY" == "true" ]]; then
+      _MUSTER_INPUT_DIRTY="false"
+      _gcl_draw_header
+      _gcl_draw
+      continue
+    fi
+
+    case "$REPLY" in
+      $'\x1b[A')
+        _gcl_skip -1
+        ;;
+      $'\x1b[B')
+        _gcl_skip 1
+        ;;
+      ' ')
+        if (( is_header[selected] == 0 )); then
+          if (( checked[selected] == 1 )); then
+            checked[$selected]=0
+          else
+            checked[$selected]=1
+          fi
+        fi
+        ;;
+      $'\x1b'|'q'|'Q')
+        _gcl_clear
+        tput cnorm
+        CHECKLIST_RESULT="__back__"
+        return 0
+        ;;
+      '')
+        _gcl_clear
+        # Print summary
+        i=0
+        while (( i < count )); do
+          if (( is_header[i] == 1 )); then
+            printf '  %b── %s ──%b\n' "${DIM}" "${items[$i]#---:}" "${RESET}"
+          elif (( checked[i] == 1 )); then
+            printf '    %b✓%b %s\n' "${GREEN}" "${RESET}" "${items[$i]}"
+          fi
+          i=$(( i + 1 ))
+        done
+
+        tput cnorm
+
+        CHECKLIST_RESULT=""
+        i=0
+        while (( i < count )); do
+          if (( is_header[i] == 0 && checked[i] == 1 )); then
+            if [[ -n "$CHECKLIST_RESULT" ]]; then
+              CHECKLIST_RESULT="${CHECKLIST_RESULT}"$'\n'"${items[$i]}"
+            else
+              CHECKLIST_RESULT="${items[$i]}"
+            fi
+          fi
+          i=$(( i + 1 ))
+        done
+        return 0
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    _gcl_clear
+    _gcl_draw
+  done
+}
+
 checklist_select() {
   if [[ ! -t 0 ]]; then
     printf '%b\n' "${RED}Error: interactive terminal required${RESET}" >&2

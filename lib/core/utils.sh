@@ -598,6 +598,12 @@ _git_deploy_diff() {
 # ---------------------------------------------------------------------------
 
 _deploy_identity() {
+  # 0. Check env var (set by fleet/group deploy from host machine)
+  if [[ -n "${MUSTER_DEPLOY_USER:-}" ]]; then
+    printf '%s' "$MUSTER_DEPLOY_USER"
+    return 0
+  fi
+
   # 1. Check deploy_name from global settings
   if [[ -f "$HOME/.muster/settings.json" ]]; then
     local _di_name=""
