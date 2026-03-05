@@ -48,11 +48,17 @@ _fleet_cmd_deploy() {
   done
 
   if ! fleet_load_config; then
-    err "No remotes.json found. Run 'muster fleet init' first."
+    err "No fleet config found. Run 'muster fleet setup' first."
     return 1
   fi
 
-  load_config
+  # load_config is optional for fleet — fleet may run without a local project
+  if [[ "$FLEET_CONFIG_FILE" != "__fleet_dirs__" ]]; then
+    load_config
+  else
+    # Try loading local config but don't exit on failure
+    CONFIG_FILE=$(find_config 2>/dev/null) || true
+  fi
 
   # Resolve target to list of machines
   local machines=()

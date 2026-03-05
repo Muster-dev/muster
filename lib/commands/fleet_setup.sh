@@ -949,6 +949,9 @@ cmd_fleet_setup() {
     echo ""
     FLEET_CONFIG_FILE="__fleet_dirs__"
     _fleet_cmd_deploy --dry-run
+    printf '  %bPress any key to dismiss...%b' "$DIM" "$RESET"
+    IFS= read -rsn1 || true
+    echo ""
   fi
 
   return 0
