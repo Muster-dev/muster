@@ -160,7 +160,7 @@ cmd_deploy() {
       _unload_env_file
       return 1
     fi
-    trap '_deploy_lock_release "'"$project_dir"'"; _unload_env_file; cleanup_term' EXIT
+    trap '_service_lock_release_all "'"$project_dir"'"; _deploy_lock_release "'"$project_dir"'"; _unload_env_file; cleanup_term' EXIT
   fi
 
   local project
@@ -338,6 +338,14 @@ cmd_deploy() {
     _si=$(( _si + 1 ))
   done
 
+  # Set lock source for per-service locks
+  if [[ -n "${MUSTER_DEPLOY_SOURCE:-}" ]]; then
+    MUSTER_LOCK_SOURCE="fleet:${MUSTER_DEPLOY_SOURCE}"
+  else
+    MUSTER_LOCK_SOURCE="local"
+  fi
+  export MUSTER_LOCK_SOURCE
+
   for svc in "${services[@]}"; do
     (( current++ ))
 
@@ -370,6 +378,15 @@ cmd_deploy() {
 
     elif [[ "$_json_mode" == "true" ]]; then
       # ── JSON deploy mode — stream NDJSON events ──
+
+      # Per-service lock
+      if [[ "$_force" == "true" ]]; then
+        _service_lock_release "$project_dir" "$svc"
+      fi
+      if ! _service_lock_acquire "$project_dir" "$svc"; then
+        printf '{"event":"skipped","service":"%s","reason":"locked"}\n' "$svc"
+        continue
+      fi
 
       # Gather credentials
       local _cred_env_lines=""
@@ -526,6 +543,7 @@ ${_k8s_env_lines}"
           unset "$_ek"
         done <<< "$_k8s_env_lines"
       fi
+      _service_lock_release "$project_dir" "$svc"
       continue
 
     elif [[ "$dry_run" == "true" ]]; then
@@ -624,6 +642,15 @@ ${_k8s_env_lines}"
       echo ""
     else
       # ── Normal deploy ──
+
+      # Per-service lock
+      if [[ "$_force" == "true" ]]; then
+        _service_lock_release "$project_dir" "$svc"
+      fi
+      if ! _service_lock_acquire "$project_dir" "$svc"; then
+        warn "Skipping ${name} — service is locked"
+        continue
+      fi
 
       # Gather credentials if configured
       local _cred_env_lines=""
@@ -1030,6 +1057,7 @@ ${_k8s_env_lines}"
         done <<< "$_k8s_env_lines"
       fi
       unset MUSTER_GIT_COMMIT MUSTER_GIT_PREV_COMMIT
+      _service_lock_release "$project_dir" "$svc"
 
       echo ""
     fi

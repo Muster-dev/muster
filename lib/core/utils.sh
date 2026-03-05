@@ -594,6 +594,37 @@ _git_deploy_diff() {
 }
 
 # ---------------------------------------------------------------------------
+# Deploy identity — who is deploying (for lock files)
+# ---------------------------------------------------------------------------
+
+_deploy_identity() {
+  # 1. Check deploy_name from global settings
+  if [[ -f "$HOME/.muster/settings.json" ]]; then
+    local _di_name=""
+    if has_cmd jq; then
+      _di_name=$(jq -r '.deploy_name // ""' "$HOME/.muster/settings.json" 2>/dev/null)
+    elif has_cmd python3; then
+      _di_name=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('deploy_name',''))" "$HOME/.muster/settings.json" 2>/dev/null)
+    fi
+    if [[ -n "$_di_name" && "$_di_name" != "null" ]]; then
+      printf '%s' "$_di_name"
+      return 0
+    fi
+  fi
+
+  # 2. Fall back to git config user.name
+  local _di_git=""
+  _di_git=$(git config user.name 2>/dev/null || true)
+  if [[ -n "$_di_git" ]]; then
+    printf '%s' "$_di_git"
+    return 0
+  fi
+
+  # 3. Fall back to whoami
+  whoami
+}
+
+# ---------------------------------------------------------------------------
 # Deploy lock — prevent concurrent deploys
 # ---------------------------------------------------------------------------
 
@@ -763,7 +794,7 @@ _deploy_lock_acquire() {
   local _tty_name
   _tty_name=$(tty 2>/dev/null || echo "unknown")
   cat > "$lock_file" <<EOF
-{"user":"$(whoami)","pid":$$,"started":"$(date '+%Y-%m-%d %H:%M:%S')","terminal":"${_tty_name}","services":[${_svcs}]}
+{"user":"$(_deploy_identity)","pid":$$,"started":"$(date '+%Y-%m-%d %H:%M:%S')","terminal":"${_tty_name}","services":[${_svcs}]}
 EOF
   return 0
 }
@@ -773,4 +804,200 @@ _deploy_lock_release() {
   local lock_file
   lock_file=$(_deploy_lock_file "$project_dir")
   rm -f "$lock_file"
+}
+
+# ---------------------------------------------------------------------------
+# Per-service deploy locks
+# ---------------------------------------------------------------------------
+
+_service_lock_file() {
+  local project_dir="$1" service="$2"
+  echo "${project_dir}/.muster/locks/${service}.lock"
+}
+
+_service_lock_read() {
+  local lock_file="$1"
+  _SLOCK_USER="" _SLOCK_PID="" _SLOCK_STARTED="" _SLOCK_SOURCE="" _SLOCK_HOST=""
+  if has_cmd jq; then
+    _SLOCK_USER=$(jq -r '.user // "unknown"' "$lock_file" 2>/dev/null)
+    _SLOCK_PID=$(jq -r '.pid // ""' "$lock_file" 2>/dev/null)
+    _SLOCK_STARTED=$(jq -r '.started // "unknown"' "$lock_file" 2>/dev/null)
+    _SLOCK_SOURCE=$(jq -r '.source // "local"' "$lock_file" 2>/dev/null)
+    _SLOCK_HOST=$(jq -r '.host // "unknown"' "$lock_file" 2>/dev/null)
+  elif has_cmd python3; then
+    _SLOCK_USER=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('user','unknown'))" "$lock_file" 2>/dev/null)
+    _SLOCK_PID=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('pid',''))" "$lock_file" 2>/dev/null)
+    _SLOCK_STARTED=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('started','unknown'))" "$lock_file" 2>/dev/null)
+    _SLOCK_SOURCE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('source','local'))" "$lock_file" 2>/dev/null)
+    _SLOCK_HOST=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('host','unknown'))" "$lock_file" 2>/dev/null)
+  fi
+}
+
+_service_lock_timeout() {
+  local val=""
+  if [[ -f "$HOME/.muster/settings.json" ]]; then
+    if has_cmd jq; then
+      val=$(jq -r '.service_lock_timeout // ""' "$HOME/.muster/settings.json" 2>/dev/null)
+    elif has_cmd python3; then
+      val=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('service_lock_timeout',''))" "$HOME/.muster/settings.json" 2>/dev/null)
+    fi
+  fi
+  if [[ -z "$val" || "$val" == "null" ]]; then
+    echo "1800"
+  else
+    echo "$val"
+  fi
+}
+
+# Check if a service lock is stale. Returns 0 if stale, 1 if active.
+_service_lock_is_stale() {
+  local lock_file="$1"
+  _service_lock_read "$lock_file"
+
+  # Local lock: check PID
+  if [[ "$_SLOCK_SOURCE" == "local" ]]; then
+    if [[ -z "$_SLOCK_PID" ]] || ! kill -0 "$_SLOCK_PID" 2>/dev/null; then
+      return 0
+    fi
+    return 1
+  fi
+
+  # Fleet lock: check timeout
+  case "$_SLOCK_SOURCE" in
+    fleet:*)
+      local timeout_secs
+      timeout_secs=$(_service_lock_timeout)
+      local start_epoch=0 now_epoch=0
+      if has_cmd gdate; then
+        start_epoch=$(gdate -d "$_SLOCK_STARTED" +%s 2>/dev/null || echo 0)
+        now_epoch=$(gdate +%s)
+      elif date -d "2000-01-01" +%s &>/dev/null; then
+        start_epoch=$(date -d "$_SLOCK_STARTED" +%s 2>/dev/null || echo 0)
+        now_epoch=$(date +%s)
+      else
+        start_epoch=$(date -jf "%Y-%m-%d %H:%M:%S" "$_SLOCK_STARTED" +%s 2>/dev/null || echo 0)
+        now_epoch=$(date +%s)
+      fi
+      if (( start_epoch == 0 )); then
+        return 0
+      fi
+      local elapsed=$(( now_epoch - start_epoch ))
+      if (( elapsed > timeout_secs )); then
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+
+  # Unknown source type — treat as active
+  return 1
+}
+
+_service_lock_acquire() {
+  local project_dir="$1" service="$2"
+  local lock_file
+  lock_file=$(_service_lock_file "$project_dir" "$service")
+
+  if [[ -f "$lock_file" ]]; then
+    if _service_lock_is_stale "$lock_file"; then
+      warn "Removing stale service lock for '${service}' (${_SLOCK_SOURCE}, PID ${_SLOCK_PID:-unknown})"
+      rm -f "$lock_file"
+    else
+      # Active lock
+      _service_lock_read "$lock_file"
+      if [[ -t 0 ]]; then
+        local duration
+        duration=$(_deploy_lock_duration "$_SLOCK_STARTED")
+        printf '\n'
+        printf '%b  %b!%b Service %b%s%b is locked\n' "" "${YELLOW}" "${RESET}" "${BOLD}" "$service" "${RESET}"
+        printf '%b  %b*%b User:    %s\n' "" "${ACCENT}" "${RESET}" "$_SLOCK_USER"
+        printf '%b  %b*%b Source:  %s\n' "" "${ACCENT}" "${RESET}" "$_SLOCK_SOURCE"
+        printf '%b  %b*%b Host:    %s\n' "" "${ACCENT}" "${RESET}" "$_SLOCK_HOST"
+        printf '%b  %b*%b Started: %s (%s ago)\n' "" "${ACCENT}" "${RESET}" "$_SLOCK_STARTED" "$duration"
+        if [[ "$_SLOCK_SOURCE" == "local" ]]; then
+          printf '%b  %b*%b PID:     %s\n' "" "${ACCENT}" "${RESET}" "$_SLOCK_PID"
+        fi
+        printf '\n'
+
+        menu_select "" "Wait" "Override" "Abort"
+        case "$MENU_RESULT" in
+          "Wait")
+            local _lock_frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+            local _lock_fi=0
+            tput civis 2>/dev/null || true
+            while [[ -f "$lock_file" ]]; do
+              if _service_lock_is_stale "$lock_file"; then
+                rm -f "$lock_file"
+                break
+              fi
+              local _wait_dur
+              _wait_dur=$(_deploy_lock_duration "$_SLOCK_STARTED")
+              printf '\r  %b%s%b %bWaiting for %s lock to release... (%s)%b  ' \
+                "${ACCENT}" "${_lock_frames[$_lock_fi]}" "${RESET}" \
+                "${DIM}" "$service" "$_wait_dur" "${RESET}"
+              _lock_fi=$(( (_lock_fi + 1) % ${#_lock_frames[@]} ))
+              sleep 0.2
+            done
+            printf '\r\033[K'
+            tput cnorm 2>/dev/null || true
+            ok "Service lock released for '${service}', proceeding"
+            ;;
+          "Override")
+            warn "Overriding service lock for '${service}'"
+            rm -f "$lock_file"
+            ;;
+          "Abort"|"__back__")
+            return 1
+            ;;
+        esac
+      else
+        err "Service '${service}' is locked by ${_SLOCK_USER} (${_SLOCK_SOURCE}). Use --force to override."
+        return 1
+      fi
+    fi
+  fi
+
+  # Create lock
+  mkdir -p "$(dirname "$lock_file")"
+  local _tty_name _hostname
+  _tty_name=$(tty 2>/dev/null || echo "unknown")
+  _hostname=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+  local _source="${MUSTER_LOCK_SOURCE:-local}"
+  cat > "$lock_file" <<EOF
+{"user":"$(_deploy_identity)","pid":$$,"started":"$(date '+%Y-%m-%d %H:%M:%S')","terminal":"${_tty_name}","source":"${_source}","host":"${_hostname}"}
+EOF
+  return 0
+}
+
+_service_lock_release() {
+  local project_dir="$1" service="$2"
+  local lock_file
+  lock_file=$(_service_lock_file "$project_dir" "$service")
+  rm -f "$lock_file"
+}
+
+_service_lock_release_all() {
+  local project_dir="$1"
+  local locks_dir="${project_dir}/.muster/locks"
+  if [[ -d "$locks_dir" ]]; then
+    rm -f "${locks_dir}"/*.lock 2>/dev/null
+  fi
+}
+
+_service_lock_list() {
+  local project_dir="$1"
+  local locks_dir="${project_dir}/.muster/locks"
+  [[ -d "$locks_dir" ]] || return 0
+  local f svc
+  for f in "${locks_dir}"/*.lock; do
+    [[ -f "$f" ]] || continue
+    svc="${f##*/}"
+    svc="${svc%.lock}"
+    if _service_lock_is_stale "$f"; then
+      rm -f "$f"
+      continue
+    fi
+    _service_lock_read "$f"
+    printf '%s|%s|%s|%s\n' "$svc" "$_SLOCK_USER" "$_SLOCK_SOURCE" "$_SLOCK_STARTED"
+  done
 }

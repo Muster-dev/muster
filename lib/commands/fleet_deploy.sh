@@ -421,8 +421,11 @@ _fleet_deploy_muster() {
 
   info "Deploying on ${machine} via muster ($(fleet_desc "$machine"))"
 
-  # Run muster deploy on remote with token
-  local cmd="MUSTER_TOKEN=${token} muster deploy"
+  # Run muster deploy on remote with token + lock source info
+  local _source_host
+  _source_host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+  local _source_label="${USER:-unknown}@${_source_host}"
+  local cmd="MUSTER_TOKEN=${token} MUSTER_DEPLOY_SOURCE='${_source_label}' MUSTER_LOCK_SOURCE='fleet:${machine}' muster deploy"
   if [[ -n "$_FM_PROJECT_DIR" ]]; then
     cmd="cd ${_FM_PROJECT_DIR} && ${cmd}"
   fi
@@ -442,6 +445,13 @@ _fleet_deploy_push() {
   project_dir="$(dirname "$CONFIG_FILE")"
 
   info "Deploying to ${machine} via push ($(fleet_desc "$machine"))"
+
+  # Build remote lock metadata
+  local _source_host
+  _source_host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+  local _source_label="${USER:-unknown}@${_source_host}"
+  local _remote_cd=""
+  [[ -n "$_FM_PROJECT_DIR" ]] && _remote_cd="cd ${_FM_PROJECT_DIR} && "
 
   # Get services to deploy
   local services=()
@@ -474,15 +484,28 @@ ${_k8s_env}"
       [[ -z "$env_lines" ]] && env_lines="$_k8s_env"
     fi
 
+    # Acquire per-service lock on remote
+    local _lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_source_host}\"}"
+    fleet_exec "$machine" "${_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_lock_json}' > .muster/locks/${svc}.lock" 2>/dev/null || true
+
     info "  ${svc} → ${machine}"
     fleet_push_hook "$machine" "$hook" "$env_lines" >> "$log_file" 2>&1
     local hook_rc=$?
+
+    # Release per-service lock on remote
+    fleet_exec "$machine" "${_remote_cd}rm -f .muster/locks/${svc}.lock" 2>/dev/null || true
+
     if (( hook_rc != 0 )); then
       err "  ${svc} failed on ${machine}"
       svc_rc=1
       break
     fi
   done
+
+  # On failure, clean up any remaining locks from this push session
+  if (( svc_rc != 0 )); then
+    fleet_exec "$machine" "${_remote_cd}rm -f .muster/locks/*.lock" 2>/dev/null || true
+  fi
 
   return $svc_rc
 }
@@ -668,13 +691,21 @@ _fleet_deploy_parallel() {
             echo "1" > "$status_file"
             exit 1
           fi
-          local _cmd="MUSTER_TOKEN=${_token} muster deploy"
+          local _src_host
+          _src_host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+          local _src_label="${USER:-unknown}@${_src_host}"
+          local _cmd="MUSTER_TOKEN=${_token} MUSTER_DEPLOY_SOURCE='${_src_label}' MUSTER_LOCK_SOURCE='fleet:${machine}' muster deploy"
           [[ -n "$_FM_PROJECT_DIR" ]] && _cmd="cd ${_FM_PROJECT_DIR} && ${_cmd}"
           fleet_exec "$machine" "$_cmd" >> "$log_file" 2>&1
           _rc=$?
         else
           local _proj_dir
           _proj_dir="$(dirname "$CONFIG_FILE")"
+          local _p_src_host
+          _p_src_host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+          local _p_remote_cd=""
+          [[ -n "$_FM_PROJECT_DIR" ]] && _p_remote_cd="cd ${_FM_PROJECT_DIR} && "
+
           while IFS= read -r _svc; do
             [[ -z "$_svc" ]] && continue
             local _skip
@@ -695,7 +726,21 @@ ${_ke}"
               [[ -z "$_env" ]] && _env="$_ke"
             fi
 
-            fleet_push_hook "$machine" "$_hook" "$_env" >> "$log_file" 2>&1 || { _rc=1; break; }
+            # Acquire per-service lock on remote
+            local _p_lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_p_src_host}\"}"
+            fleet_exec "$machine" "${_p_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_p_lock_json}' > .muster/locks/${_svc}.lock" 2>/dev/null || true
+
+            fleet_push_hook "$machine" "$_hook" "$_env" >> "$log_file" 2>&1
+            local _push_rc=$?
+
+            # Release per-service lock on remote
+            fleet_exec "$machine" "${_p_remote_cd}rm -f .muster/locks/${_svc}.lock" 2>/dev/null || true
+
+            if (( _push_rc != 0 )); then
+              fleet_exec "$machine" "${_p_remote_cd}rm -f .muster/locks/*.lock" 2>/dev/null || true
+              _rc=1
+              break
+            fi
           done < <(config_get '.deploy_order[]' 2>/dev/null || config_services)
         fi
 
