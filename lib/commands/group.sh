@@ -5,6 +5,7 @@ source "$MUSTER_ROOT/lib/core/groups.sh"
 source "$MUSTER_ROOT/lib/core/credentials.sh"
 source "$MUSTER_ROOT/lib/core/trust.sh"
 source "$MUSTER_ROOT/lib/tui/menu.sh"
+source "$MUSTER_ROOT/lib/tui/checklist.sh"
 source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/tui/progress.sh"
 
