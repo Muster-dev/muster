@@ -201,6 +201,10 @@ _settings_muster_global() {
     tui_mode=$(global_config_get "tui_mode" 2>/dev/null)
     : "${tui_mode:=go}"
 
+    local deploy_name
+    deploy_name=$(global_config_get "deploy_name" 2>/dev/null)
+    [[ "$deploy_name" == "null" ]] && deploy_name=""
+
     # Build toggle data
     _TOG_LABELS=()
     _TOG_OPTIONS=()
@@ -311,6 +315,22 @@ _settings_muster_global() {
       *)       _TOG_STATES[10]=0 ;;
     esac
 
+    # Service lock timeout: 60 / 300 / 900 / 1800 / 3600 / 7200 / 86400
+    local lock_timeout
+    lock_timeout=$(global_config_get "service_lock_timeout" 2>/dev/null)
+    : "${lock_timeout:=1800}"
+    _TOG_LABELS[11]="Lock timeout (s)"
+    _TOG_OPTIONS[11]="60|300|900|1800|3600|7200|86400"
+    case "$lock_timeout" in
+      60)    _TOG_STATES[11]=0 ;;
+      300)   _TOG_STATES[11]=1 ;;
+      900)   _TOG_STATES[11]=2 ;;
+      3600)  _TOG_STATES[11]=4 ;;
+      7200)  _TOG_STATES[11]=5 ;;
+      86400) _TOG_STATES[11]=6 ;;
+      *)     _TOG_STATES[11]=3 ;;
+    esac
+
     echo ""
     _toggle_select "Muster Settings"
 
@@ -375,6 +395,16 @@ _settings_muster_global() {
       3) new_role="both" ;;
       *) new_role="local" ;;
     esac
+    local new_lock_timeout
+    case $(( _TOG_STATES[11] )) in
+      0) new_lock_timeout=60 ;;
+      1) new_lock_timeout=300 ;;
+      2) new_lock_timeout=900 ;;
+      4) new_lock_timeout=3600 ;;
+      5) new_lock_timeout=7200 ;;
+      6) new_lock_timeout=86400 ;;
+      *) new_lock_timeout=1800 ;;
+    esac
 
     # Confirm source mode switch
     if [[ "$new_update_mode" == "source" && "$update_mode" != "source" ]]; then
@@ -394,6 +424,17 @@ _settings_muster_global() {
       esac
     fi
 
+    # Deploy name (free-text input)
+    echo ""
+    local _dn_display="${deploy_name:-(not set)}"
+    printf '  %bDeploy name (shown in locks)%b [%s]: ' "${DIM}" "${RESET}" "$_dn_display"
+    local new_deploy_name=""
+    IFS= read -r new_deploy_name
+    # If empty input, keep existing value
+    if [[ -z "$new_deploy_name" ]]; then
+      new_deploy_name="$deploy_name"
+    fi
+
     # Save all settings
     global_config_set "tui_mode" "\"$new_tui\""
     global_config_set "color_mode" "\"$new_color\""
@@ -406,6 +447,10 @@ _settings_muster_global() {
     global_config_set "signing" "\"$new_signing\""
     global_config_set "minimal" "$new_minimal"
     global_config_set "machine_role" "\"$new_role\""
+    global_config_set "service_lock_timeout" "$new_lock_timeout"
+    if [[ -n "$new_deploy_name" ]]; then
+      global_config_set "deploy_name" "\"$new_deploy_name\""
+    fi
 
     return 0
   done

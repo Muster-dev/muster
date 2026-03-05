@@ -45,12 +45,15 @@ _dashboard_pause() {
 }
 
 _dashboard_print_svc_line() {
-  local status_icon="$1" status_color="$2" display_name="$3" status_label="$4" cred_warn="$5" max_w="$6"
+  local status_icon="$1" status_color="$2" display_name="$3" status_label="$4" cred_warn="$5" max_w="$6" lock_info="${7:-}"
 
   local left="  ${display_name}"
   local right="${status_label}"
+  if [[ -n "$lock_info" ]]; then
+    right="${lock_info} ${status_label}"
+  fi
   if [[ -n "$cred_warn" ]]; then
-    right="${cred_warn}  ${status_label}"
+    right="${cred_warn}  ${right}"
   fi
 
   local left_len=${#left}
@@ -60,7 +63,13 @@ _dashboard_print_svc_line() {
   local pad
   printf -v pad '%*s' "$pad_len" ""
 
-  if [[ -n "$cred_warn" ]]; then
+  if [[ -n "$cred_warn" && -n "$lock_info" ]]; then
+    printf '  %b%s%b %s%s%b%s%b  %b%s%b %b%s%b\n' \
+      "$status_color" "$status_icon" "${RESET}" "$display_name" "$pad" "${YELLOW}" "$cred_warn" "${RESET}" "${YELLOW}" "$lock_info" "${RESET}" "${DIM}" "$status_label" "${RESET}"
+  elif [[ -n "$lock_info" ]]; then
+    printf '  %b%s%b %s%s%b%s%b %b%s%b\n' \
+      "$status_color" "$status_icon" "${RESET}" "$display_name" "$pad" "${YELLOW}" "$lock_info" "${RESET}" "${DIM}" "$status_label" "${RESET}"
+  elif [[ -n "$cred_warn" ]]; then
     printf '  %b%s%b %s%s%b%s%b  %b%s%b\n' \
       "$status_color" "$status_icon" "${RESET}" "$display_name" "$pad" "${YELLOW}" "$cred_warn" "${RESET}" "${DIM}" "$status_label" "${RESET}"
   else
@@ -93,6 +102,10 @@ _dashboard_header() {
 
   local project_dir
   project_dir="$(dirname "$CONFIG_FILE")"
+
+  # Gather active service locks (also cleans stale locks)
+  local _svc_locks=""
+  _svc_locks=$(_service_lock_list "$project_dir" 2>/dev/null)
 
   # Launch health checks in background (write to persistent cache)
   # Migrate old cache dir
@@ -196,7 +209,30 @@ _dashboard_header() {
       cred_warn="KEY"
     fi
 
-    _dashboard_print_svc_line "$status_icon" "$status_color" "$name" "$status_label" "$cred_warn" "$w"
+    # Check for active service lock
+    local _lock_indicator=""
+    if [[ -n "$_svc_locks" ]]; then
+      local _lock_line=""
+      _lock_line=$(printf '%s\n' "$_svc_locks" | grep "^${svc}|" | head -1)
+      if [[ -n "$_lock_line" ]]; then
+        local _lock_user _lock_source
+        _lock_user=$(printf '%s' "$_lock_line" | cut -d'|' -f2)
+        _lock_source=$(printf '%s' "$_lock_line" | cut -d'|' -f3)
+        if [[ "$_lock_source" == "local" ]]; then
+          _lock_indicator="[locked by ${_lock_user}]"
+        else
+          _lock_indicator="[locked by ${_lock_source}]"
+        fi
+        # Truncate if too long for TUI width
+        local _max_lock_len=$(( w - ${#name} - ${#status_label} - ${#cred_warn} - 10 ))
+        (( _max_lock_len < 8 )) && _max_lock_len=8
+        if (( ${#_lock_indicator} > _max_lock_len )); then
+          _lock_indicator="${_lock_indicator:0:$((_max_lock_len - 2))}..]"
+        fi
+      fi
+    fi
+
+    _dashboard_print_svc_line "$status_icon" "$status_color" "$name" "$status_label" "$cred_warn" "$w" "$_lock_indicator"
 
     _idx=$((_idx + 1))
   done
@@ -917,6 +953,9 @@ cmd_dashboard() {
             fi
             rm -f "$_lock_file"
           fi
+
+          # Clean up per-service locks left by the cancelled deploy
+          rm -f "${project_dir}/.muster/locks/"*.lock 2>/dev/null
 
           ok "Fleet deploy cancelled"
 

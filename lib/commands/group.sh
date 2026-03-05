@@ -1789,12 +1789,13 @@ REMOTECMD
   cmd="${cmd}     for _c in \$(pgrep -P \$_dpid 2>/dev/null); do pkill -KILL -P \$_c 2>/dev/null; done;"
   cmd="${cmd}     wait \$_dpid 2>/dev/null;"
   cmd="${cmd}     rm -f .muster/.fleet_deploying .muster/deploy.lock;"
+  cmd="${cmd}     rm -f .muster/locks/*.lock 2>/dev/null;"
   cmd="${cmd}     exit 130;"
   cmd="${cmd}   fi; sleep 1;"
   cmd="${cmd} done"
   cmd="${cmd}; wait \$_dpid 2>/dev/null; _rc=\$?"
   # If .fleet_deploying was removed (cancel from dashboard), exit 130
-  cmd="${cmd}; if [ ! -f .muster/.fleet_deploying ]; then rm -f .muster/deploy.lock; exit 130; fi"
+  cmd="${cmd}; if [ ! -f .muster/.fleet_deploying ]; then rm -f .muster/deploy.lock; rm -f .muster/locks/*.lock 2>/dev/null; exit 130; fi"
   # Clean up and signal dashboard to refresh back to normal
   cmd="${cmd}; rm -f .muster/.fleet_deploying"
   cmd="${cmd}; [ -f .muster/.dashboard_pid ] && kill -USR1 \$(cat .muster/.dashboard_pid) 2>/dev/null"

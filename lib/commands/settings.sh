@@ -60,12 +60,12 @@ _settings_global_cli() {
 
   # Validate key
   case "$key" in
-    tui_mode|color_mode|log_color_mode|log_retention_days|default_stack|default_health_timeout|scanner_exclude|update_check|update_mode|minimal|machine_role|deploy_password|signing) ;;
+    tui_mode|color_mode|log_color_mode|log_retention_days|default_stack|default_health_timeout|scanner_exclude|update_check|update_mode|minimal|machine_role|deploy_password|signing|service_lock_timeout|deploy_name) ;;
     *)
       err "Unknown global setting: ${key}"
       echo "  Valid keys: tui_mode, color_mode, log_color_mode, log_retention_days, default_stack,"
       echo "              default_health_timeout, scanner_exclude, update_check, update_mode, minimal,"
-      echo "              machine_role, deploy_password, signing"
+      echo "              machine_role, deploy_password, signing, service_lock_timeout, deploy_name"
       return 1
       ;;
   esac
@@ -160,6 +160,20 @@ _settings_global_cli() {
       esac
       global_config_set "$key" "$value"
       ;;
+    service_lock_timeout)
+      case "$value" in
+        *[!0-9]*) err "service_lock_timeout must be a positive integer"; return 1 ;;
+      esac
+      if (( value < 60 )); then
+        err "service_lock_timeout minimum is 60 (1 minute)"
+        return 1
+      fi
+      if (( value > 86400 )); then
+        err "service_lock_timeout maximum is 86400 (24 hours)"
+        return 1
+      fi
+      global_config_set "$key" "$value"
+      ;;
     default_stack)
       case "$value" in
         bare|docker|compose|k8s) ;;
@@ -233,6 +247,16 @@ _settings_global_cli() {
       case "$value" in
         on|off) ;;
         *) err "signing must be on or off"; return 1 ;;
+      esac
+      global_config_set "$key" "\"$value\""
+      ;;
+    deploy_name)
+      # Validate: no quotes or special shell chars
+      case "$value" in
+        *[\'\"\\$\`\;]*)
+          err "deploy_name must not contain quotes or special shell characters"
+          return 1
+          ;;
       esac
       global_config_set "$key" "\"$value\""
       ;;
