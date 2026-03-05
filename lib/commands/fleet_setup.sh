@@ -32,7 +32,7 @@ _fleet_pick_phrase() {
 # ── Visual helpers ──
 
 _FLEET_SETUP_STEP=1
-_FLEET_SETUP_TOTAL=5
+_FLEET_SETUP_TOTAL=6
 _FLEET_SETUP_PHRASE=""
 _FLEET_SETUP_LABEL=""
 
@@ -273,7 +273,7 @@ cmd_fleet_setup() {
   # ============================================
   # Step 1: Name your fleet
   # ============================================
-  _FLEET_SETUP_TOTAL=5
+  _FLEET_SETUP_TOTAL=6
   _fleet_setup_screen 1 "Name your fleet"
 
   # Check for existing fleets
@@ -431,7 +431,10 @@ cmd_fleet_setup() {
         _si=$((_si + 1))
       done
 
-      printf '%b\n' "  ${DIM}Found ${_ssh_count} host(s) in ~/.ssh/config ready for duty.${RESET}"
+      printf '%b\n' "  ${DIM}Add the machines you want to deploy to. Muster will${RESET}"
+    printf '%b\n' "  ${DIM}connect over SSH to detect what's running on each one.${RESET}"
+    echo ""
+    printf '%b\n' "  ${DIM}Found ${_ssh_count} host(s) in ~/.ssh/config ready for duty.${RESET}"
       echo ""
 
       menu_select "Enlist how?" "Import from SSH config" "Enter manually" "Done recruiting"
@@ -701,21 +704,24 @@ cmd_fleet_setup() {
     fi
 
     # Recommend hook mode based on detection
+    printf '%b\n' "  ${DIM}How should deploys work on this machine?${RESET}"
+    echo ""
+
     local _recommended_mode="sync"
     local _rec_label="Sync"
-    local _rec_desc="You command from HQ. Muster creates deploy scripts here and pushes them to the front line."
+    local _rec_desc="Muster writes deploy/health/rollback scripts locally and pushes them to the machine over SSH. You control everything from HQ."
     local _alt_label="Manual"
-    local _alt_desc="The remote runs its own ops. Muster just gives the order to deploy."
+    local _alt_desc="Muster is already installed on this machine. Just SSH in and tell it to deploy -- the remote handles the rest."
 
     if [[ "$_DETECT_MUSTER" == "yes" ]]; then
       _recommended_mode="manual"
       _rec_label="Manual"
-      _rec_desc="Muster's already stationed there. Just relay the deploy order."
+      _rec_desc="Muster is already installed on this machine. Just SSH in and tell it to deploy -- the remote handles the rest."
       _alt_label="Sync"
-      _alt_desc="Override: take command from HQ. Create and push deploy scripts."
+      _alt_desc="Override: Muster writes deploy/health/rollback scripts locally and pushes them to the machine over SSH. You control everything from HQ."
     fi
 
-    menu_select_desc "Chain of command" \
+    menu_select_desc "Deploy mode" \
       "${_rec_label} (recommended)" \
       "$_rec_desc" \
       "$_alt_label" \
@@ -733,9 +739,10 @@ cmd_fleet_setup() {
       sync)
         # -- Sync mode: configure services + hooks --
         echo ""
-        printf '%b\n' "  ${DIM}What's this machine's mission?${RESET}"
+        printf '%b\n' "  ${DIM}What services run on this machine? Muster will generate${RESET}"
+        printf '%b\n' "  ${DIM}deploy, health, and rollback scripts for each one.${RESET}"
         echo ""
-        checklist_select --none "Assign duties" \
+        checklist_select --none "Services" \
           "Web app / API" \
           "Background workers" \
           "Database" \
@@ -764,7 +771,9 @@ cmd_fleet_setup() {
           [[ "$_so" != "$_stack_default" ]] && _stack_opts[${#_stack_opts[@]}]="$_so"
         done
 
-        menu_select "Weapons platform" "${_stack_opts[@]}"
+        printf '%b\n' "  ${DIM}How are services deployed on this machine?${RESET}"
+        echo ""
+        menu_select "Deploy stack" "${_stack_opts[@]}"
         local _remote_stack="compose"
         case "$MENU_RESULT" in
           "Docker Compose") _remote_stack="compose" ;;
@@ -883,16 +892,17 @@ cmd_fleet_setup() {
     printf '%b\n' "  ${DIM}Press any key to advance...${RESET}"
     IFS= read -rsn1 || true
   else
-    printf '%b\n' "  ${DIM}${_total_machines} machines in formation. How do they march?${RESET}"
+    printf '%b\n' "  ${DIM}${_total_machines} machines in formation. When you deploy, in${RESET}"
+    printf '%b\n' "  ${DIM}what order should machines receive updates?${RESET}"
     echo ""
 
-    menu_select_desc "Battle plan" \
+    menu_select_desc "Deploy strategy" \
       "Sequential (recommended)" \
-      "One at a time. If a machine falls, halt the advance before it spreads." \
+      "One at a time. If a machine fails, halt before it spreads. Good default." \
       "Parallel" \
-      "All at once. Fastest blitz, but if it goes wrong, it goes wrong everywhere." \
+      "All at once. Fastest, but if it breaks, it breaks everywhere." \
       "Rolling" \
-      "Advance one, confirm it's standing, then send the next. Safest for production."
+      "Deploy to one, verify it's healthy, then move to the next. Safest for production."
 
     case "$MENU_RESULT" in
       *"Parallel"*) _strategy="parallel" ;;
@@ -904,9 +914,132 @@ cmd_fleet_setup() {
   fi
 
   # ============================================
-  # Step 5: Fleet assembled
+  # Step 5: Deploy scouts (agent install)
   # ============================================
-  _fleet_setup_screen 5 "Fleet assembled"
+  _fleet_setup_screen 5 "Deploy scouts"
+
+  printf '%b\n' "  ${DIM}Scouts are lightweight monitoring agents that live on your${RESET}"
+  printf '%b\n' "  ${DIM}machines. They collect:${RESET}"
+  printf '%b\n' "    ${DIM}- Service health (every 30s)${RESET}"
+  printf '%b\n' "    ${DIM}- System metrics: CPU, memory, disk (every 60s)${RESET}"
+  printf '%b\n' "    ${DIM}- Deploy events (real-time)${RESET}"
+  printf '%b\n' "    ${DIM}- Service log tails (every 60s)${RESET}"
+  printf '%b\n' "  ${DIM}Scouts push reports back to HQ over SSH so you can${RESET}"
+  printf '%b\n' "  ${DIM}check fleet health without SSHing into every box.${RESET}"
+  echo ""
+
+  # Generate fleet encryption keypair
+  source "$MUSTER_ROOT/lib/core/fleet_crypto.sh"
+  source "$MUSTER_ROOT/lib/core/fleet_config.sh"
+
+  local _keygen_ok=false
+  local _fleet_key_path="$(fleet_dir "$_fleet_name")/fleet.key"
+
+  start_spinner "Generating fleet encryption keypair (RSA-4096)..."
+  if fleet_crypto_keygen "$_fleet_name" 2>/dev/null; then
+    _keygen_ok=true
+  fi
+  stop_spinner
+
+  if [[ "$_keygen_ok" == "true" ]]; then
+    _fleet_box_top "Encryption"
+    _fleet_box_row "${GREEN}" "*" "RSA-4096 + AES-256 hybrid" "active"
+    _fleet_box_bottom
+    echo ""
+    printf '%b\n' "  ${DIM}How it works:${RESET}"
+    printf '%b\n' "    ${DIM}1. Each report is encrypted with a random AES-256 key${RESET}"
+    printf '%b\n' "    ${DIM}2. That key is wrapped with your fleet's RSA-4096 public key${RESET}"
+    printf '%b\n' "    ${DIM}3. Only your private key can unwrap and read the report${RESET}"
+    echo ""
+    printf '%b\n' "  ${ACCENT}Private key:${RESET} ${DIM}${_fleet_key_path}${RESET}"
+    printf '%b\n' "  ${YELLOW}!${RESET} ${BOLD}Back this up.${RESET} ${DIM}Without it, encrypted reports are unreadable.${RESET}"
+    printf '%b\n' "  ${DIM}  Scouts only receive the public key -- they can encrypt${RESET}"
+    printf '%b\n' "  ${DIM}  but never decrypt reports from other machines.${RESET}"
+  else
+    printf '%b\n' "  ${YELLOW}!${RESET} Could not generate encryption keys (openssl missing?)"
+    printf '%b\n' "  ${DIM}  Reports will be sent as plaintext over SSH.${RESET}"
+    printf '%b\n' "  ${DIM}  Run 'muster fleet keygen' later to enable encryption.${RESET}"
+  fi
+  echo ""
+
+  # Offer agent installation on each machine
+  local _scout_deployed=()
+  local _scout_failed=()
+
+  if (( ${#_machines[@]} > 0 )); then
+    menu_select "Deploy scouts?" "Install on all new machines" "Select machines" "Skip for now"
+
+    local _scout_targets=()
+    case "$MENU_RESULT" in
+      "Install on all new machines")
+        local _si=0
+        while (( _si < ${#_machines[@]} )); do
+          _scout_targets[${#_scout_targets[@]}]="${_machines[$_si]}"
+          _si=$((_si + 1))
+        done
+        ;;
+      "Select machines")
+        local _scout_labels=()
+        local _si=0
+        while (( _si < ${#_machines[@]} )); do
+          _scout_labels[${#_scout_labels[@]}]="${_machines[$_si]}  ${_machine_users[$_si]}@${_machine_hosts[$_si]}"
+          _si=$((_si + 1))
+        done
+        checklist_select --none "Select scouts" "${_scout_labels[@]}"
+        while IFS= read -r _selected; do
+          [[ -z "$_selected" ]] && continue
+          _scout_targets[${#_scout_targets[@]}]="${_selected%%  *}"
+        done <<< "$CHECKLIST_RESULT"
+        ;;
+    esac
+
+    if (( ${#_scout_targets[@]} > 0 )); then
+      echo ""
+      source "$MUSTER_ROOT/lib/commands/fleet_agent.sh"
+      FLEET_CONFIG_FILE="__fleet_dirs__"
+
+      local _si=0
+      while (( _si < ${#_scout_targets[@]} )); do
+        local _st="${_scout_targets[$_si]}"
+        echo ""
+        printf '%b\n' "  ${ACCENT}--- ${_st} ---${RESET}"
+        if _fleet_cmd_install_agent "$_st" --push --force; then
+          _scout_deployed[${#_scout_deployed[@]}]="$_st"
+        else
+          _scout_failed[${#_scout_failed[@]}]="$_st"
+        fi
+        _si=$((_si + 1))
+      done
+      echo ""
+
+      # Scout deployment summary
+      if (( ${#_scout_deployed[@]} > 0 )); then
+        printf '%b\n' "  ${GREEN}*${RESET} ${#_scout_deployed[@]} scout(s) deployed and reporting"
+      fi
+      if (( ${#_scout_failed[@]} > 0 )); then
+        printf '%b\n' "  ${YELLOW}!${RESET} ${#_scout_failed[@]} scout(s) failed to deploy:"
+        local _fi=0
+        while (( _fi < ${#_scout_failed[@]} )); do
+          printf '%b\n' "    ${DIM}- ${_scout_failed[$_fi]}${RESET}"
+          _fi=$((_fi + 1))
+        done
+        printf '%b\n' "  ${DIM}  Retry later: muster fleet install-agent <name> --push${RESET}"
+      fi
+    else
+      printf '%b\n' "  ${DIM}No scouts deployed. Install later with:${RESET}"
+      printf '%b\n' "    ${BOLD}muster fleet install-agent <machine> --push${RESET}"
+      echo ""
+    fi
+  fi
+
+  echo ""
+  printf '%b\n' "  ${DIM}Press any key to advance...${RESET}"
+  IFS= read -rsn1 || true
+
+  # ============================================
+  # Step 6: Fleet assembled
+  # ============================================
+  _fleet_setup_screen 6 "Fleet assembled"
 
   printf '%b\n' "  ${DIM}All units accounted for. Here's your command post:${RESET}"
   echo ""
@@ -924,6 +1057,19 @@ cmd_fleet_setup() {
         manual) _hm_tag=" manual" ;;
       esac
 
+      # Check if scout is deployed
+      local _scout_icon="${GREEN}"
+      local _scout_suffix=""
+      local _is_scouted=false
+      local _sdi=0
+      while (( _sdi < ${#_scout_deployed[@]} )); do
+        [[ "${_scout_deployed[$_sdi]}" == "$_tm_proj" ]] && _is_scouted=true
+        _sdi=$((_sdi + 1))
+      done
+      if [[ "$_is_scouted" == "true" ]]; then
+        _hm_tag="${_hm_tag}+scout"
+      fi
+
       local _display="${_tm_proj}: ${_FP_USER}@${_FP_HOST}"
       _fleet_box_row "${GREEN}" "*" "$_display" "$_hm_tag"
     done
@@ -932,15 +1078,32 @@ cmd_fleet_setup() {
   _fleet_box_bottom
 
   echo ""
-  printf '%b\n' "  ${DIM}Strategy:${RESET}  ${BOLD}${_strategy}${RESET}"
-  printf '%b\n' "  ${DIM}Config:${RESET}    ~/.muster/fleets/${_fleet_name}/"
+  printf '%b\n' "  ${DIM}Strategy:${RESET}    ${BOLD}${_strategy}${RESET}"
+
+  # Encryption status
+  if [[ "$_keygen_ok" == "true" ]]; then
+    printf '%b\n' "  ${DIM}Encryption:${RESET}  ${GREEN}RSA-4096 + AES-256${RESET}"
+  else
+    printf '%b\n' "  ${DIM}Encryption:${RESET}  ${YELLOW}disabled${RESET} ${DIM}(run: muster fleet keygen)${RESET}"
+  fi
+
+  # Scout count
+  local _scout_total=$(( ${#_scout_deployed[@]} ))
+  if (( _scout_total > 0 )); then
+    printf '%b\n' "  ${DIM}Scouts:${RESET}      ${GREEN}${_scout_total} deployed${RESET}"
+  else
+    printf '%b\n' "  ${DIM}Scouts:${RESET}      ${DIM}none${RESET}"
+  fi
+
+  printf '%b\n' "  ${DIM}Config:${RESET}      ~/.muster/fleets/${_fleet_name}/"
   echo ""
 
   printf '%b\n' "  ${ACCENT}Orders:${RESET}"
-  printf '%b\n' "    ${BOLD}muster fleet deploy${RESET}    Send the fleet"
-  printf '%b\n' "    ${BOLD}muster fleet status${RESET}    Check all positions"
-  printf '%b\n' "    ${BOLD}muster fleet sync${RESET}      Push battle plans"
-  printf '%b\n' "    ${BOLD}muster fleet${RESET}           Command center"
+  printf '%b\n' "    ${BOLD}muster fleet deploy${RESET}         Send the fleet"
+  printf '%b\n' "    ${BOLD}muster fleet status${RESET}         Check all positions"
+  printf '%b\n' "    ${BOLD}muster fleet agent-status${RESET}   Scout reports (health + metrics)"
+  printf '%b\n' "    ${BOLD}muster fleet sync${RESET}           Push battle plans"
+  printf '%b\n' "    ${BOLD}muster fleet${RESET}                Command center"
   echo ""
 
   menu_select "First orders?" "Dry run (test deploy)" "Dismissed"

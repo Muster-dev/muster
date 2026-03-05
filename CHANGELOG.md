@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.55] - 2026-03-04
+
+### Added
+- Fleet encryption: RSA-4096 keypair per fleet for encrypted agent reports
+- Hybrid encryption: AES-256-CBC session keys wrapped with RSA-4096 (openssl)
+- New `lib/core/fleet_crypto.sh` — fleet keygen, encrypt, decrypt, report cache
+- Agent report encryption: scouts encrypt reports before pushing to HQ
+- Setup Step 5 "Deploy scouts" — agent install integrated into fleet setup wizard
+- Push + pull fallback: `fleet agent-status` reads local cache, falls back to SSH
+
+### Changed
+- `muster fleet keygen` now generates both signing and fleet encryption keys
+- Agent push reports land in `~/.muster/fleets/<fleet>/reports/<host>/`
+- Agent status displays encryption indicator and report age
+
 ## [0.5.54] - 2026-03-04
 
 ### Changed

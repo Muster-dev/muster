@@ -94,6 +94,9 @@ _fleet_cmd_install_agent() {
     fi
   fi
 
+  # Source fleet crypto for encryption support
+  source "$MUSTER_ROOT/lib/core/fleet_crypto.sh"
+
   # Detect remote OS
   start_spinner "Detecting remote OS..."
   local _remote_os
@@ -179,13 +182,23 @@ _fleet_cmd_install_agent() {
 
   local _push_enabled="false"
   local _push_host="" _push_user="" _push_port="22" _push_identity="" _push_dir=""
+  local _push_fleet=""
   if [[ "$push" == "true" ]]; then
     _push_enabled="true"
     _push_host=$(hostname -s 2>/dev/null || hostname)
     # Sanitize
     _push_host=$(printf '%s' "$_push_host" | tr -cd 'a-zA-Z0-9._-')
     _push_user=$(whoami)
-    _push_dir="${HOME}/.muster"
+    # Find which fleet this machine belongs to and push into its reports dir
+    if fleet_cfg_find_project "$machine" 2>/dev/null; then
+      _push_fleet="$_FP_FLEET"
+      local _rhost
+      _rhost=$(fleet_exec "$machine" "hostname -s 2>/dev/null || hostname" 2>/dev/null | tr -cd 'a-zA-Z0-9._-')
+      [[ -z "$_rhost" ]] && _rhost="$machine"
+      _push_dir="$(fleet_dir "$_push_fleet")/reports/${_rhost}"
+    else
+      _push_dir="${HOME}/.muster/fleet/reports/${machine}"
+    fi
   fi
 
   local _tmp_config
@@ -271,6 +284,29 @@ EOF
   if [[ $_config_rc -ne 0 ]]; then
     err "Failed to push agent config"
     return 1
+  fi
+
+  # Push fleet public key for report encryption
+  local _has_encryption=false
+  if [[ -n "$_push_fleet" ]] && fleet_crypto_has_keys "$_push_fleet" 2>/dev/null; then
+    start_spinner "Pushing fleet encryption key..."
+    local _fleet_pub
+    _fleet_pub="$(fleet_crypto_pubkey "$_push_fleet")"
+    # shellcheck disable=SC2086
+    scp $_scp_opts -- "$_fleet_pub" \
+      "${_FM_USER}@${_FM_HOST}:~/.muster/agent/fleet.pub" 2>/dev/null && {
+      fleet_exec "$machine" "chmod 644 ~/.muster/agent/fleet.pub" 2>/dev/null
+      _has_encryption=true
+    }
+    stop_spinner
+    if [[ "$_has_encryption" == "true" ]]; then
+      ok "Fleet encryption key deployed"
+    else
+      _agent_info "Could not push encryption key — reports will be plaintext"
+    fi
+  elif [[ "$push" == "true" ]]; then
+    _agent_info "No fleet keypair — generate with: muster fleet keygen <fleet>"
+    _agent_info "Reports will be pushed as plaintext until encryption is enabled"
   fi
 
   # Detect init system and install service
@@ -381,6 +417,9 @@ launchctl load ~/Library/LaunchAgents/dev.getmuster.agent.plist' 2>/dev/null
   fi
   if [[ "$push" == "true" ]]; then
     printf '%b\n' "  ${DIM}Push reporting enabled (target: ${_push_user}@${_push_host})${RESET}"
+    if [[ "$_has_encryption" == "true" ]]; then
+      printf '%b\n' "  ${DIM}Reports encrypted with RSA-4096 fleet key${RESET}"
+    fi
   fi
   echo ""
 }
@@ -417,6 +456,8 @@ _fleet_cmd_agent_status() {
     return 1
   fi
 
+  source "$MUSTER_ROOT/lib/core/fleet_crypto.sh"
+
   echo ""
   printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Agent Status${RESET}"
   echo ""
@@ -434,9 +475,10 @@ _fleet_cmd_agent_status() {
     [[ -z "$_as_m" ]] && continue
 
     # Check if agent is installed
-    local _as_installed
+    local _as_installed _as_fleet=""
     _as_installed="false"
     if fleet_cfg_find_project "$_as_m" 2>/dev/null; then
+      _as_fleet="$_FP_FLEET"
       local _as_pdir
       _as_pdir="$(fleet_cfg_project_dir "$_FP_FLEET" "$_FP_GROUP" "$_FP_PROJECT")"
       _as_installed=$(jq -r '.agent_installed // false' "${_as_pdir}/project.json" 2>/dev/null)
@@ -450,62 +492,125 @@ _fleet_cmd_agent_status() {
     _fleet_load_machine "$_as_m"
     printf '%b\n' "  ${BOLD}${WHITE}${_as_m}${RESET}  ${DIM}${_FM_USER}@${_FM_HOST}${RESET}"
 
-    # Check agent process
-    local _as_pid
-    _as_pid=$(fleet_exec "$_as_m" 'pid=$(cat ~/.muster/agent/agent.pid 2>/dev/null); [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo running || echo stopped' 2>/dev/null)
+    # ── Try local cache first (push reports from agent) ──
+    local _used_cache=false
+    if [[ -n "$_as_fleet" ]]; then
+      local _rhost
+      _rhost=$(printf '%s' "$_as_m" | tr -cd 'a-zA-Z0-9._-')
 
-    if [[ "$_as_pid" == *"running"* ]]; then
-      printf '  Status: %brunning%b\n' "${GREEN}" "${RESET}"
-    else
-      printf '  Status: %bstopped%b\n' "${RED}" "${RESET}"
+      # Check for cached report in fleet reports dir
+      local _rdir
+      _rdir="$(fleet_crypto_report_dir "$_as_fleet" "$_rhost")"
+
+      if fleet_crypto_read_report "$_as_fleet" "$_rhost" 2>/dev/null; then
+        # Report found locally — use cached data
+        if [[ -n "$_FCR_JSON" ]] && command -v jq >/dev/null 2>&1; then
+          local _cr_ts _cr_cpu _cr_mem _cr_disk _cr_health
+          _cr_ts=$(jq -r '.ts // ""' "$_FCR_JSON" 2>/dev/null)
+          _cr_cpu=$(jq -r '.metrics.cpu // 0' "$_FCR_JSON" 2>/dev/null)
+          _cr_mem=$(jq -r '.metrics.mem_pct // 0' "$_FCR_JSON" 2>/dev/null)
+          _cr_disk=$(jq -r '.metrics.disk_pct // 0' "$_FCR_JSON" 2>/dev/null)
+
+          # Determine source label
+          local _enc_label=""
+          [[ -f "${_rdir}/latest.enc" ]] && _enc_label=" (encrypted)"
+
+          local _age_label=""
+          if (( _FCR_AGE < 60 )); then
+            _age_label="${_FCR_AGE}s ago"
+          elif (( _FCR_AGE < 3600 )); then
+            _age_label="$(( _FCR_AGE / 60 ))m ago"
+          else
+            _age_label="$(( _FCR_AGE / 3600 ))h ago"
+          fi
+
+          printf '  Status: %bpush-reporting%b  %b%s%s%b\n' "${GREEN}" "${RESET}" "${DIM}" "$_age_label" "$_enc_label" "${RESET}"
+
+          # Health from report
+          _cr_health=$(jq -r '.health // {} | to_entries[] | "\(.key)=\(.value)"' "$_FCR_JSON" 2>/dev/null)
+          if [[ -n "$_cr_health" ]]; then
+            printf '  %bServices:%b\n' "${DIM}" "${RESET}"
+            while IFS= read -r _as_h; do
+              [[ -z "$_as_h" ]] && continue
+              local _as_svc="${_as_h%%=*}"
+              local _as_val="${_as_h#*=}"
+              local _as_color="${RESET}"
+              case "$_as_val" in
+                healthy)   _as_color="${GREEN}" ;;
+                unhealthy) _as_color="${RED}" ;;
+                disabled)  _as_color="${DIM}" ;;
+              esac
+              printf '    %-20s %b%s%b\n' "$_as_svc" "$_as_color" "$_as_val" "${RESET}"
+            done <<< "$_cr_health"
+          fi
+
+          printf '  %bMetrics:%b CPU %s%%  Mem %s%%  Disk %s%%\n' "${DIM}" "${RESET}" "$_cr_cpu" "$_cr_mem" "$_cr_disk"
+          [[ -n "$_cr_ts" ]] && printf '  %bLast report: %s%b\n' "${DIM}" "$_cr_ts" "${RESET}"
+          echo ""
+          _used_cache=true
+        fi
+      fi
     fi
 
-    # Read health data
-    local _as_health
-    _as_health=$(fleet_exec "$_as_m" 'for f in ~/.muster/agent/health/*; do [ -f "$f" ] && echo "$(basename "$f")=$(cat "$f")"; done' 2>/dev/null)
+    # ── Fallback: pull directly via SSH ──
+    if [[ "$_used_cache" == "false" ]]; then
+      # Check agent process
+      local _as_pid
+      _as_pid=$(fleet_exec "$_as_m" 'pid=$(cat ~/.muster/agent/agent.pid 2>/dev/null); [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo running || echo stopped' 2>/dev/null)
 
-    if [[ -n "$_as_health" ]]; then
-      printf '  %bServices:%b\n' "${DIM}" "${RESET}"
-      while IFS= read -r _as_h; do
-        [[ -z "$_as_h" ]] && continue
-        local _as_svc="${_as_h%%=*}"
-        local _as_val="${_as_h#*=}"
-        local _as_color="${RESET}"
-        case "$_as_val" in
-          healthy)   _as_color="${GREEN}" ;;
-          unhealthy) _as_color="${RED}" ;;
-          disabled)  _as_color="${DIM}" ;;
-        esac
-        printf '    %-20s %b%s%b\n' "$_as_svc" "$_as_color" "$_as_val" "${RESET}"
-      done <<< "$_as_health"
+      if [[ "$_as_pid" == *"running"* ]]; then
+        printf '  Status: %brunning%b\n' "${GREEN}" "${RESET}"
+      else
+        printf '  Status: %bstopped%b\n' "${RED}" "${RESET}"
+      fi
+
+      # Read health data
+      local _as_health
+      _as_health=$(fleet_exec "$_as_m" 'for f in ~/.muster/agent/health/*; do [ -f "$f" ] && echo "$(basename "$f")=$(cat "$f")"; done' 2>/dev/null)
+
+      if [[ -n "$_as_health" ]]; then
+        printf '  %bServices:%b\n' "${DIM}" "${RESET}"
+        while IFS= read -r _as_h; do
+          [[ -z "$_as_h" ]] && continue
+          local _as_svc="${_as_h%%=*}"
+          local _as_val="${_as_h#*=}"
+          local _as_color="${RESET}"
+          case "$_as_val" in
+            healthy)   _as_color="${GREEN}" ;;
+            unhealthy) _as_color="${RED}" ;;
+            disabled)  _as_color="${DIM}" ;;
+          esac
+          printf '    %-20s %b%s%b\n' "$_as_svc" "$_as_color" "$_as_val" "${RESET}"
+        done <<< "$_as_health"
+      fi
+
+      # Read metrics
+      local _as_metrics
+      _as_metrics=$(fleet_exec "$_as_m" "cat ~/.muster/agent/metrics/latest.json 2>/dev/null" 2>/dev/null)
+
+      if [[ -n "$_as_metrics" ]] && command -v jq >/dev/null 2>&1; then
+        local _as_cpu _as_mem _as_disk _as_ts
+        _as_cpu=$(printf '%s' "$_as_metrics" | jq -r '.cpu // 0' 2>/dev/null)
+        _as_mem=$(printf '%s' "$_as_metrics" | jq -r '.mem_pct // 0' 2>/dev/null)
+        _as_disk=$(printf '%s' "$_as_metrics" | jq -r '.disk_pct // 0' 2>/dev/null)
+        _as_ts=$(printf '%s' "$_as_metrics" | jq -r '.ts // ""' 2>/dev/null)
+        printf '  %bMetrics:%b CPU %s%%  Mem %s%%  Disk %s%%\n' "${DIM}" "${RESET}" "$_as_cpu" "$_as_mem" "$_as_disk"
+        [[ -n "$_as_ts" ]] && printf '  %bLast poll: %s%b\n' "${DIM}" "$_as_ts" "${RESET}"
+      fi
+
+      # Recent events
+      local _as_events
+      _as_events=$(fleet_exec "$_as_m" "tail -5 ~/.muster/agent/events/deploy.log 2>/dev/null" 2>/dev/null)
+
+      if [[ -n "$_as_events" ]]; then
+        printf '  %bRecent events:%b\n' "${DIM}" "${RESET}"
+        while IFS= read -r _as_ev; do
+          [[ -z "$_as_ev" ]] && continue
+          printf '    %b%s%b\n' "${DIM}" "$_as_ev" "${RESET}"
+        done <<< "$_as_events"
+      fi
+      echo ""
     fi
-
-    # Read metrics
-    local _as_metrics
-    _as_metrics=$(fleet_exec "$_as_m" "cat ~/.muster/agent/metrics/latest.json 2>/dev/null" 2>/dev/null)
-
-    if [[ -n "$_as_metrics" ]] && command -v jq >/dev/null 2>&1; then
-      local _as_cpu _as_mem _as_disk _as_ts
-      _as_cpu=$(printf '%s' "$_as_metrics" | jq -r '.cpu // 0' 2>/dev/null)
-      _as_mem=$(printf '%s' "$_as_metrics" | jq -r '.mem_pct // 0' 2>/dev/null)
-      _as_disk=$(printf '%s' "$_as_metrics" | jq -r '.disk_pct // 0' 2>/dev/null)
-      _as_ts=$(printf '%s' "$_as_metrics" | jq -r '.ts // ""' 2>/dev/null)
-      printf '  %bMetrics:%b CPU %s%%  Mem %s%%  Disk %s%%\n' "${DIM}" "${RESET}" "$_as_cpu" "$_as_mem" "$_as_disk"
-      [[ -n "$_as_ts" ]] && printf '  %bLast poll: %s%b\n' "${DIM}" "$_as_ts" "${RESET}"
-    fi
-
-    # Recent events
-    local _as_events
-    _as_events=$(fleet_exec "$_as_m" "tail -5 ~/.muster/agent/events/deploy.log 2>/dev/null" 2>/dev/null)
-
-    if [[ -n "$_as_events" ]]; then
-      printf '  %bRecent events:%b\n' "${DIM}" "${RESET}"
-      while IFS= read -r _as_ev; do
-        [[ -z "$_as_ev" ]] && continue
-        printf '    %b%s%b\n' "${DIM}" "$_as_ev" "${RESET}"
-      done <<< "$_as_events"
-    fi
-    echo ""
   done <<< "$machines_list"
 }
 

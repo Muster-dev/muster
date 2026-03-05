@@ -1727,36 +1727,66 @@ _fleet_cmd_rollback() {
 
 _fleet_cmd_keygen() {
   source "$MUSTER_ROOT/lib/core/payload_sign.sh"
+  source "$MUSTER_ROOT/lib/core/fleet_crypto.sh"
 
-  if [[ -f "$_PAYLOAD_PRIVKEY" && "${1:-}" != "--force" ]]; then
+  local force=false
+  [[ "${1:-}" == "--force" ]] && force=true
+
+  # 1. Payload signing keypair (Ed25519/RSA-2048)
+  echo ""
+  printf '%b\n' "  ${BOLD}Signing keypair${RESET}"
+
+  if [[ -f "$_PAYLOAD_PRIVKEY" && "$force" != "true" ]]; then
     local fp
     fp=$(payload_fingerprint 2>/dev/null || echo "unknown")
-    echo ""
-    ok "Signing keypair already exists"
+    ok "Already exists"
     printf '%b\n' "  ${DIM}Fingerprint: ${fp}${RESET}"
-    printf '%b\n' "  ${DIM}Public key:  ${_PAYLOAD_PUBKEY}${RESET}"
-    printf '%b\n' "  ${DIM}Use --force to regenerate${RESET}"
-    echo ""
-    return 0
+  else
+    [[ "$force" == "true" && -f "$_PAYLOAD_PRIVKEY" ]] && rm -f "$_PAYLOAD_PRIVKEY" "$_PAYLOAD_PUBKEY" "$_PAYLOAD_KEYTYPE_FILE"
+    if _payload_ensure_keypair; then
+      local algo fp
+      algo=$(cat "$_PAYLOAD_KEYTYPE_FILE" 2>/dev/null || echo "unknown")
+      fp=$(payload_fingerprint 2>/dev/null || echo "unknown")
+      ok "Generated (${algo})"
+      printf '%b\n' "  ${DIM}Fingerprint: ${fp}${RESET}"
+    else
+      warn "Failed to generate signing keypair"
+    fi
   fi
 
-  if [[ "${1:-}" == "--force" && -f "$_PAYLOAD_PRIVKEY" ]]; then
-    rm -f "$_PAYLOAD_PRIVKEY" "$_PAYLOAD_PUBKEY" "$_PAYLOAD_KEYTYPE_FILE"
+  # 2. Fleet encryption keypair (RSA-4096) — one per fleet
+  echo ""
+  printf '%b\n' "  ${BOLD}Fleet encryption keypairs (RSA-4096)${RESET}"
+
+  local _fleet
+  for _fleet in $(fleets_list 2>/dev/null); do
+    if fleet_crypto_has_keys "$_fleet" && [[ "$force" != "true" ]]; then
+      ok "${_fleet}: already exists"
+      printf '%b\n' "  ${DIM}Key: $(fleet_dir "$_fleet")/fleet.key${RESET}"
+    else
+      if [[ "$force" == "true" ]]; then
+        rm -f "$(fleet_dir "$_fleet")/fleet.key" "$(fleet_dir "$_fleet")/fleet.pub"
+      fi
+      if fleet_crypto_keygen "$_fleet"; then
+        ok "${_fleet}: generated"
+        printf '%b\n' "  ${DIM}Key: $(fleet_dir "$_fleet")/fleet.key${RESET}"
+      else
+        warn "${_fleet}: failed"
+      fi
+    fi
+  done
+
+  local _fl_count=0
+  for _fleet in $(fleets_list 2>/dev/null); do _fl_count=$((_fl_count + 1)); done
+  if (( _fl_count == 0 )); then
+    printf '%b\n' "  ${DIM}No fleets found — run: muster fleet setup${RESET}"
   fi
 
-  _payload_ensure_keypair || return 1
-
-  local algo fp
-  algo=$(cat "$_PAYLOAD_KEYTYPE_FILE" 2>/dev/null || echo "unknown")
-  fp=$(payload_fingerprint 2>/dev/null || echo "unknown")
-
   echo ""
-  ok "Signing keypair generated (${algo})"
-  printf '%b\n' "  ${DIM}Fingerprint: ${fp}${RESET}"
-  printf '%b\n' "  ${DIM}Public key:  ${_PAYLOAD_PUBKEY}${RESET}"
+  printf '%b\n' "  ${DIM}Agent reports are encrypted with fleet keys.${RESET}"
+  printf '%b\n' "  ${DIM}Only the fleet owner (private key holder) can decrypt.${RESET}"
   echo ""
-  printf '%b\n' "  ${DIM}Next: muster fleet trust-key <machine>${RESET}"
-  printf '%b\n' "  ${DIM}Then: muster settings --global signing on${RESET}"
+  printf '%b\n' "  ${DIM}Next: muster fleet install-agent <machine> --push${RESET}"
   echo ""
 }
 

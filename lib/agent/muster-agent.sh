@@ -5,7 +5,7 @@
 # Copyright 2026 Ricky Eipper. Licensed under Apache 2.0.
 set -uo pipefail
 
-AGENT_VERSION="0.5.52"
+AGENT_VERSION="0.5.55"
 
 # ── Paths ──
 _AGENT_BASE="${HOME}/.muster/agent"
@@ -19,6 +19,7 @@ _AGENT_LOGS_DIR="${_AGENT_BASE}/logs"
 _AGENT_SIG_FILE="${_AGENT_BASE}/agent.sig"
 _AGENT_PUBKEY_FILE="${_AGENT_BASE}/agent.pub.pem"
 _AGENT_CONFIG_SIG="${_AGENT_BASE}/agent.json.sig"
+_AGENT_FLEET_PUBKEY="${_AGENT_BASE}/fleet.pub"
 
 # ── Config defaults ──
 _AGENT_PROJECT_DIR=""
@@ -530,6 +531,53 @@ _agent_init_events_offset() {
   fi
 }
 
+# ── Report encryption ──
+# Hybrid RSA-4096 + AES-256-CBC encryption for push reports.
+# Only encrypts if fleet.pub is present (pushed during agent install).
+
+_agent_encrypt_file() {
+  local input="$1" output="$2" pubkey="$3"
+
+  [[ ! -f "$input" || ! -f "$pubkey" ]] && return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+
+  local tmpdir
+  tmpdir=$(mktemp -d "${_AGENT_BASE}/.enc.XXXXXX") || return 1
+
+  # Generate random AES-256 session key + IV
+  openssl rand 32 > "${tmpdir}/k" 2>/dev/null || { rm -rf "$tmpdir"; return 1; }
+  openssl rand 16 > "${tmpdir}/v" 2>/dev/null || { rm -rf "$tmpdir"; return 1; }
+
+  # Wrap session key with RSA public key (OAEP + SHA-256)
+  openssl pkeyutl -encrypt -pubin -inkey "$pubkey" \
+    -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+    -in "${tmpdir}/k" -out "${tmpdir}/k.enc" 2>/dev/null || {
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  # Encrypt data with AES-256-CBC
+  local kh vh
+  kh=$(xxd -p < "${tmpdir}/k" | tr -d '\n')
+  vh=$(xxd -p < "${tmpdir}/v" | tr -d '\n')
+
+  openssl enc -aes-256-cbc -in "$input" -out "${tmpdir}/d.enc" \
+    -K "$kh" -iv "$vh" 2>/dev/null || {
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  # Pack: base64(encrypted_key)\nbase64(iv)\nbase64(ciphertext)
+  {
+    base64 < "${tmpdir}/k.enc" | tr -d '\n'; echo ""
+    base64 < "${tmpdir}/v" | tr -d '\n'; echo ""
+    base64 < "${tmpdir}/d.enc" | tr -d '\n'; echo ""
+  } > "$output"
+
+  rm -rf "$tmpdir"
+  return 0
+}
+
 # ── Push summary ──
 
 _agent_push_summary() {
@@ -609,6 +657,20 @@ _agent_push_summary() {
       > "$summary_file"
   fi
 
+  # Encrypt if fleet public key is present
+  local push_file="$summary_file"
+  local push_filename="latest.json"
+  if [[ -f "$_AGENT_FLEET_PUBKEY" ]]; then
+    local enc_file="${_AGENT_BASE}/summary.enc"
+    if _agent_encrypt_file "$summary_file" "$enc_file" "$_AGENT_FLEET_PUBKEY"; then
+      push_file="$enc_file"
+      push_filename="latest.enc"
+      _agent_log "push: report encrypted with fleet key"
+    else
+      _agent_log "push: encryption failed, sending plaintext"
+    fi
+  fi
+
   # Push via SCP (avoid embedding paths in remote shell commands)
   local _ssh_args="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
   if [[ -n "$_AGENT_PUSH_IDENTITY" ]]; then
@@ -620,9 +682,9 @@ _agent_push_summary() {
 
   local _scp_args="${_ssh_args//-p /-P }"
 
-  # Create remote directory
+  # Create remote directory (push into fleet dir structure)
   local remote_dir
-  remote_dir=$(printf '%s/fleet/reports/%s' "$_AGENT_PUSH_DIR" "$hostname_short")
+  remote_dir=$(printf '%s' "$_AGENT_PUSH_DIR")
 
   # shellcheck disable=SC2086
   ssh $_ssh_args -- "${_AGENT_PUSH_USER}@${_AGENT_PUSH_HOST}" \
@@ -632,13 +694,13 @@ _agent_push_summary() {
   }
 
   # shellcheck disable=SC2086
-  scp $_scp_args -- "$summary_file" \
-    "${_AGENT_PUSH_USER}@${_AGENT_PUSH_HOST}:${remote_dir}/latest.json" 2>/dev/null || {
+  scp $_scp_args -- "$push_file" \
+    "${_AGENT_PUSH_USER}@${_AGENT_PUSH_HOST}:${remote_dir}/${push_filename}" 2>/dev/null || {
     _agent_log "push: failed to scp summary"
     return 1
   }
 
-  _agent_log "push: summary sent to ${_AGENT_PUSH_HOST}"
+  _agent_log "push: ${push_filename} sent to ${_AGENT_PUSH_HOST}"
 }
 
 # ── Signal handlers ──
