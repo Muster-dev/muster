@@ -626,7 +626,7 @@ _group_cmd_add() {
         start_spinner "Sending trust request..."
         local _req_result
         _req_result=$(groups_remote_exec "$group_name" "$_idx" \
-          "muster trust request --fingerprint '${_my_fp}' --label '${_my_label}'" 2>/dev/null) || true
+          "MUSTER_NO_VERIFY=true muster trust request --fingerprint '${_my_fp}' --label '${_my_label}'" 2>/dev/null) || true
         stop_spinner
 
         case "$_req_result" in
@@ -649,7 +649,7 @@ _group_cmd_add() {
 
               local _verify_result
               _verify_result=$(groups_remote_exec "$group_name" "$_idx" \
-                "muster trust verify --fingerprint '${_my_fp}'" 2>/dev/null) || true
+                "MUSTER_NO_VERIFY=true muster trust verify --fingerprint '${_my_fp}'" 2>/dev/null) || true
 
               if [[ "$_verify_result" == "trusted" ]]; then
                 _trust_accepted=true
@@ -1868,35 +1868,57 @@ _group_deploy_remote() {
     _groups_load_ssh_password
   fi
 
-  # Deploy gate: verify trust before deploying
-  local _my_fp
-  _my_fp=$(trust_fingerprint)
-  local _trust_status=""
-  _trust_status=$(groups_remote_exec "$group_name" "$index" \
-    "muster trust verify --fingerprint '${_my_fp}'" 2>/dev/null) || true
+  # Auto-detect project directory if not set (manual mode)
+  if [[ -z "$_GP_PROJECT_DIR" ]]; then
+    local _detected_dir
+    _detected_dir=$(groups_remote_exec "$group_name" "$index" \
+      "find ~ -maxdepth 3 -name 'muster.json' -o -name 'deploy.json' 2>/dev/null | head -1 | xargs dirname 2>/dev/null" 2>/dev/null) || true
+    if [[ -n "$_detected_dir" && "$_detected_dir" != "." ]]; then
+      _GP_PROJECT_DIR="$_detected_dir"
+      # Save to config so we don't detect again
+      _group_load_project_at "$group_name" "$index"
+      local _pdir
+      _pdir="$(fleet_cfg_project_dir "$_FP_FLEET" "$_FP_GROUP" "$_FP_PROJECT")/project.json"
+      if [[ -f "$_pdir" ]]; then
+        local _tmp="${_pdir}.tmp"
+        jq --arg d "$_detected_dir" '.remote_path = $d' "$_pdir" > "$_tmp" && mv "$_tmp" "$_pdir"
+      fi
+    elif [[ "$_FP_HOOK_MODE" != "sync" ]]; then
+      printf 'No muster project found on %s@%s — set remote path via Edit or run muster setup on remote\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
+      return 1
+    fi
+  fi
 
-  case "$_trust_status" in
-    trusted) ;; # proceed
-    pending)
-      printf 'Deploy rejected: trust request pending approval on %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
-      printf 'Accept on remote: muster trust accept %s\n' "$_my_fp" >> "$log_file"
-      return 1
-      ;;
-    unknown)
-      # Remote has trust system but doesn't know us — auto-send a join request
-      # This handles groups added before the trust update
-      local _my_label
-      _my_label=$(trust_label)
-      groups_remote_exec "$group_name" "$index" \
-        "muster trust request --fingerprint '${_my_fp}' --label '${_my_label}'" &>/dev/null || true
-      printf 'Trust request auto-sent to %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
-      printf 'Deploy blocked until remote accepts. Run on remote: muster trust accept %s\n' "$_my_fp" >> "$log_file"
-      return 1
-      ;;
-    "")
-      # Empty = older muster without trust system, or muster not installed — allow deploy
-      ;;
-  esac
+  # Deploy gate: verify trust before deploying (manual mode only — sync has no remote muster)
+  if [[ "$_FP_HOOK_MODE" != "sync" ]]; then
+    local _my_fp
+    _my_fp=$(trust_fingerprint)
+    local _trust_status=""
+    _trust_status=$(groups_remote_exec "$group_name" "$index" \
+      "MUSTER_NO_VERIFY=true muster trust verify --fingerprint '${_my_fp}'" 2>/dev/null) || true
+
+    case "$_trust_status" in
+      trusted) ;; # proceed
+      pending)
+        printf 'Deploy rejected: trust request pending approval on %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
+        printf 'Accept on remote: muster trust accept %s\n' "$_my_fp" >> "$log_file"
+        return 1
+        ;;
+      unknown)
+        # Remote has trust system but doesn't know us — auto-send a join request
+        local _my_label
+        _my_label=$(trust_label)
+        groups_remote_exec "$group_name" "$index" \
+          "MUSTER_NO_VERIFY=true muster trust request --fingerprint '${_my_fp}' --label '${_my_label}'" &>/dev/null || true
+        printf 'Trust request auto-sent to %s@%s\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
+        printf 'Deploy blocked until remote accepts. Run on remote: muster trust accept %s\n' "$_my_fp" >> "$log_file"
+        return 1
+        ;;
+      "")
+        # Empty = older muster without trust system, or muster not installed — allow deploy
+        ;;
+    esac
+  fi
 
   # Build remote deploy command:
   # 1. Fix PATH for non-interactive SSH (muster installs to ~/.local/bin)
@@ -1911,6 +1933,7 @@ _group_deploy_remote() {
 export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
 REMOTECMD
   )"
+  cmd="${cmd}; export MUSTER_NO_VERIFY=true"
   cmd="${cmd}; export MUSTER_DEPLOY_SOURCE='${_source_label}'"
   # Write fleet marker with source label (line 1) and event log line count (line 2)
   # so cancel knows exactly which services were deployed in THIS session
@@ -2136,7 +2159,7 @@ _group_cmd_status() {
       fi
 
       if groups_remote_check "$group_name" "$i"; then
-        local cmd="muster status --json"
+        local cmd="export MUSTER_NO_VERIFY=true; muster status --json"
         if [[ "$_GP_CLOUD" == "true" ]]; then
           # Cloud: agent handles cwd natively
           source "$MUSTER_ROOT/lib/core/cloud.sh"
