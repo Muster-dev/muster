@@ -166,4 +166,30 @@ echo "  Narrow terminals"
 _bar=$(bash -c 'MUSTER_ROOT="'"$MUSTER_ROOT"'"; source "$MUSTER_ROOT/lib/core/colors.sh"; source "$MUSTER_ROOT/lib/core/utils.sh"; BOLD=""; source "$MUSTER_ROOT/lib/tui/dashboard.sh"; TERM_COLS=40; _dashboard_bar "muster" "v0.6.2  macos arm64 and a long tail  "' 2>/dev/null)
 _test "header fits in 40 columns" test "${#_bar}" -le 40
 
+# ────────────────────────────────────────
+echo ""
+echo "  Doctor — Needs attention / Fine, rule fixes"
+# ────────────────────────────────────────
+
+D="$TEST_TMP/doc"
+mkdir -p "$D/.muster/hooks/web" "$D/.muster/logs"
+printf '{"project":"doc","services":{"web":{"name":"Web","health":{"type":"tcp","port":3000}}},"deploy_order":["web"]}\n' > "$D/muster.json"
+printf '#!/usr/bin/env bash\necho "$API_TOKEN"\n' > "$D/.muster/hooks/web/deploy.sh"
+printf '{"user":"sam","pid":999999,"started":"2026-01-01 00:00:00"}\n' > "$D/.muster/deploy.lock"
+_mock_cmd lsof 'if [[ "$*" == *"TCP:3000"* ]]; then echo 99999; exit 0; fi; exit 1'
+
+_out=$(cd "$D" && "$MUSTER_BIN" doctor </dev/null 2>&1) || true
+_test_contains "doctor groups problems under Needs attention" "Needs attention" "$_out"
+_test_contains "doctor summarizes passing checks under Fine" "Fine — " "$_out"
+_test_contains "doctor reports the stale lock" "Stale deploy lock from sam" "$_out"
+_test_contains "doctor reports the port conflict" "port 3000 is taken" "$_out"
+_test_contains "doctor reports the unset env var" 'uses $API_TOKEN' "$_out"
+_test_contains "doctor reports the non-executable hook" "not executable (--fix)" "$_out"
+
+_out=$(cd "$D" && "$MUSTER_BIN" doctor --fix </dev/null 2>&1) || true
+_test "doctor --fix removes the stale lock" test ! -f "$D/.muster/deploy.lock"
+_test "doctor --fix makes hooks executable" test -x "$D/.muster/hooks/web/deploy.sh"
+_test_contains "risky fixes are printed, not run, without a TTY" "run: kill 99999" "$_out"
+_mock_cmd lsof 'exit 1'
+
 _test_summary

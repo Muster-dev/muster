@@ -2,7 +2,7 @@
 # muster/lib/commands/doctor.sh — Comprehensive project diagnostics
 
 cmd_doctor() {
-  local fix=false
+  local fix=false _fix_yes=false
   local _json_mode=false
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -18,14 +18,18 @@ cmd_doctor() {
         echo "  Connectivity          SSH remotes, fleet machines"
         echo "  Health & Runtime      Health endpoints, ports, timeouts"
         echo "  Storage & Maintenance Logs, PIDs, build context, disk space"
+        echo "  Deploy Readiness      Ports, env vars, git state, stale locks"
         echo ""
         echo "Flags:"
-        echo "  --fix           Auto-fix issues where possible"
+        echo "  --fix           Fix what it can: safe fixes run automatically, others"
+        echo "                  (start Docker, free a port, ...) ask first"
+        echo "  --yes           With --fix: run every available fix without asking"
         echo "  --json          Output as JSON"
         echo "  -h, --help      Show this help"
         return 0
         ;;
       --fix) fix=true; shift ;;
+      --yes|-y) _fix_yes=true; shift ;;
       --json) _json_mode=true; shift ;;
       *)
         err "Unknown flag: $1"
@@ -38,6 +42,8 @@ cmd_doctor() {
   load_config
   source "$MUSTER_ROOT/lib/core/build_context.sh"
   source "$MUSTER_ROOT/lib/tui/spinner.sh"
+  source "$MUSTER_ROOT/lib/core/preflight.sh"
+  source "$MUSTER_ROOT/lib/core/remote.sh"
 
   # Auth gate: JSON mode requires valid token
   if [[ "$_json_mode" == "true" ]]; then
@@ -115,6 +121,61 @@ cmd_doctor() {
     fi
   }
 
+  # ── Grouping: "Needs attention" vs "Fine" ──
+  # Each category's output is split into problem lines (✗ / ! and their
+  # detail lines) and a count of passing checks, printed at the end.
+  local _DOC_G_NAMES=() _DOC_G_FINE=() _DOC_G_ATTN=()
+  _doc_collect_category() {
+    local _name="$1" _output="$2" _line _fine=0 _attn="" _last=""
+    local _ok_mark="✓"
+    while IFS= read -r _line; do
+      [[ -z "$_line" ]] && continue
+      case "$_line" in
+        *"${_ok_mark}"*) _fine=$(( _fine + 1 )); _last="pass" ;;
+        "    "*) [[ "$_last" == "attn" ]] && _attn="${_attn}  ${_line}"$'\n' ;;
+        *) _attn="${_attn}  ${_line}"$'\n'; _last="attn" ;;
+      esac
+    done <<< "$_output"
+    local _i=${#_DOC_G_NAMES[@]}
+    _DOC_G_NAMES[$_i]="$_name"
+    _DOC_G_FINE[$_i]=$_fine
+    _DOC_G_ATTN[$_i]="$_attn"
+  }
+
+  _doc_print_groups() {
+    local _i=0 _any=false _fine_list="" _total_fine=0
+    while (( _i < ${#_DOC_G_NAMES[@]} )); do
+      [[ -n "${_DOC_G_ATTN[$_i]}" ]] && _any=true
+      _i=$(( _i + 1 ))
+    done
+    if [[ "$_any" == "true" ]]; then
+      printf '  %b%bNeeds attention%b\n' "${BOLD}" "${YELLOW}" "${RESET}"
+      _i=0
+      while (( _i < ${#_DOC_G_NAMES[@]} )); do
+        if [[ -n "${_DOC_G_ATTN[$_i]}" ]]; then
+          printf '  %b%s%b\n' "${DIM}" "${_DOC_G_NAMES[$_i]}" "${RESET}"
+          printf '%s' "${_DOC_G_ATTN[$_i]}"
+        fi
+        _i=$(( _i + 1 ))
+      done
+      echo ""
+    fi
+    _i=0
+    while (( _i < ${#_DOC_G_NAMES[@]} )); do
+      if (( _DOC_G_FINE[_i] > 0 )); then
+        _fine_list="${_fine_list}${_fine_list:+ · }${_DOC_G_NAMES[$_i]} (${_DOC_G_FINE[$_i]})"
+        _total_fine=$(( _total_fine + _DOC_G_FINE[_i] ))
+      fi
+      _i=$(( _i + 1 ))
+    done
+    if (( _total_fine > 0 )); then
+      printf '  %b%bFine%b %b— %d checks passed%b\n' "${BOLD}" "${GREEN}" "${RESET}" "${DIM}" "$_total_fine" "${RESET}"
+      printf '  %b%s%b\n' "${DIM}" "$_fine_list" "${RESET}"
+      [[ "$MUSTER_VERBOSE" != "true" ]] && printf '  %b(--verbose lists every check)%b\n' "${DIM}" "${RESET}"
+      echo ""
+    fi
+  }
+
   # ── Category runner ──
   _doc_run_category() {
     local _cat_name="$1" _spinner_msg="$2" _cat_fn="$3"
@@ -134,9 +195,12 @@ cmd_doctor() {
       _cat_output=$(cat "$_cat_tmp" 2>/dev/null)
       rm -f "$_cat_tmp"
       stop_spinner
-      printf '  %b%b%s%b\n' "${BOLD}" "${WHITE}" "$_cat_name" "${RESET}"
-      [[ -n "$_cat_output" ]] && printf '%s\n' "$_cat_output"
-      echo ""
+      if [[ "$MUSTER_VERBOSE" == "true" ]]; then
+        printf '  %b%b%s%b\n' "${BOLD}" "${WHITE}" "$_cat_name" "${RESET}"
+        [[ -n "$_cat_output" ]] && printf '%s\n' "$_cat_output"
+        echo ""
+      fi
+      _doc_collect_category "$_cat_name" "$_cat_output"
     else
       "$_cat_fn"
     fi
@@ -180,7 +244,7 @@ $(cat "$_hf" 2>/dev/null)"
       if docker info &>/dev/null; then
         _doc_pass "Docker installed and running"
       else
-        _doc_warn "Docker installed but daemon not running"
+        _doc_warn "Docker installed but daemon not running$(_dsc=$(_hints_docker_start_cmd); [[ -n "$_dsc" ]] && printf ' — start it: %s' "$_dsc")"
       fi
     elif [[ "$_needs_docker" == "true" ]]; then
       _doc_fail "Docker not found (required by hooks)"
@@ -522,7 +586,9 @@ $(cat "$_hf" 2>/dev/null)"
           _doc_pass "All Dockerfiles found"
         fi
       else
-        _doc_fail "Docker daemon not responding"
+        local _dsc
+        _dsc=$(_hints_docker_start_cmd)
+        _doc_fail "Docker daemon not responding${_dsc:+ — start it: ${_dsc} (--fix)}"
       fi
     fi
 
@@ -573,7 +639,7 @@ $(cat "$_hf" 2>/dev/null)"
           if kubectl get namespace "$_ns" &>/dev/null; then
             _doc_pass "Namespace exists: ${_ns}"
           else
-            _doc_fail "Namespace not found: ${_ns}"
+            _doc_fail "Namespace not found: ${_ns} — create it: kubectl create namespace ${_ns} (--fix)"
           fi
         done <<< "$services"
 
@@ -1016,6 +1082,121 @@ $(cat "$_hf" 2>/dev/null)"
   }
 
   _doc_run_category "Storage & Maintenance" "Checking storage & maintenance..." _doc_cat_storage
+
+  # ════════════════════════════════════════════════
+  # Category 7: Deploy Readiness (same rules as deploy preflight)
+  # ════════════════════════════════════════════════
+  local _ready_svcs=() _rs
+  while IFS= read -r _rs; do
+    [[ -z "$_rs" ]] && continue
+    [[ "$(config_get ".services.${_rs}.skip_deploy" 2>/dev/null)" == "true" ]] && continue
+    _ready_svcs[${#_ready_svcs[@]}]="$_rs"
+  done <<< "$services"
+
+  # Problems found here (and their fixes) — collected in this shell so the
+  # fix phase below can use them
+  _doc_readiness_collect() {
+    _pf_reset
+    (( ${#_ready_svcs[@]} == 0 )) && return 0
+    _pf_check_ports "$project_dir" "${_ready_svcs[@]}"
+    _pf_check_env "$project_dir" "${_ready_svcs[@]}"
+    _pf_check_git "$project_dir" "${_ready_svcs[@]}"
+    _pf_check_locks "$project_dir"
+    local _lock="${project_dir}/.muster/deploy.lock"
+    if [[ -f "$_lock" ]]; then
+      _deploy_lock_read "$_lock"
+      if [[ -z "$_LOCK_PID" ]] || ! kill -0 "$_LOCK_PID" 2>/dev/null; then
+        _pf_add block stale_lock "Stale deploy lock from ${_LOCK_USER:-unknown} (PID ${_LOCK_PID:-?}, started ${_LOCK_STARTED:-?}) — that process is gone" \
+          "rm -f .muster/deploy.lock" "Remove the stale deploy lock"
+      fi
+    fi
+  }
+
+  _doc_cat_readiness() {
+    _doc_readiness_collect
+    local _i=0 _found=false
+    while (( _i < ${#_PF_SEV[@]} )); do
+      _found=true
+      local _m="${_PF_MSG[$_i]}"
+      [[ -n "${_PF_FIX[$_i]}" ]] && _m="${_m} (--fix)"
+      if [[ "${_PF_SEV[$_i]}" == "block" ]]; then _doc_fail "$_m"; else _doc_warn "$_m"; fi
+      _i=$(( _i + 1 ))
+    done
+    if [[ "$_found" == "false" ]]; then
+      _doc_pass "Ports free, env vars set, no stale locks"
+    fi
+  }
+
+  _doc_run_category "Deploy Readiness" "Checking deploy readiness..." _doc_cat_readiness
+
+  if [[ "$_json_mode" == "false" && "$MUSTER_MINIMAL" != "true" ]]; then
+    _doc_print_groups
+  fi
+
+  # ── Rule-based fixes (--fix) ──
+  # Safe, local fixes run automatically; anything else (starting Docker,
+  # stopping a process, pruning images, creating a namespace) asks first,
+  # unless --yes. Without a terminal those are printed, not run.
+  if [[ "$fix" == "true" && "$_json_mode" == "false" ]]; then
+    local _fx_ids=() _fx_cmds=() _fx_labels=()
+    _doc_readiness_collect
+    local _fi=0
+    while (( _fi < ${#_PF_SEV[@]} )); do
+      if [[ -n "${_PF_FIX[$_fi]}" ]]; then
+        _fx_ids[${#_fx_ids[@]}]="${_PF_ID[$_fi]}"
+        _fx_cmds[${#_fx_cmds[@]}]="${_PF_FIX[$_fi]}"
+        _fx_labels[${#_fx_labels[@]}]="${_PF_FIXLABEL[$_fi]}"
+      fi
+      _fi=$(( _fi + 1 ))
+    done
+    if [[ "$_needs_docker" == "true" || "$_needs_compose" == "true" ]] && has_cmd docker \
+      && ! _run_with_timeout 10 docker info >/dev/null 2>&1; then
+      hints_lookup docker_not_running
+      if [[ -n "$HINT_FIX_CMD" ]]; then
+        _fx_ids[${#_fx_ids[@]}]="docker_not_running"
+        _fx_cmds[${#_fx_cmds[@]}]="$HINT_FIX_CMD"
+        _fx_labels[${#_fx_labels[@]}]="$HINT_FIX_LABEL"
+      fi
+    fi
+    if [[ "$_needs_kubectl" == "true" ]] && has_cmd kubectl; then
+      local _fsvc _fns _fseen=" "
+      while IFS= read -r _fsvc; do
+        [[ -z "$_fsvc" ]] && continue
+        _fns=$(config_get ".services.${_fsvc}.k8s.namespace" 2>/dev/null)
+        [[ -z "$_fns" || "$_fns" == "null" || "$_fseen" == *" ${_fns} "* ]] && continue
+        _fseen="${_fseen}${_fns} "
+        [[ "$_fns" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || continue
+        if _run_with_timeout 8 kubectl get namespace "$_fns" --request-timeout=5s 2>&1 | grep -qi 'not found'; then
+          _fx_ids[${#_fx_ids[@]}]="k8s_namespace"
+          _fx_cmds[${#_fx_cmds[@]}]="kubectl create namespace ${_fns}"
+          _fx_labels[${#_fx_labels[@]}]="Create namespace ${_fns}"
+        fi
+      done <<< "$services"
+    fi
+
+    if (( ${#_fx_ids[@]} > 0 )); then
+      [[ "$MUSTER_MINIMAL" != "true" ]] && printf '  %b%bFixes%b\n' "${BOLD}" "${WHITE}" "${RESET}"
+      _fi=0
+      while (( _fi < ${#_fx_ids[@]} )); do
+        HINT_FIX_CMD="${_fx_cmds[$_fi]}" HINT_FIX_LABEL="${_fx_labels[$_fi]}"
+        case "${_fx_ids[$_fi]}" in
+          hook_not_executable|stale_lock)
+            hints_run_fix --yes && _doc_bump pass ;;
+          *)
+            if [[ "$_fix_yes" == "true" ]]; then
+              hints_run_fix --yes || true
+            elif [[ -t 0 ]]; then
+              printf '  %s\n' "${HINT_FIX_LABEL}"
+              hints_run_fix || true
+            else
+              printf '  %b!%b %s — run: %s (or muster doctor --fix --yes)\n' "${YELLOW}" "${RESET}" "$HINT_FIX_LABEL" "$HINT_FIX_CMD"
+            fi ;;
+        esac
+        _fi=$(( _fi + 1 ))
+      done
+      echo ""
+    fi
+  fi
 
   # ════════════════════════════════════════════════
   # Summary
