@@ -87,7 +87,7 @@ _pf_check_tools() {
   if [[ "$_PF_NEED_DOCKER" == "true" ]]; then
     if ! has_cmd docker; then
       local ic; ic=$(_hints_install_cmd docker)
-      _pf_add block tool_missing "Docker isn't installed, but the hooks use it${ic:+ — install: ${ic}}" "$ic" "Install Docker (${ic})"
+      _pf_add block tool_missing "Docker isn't installed, but the hooks use it${ic:+ — install: ${ic}}" "$ic" "Install Docker"
     else
       local out=""
       if ! out=$(_run_with_timeout 10 docker info 2>&1 >/dev/null); then
@@ -339,7 +339,7 @@ _pf_check_git() {
     behind=$(cd "$dir" && git rev-list --count 'HEAD..@{u}' 2>/dev/null)
     if [[ "$behind" =~ ^[0-9]+$ ]] && (( behind > 0 )); then
       _pf_add warn git_behind "${behind} commit$( (( behind != 1 )) && echo s) behind ${upstream} (as of last fetch) — you may be deploying old code" \
-        "git pull --ff-only" "Pull ${behind} commit$( (( behind != 1 )) && echo s) (git pull --ff-only)"
+        "git pull --ff-only" "Pull ${behind} commit$( (( behind != 1 )) && echo s)"
     fi
   fi
 }

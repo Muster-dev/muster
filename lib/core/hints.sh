@@ -487,7 +487,7 @@ _hint_enrich_docker_not_running() {
   esac
   if [[ -n "$cmd" ]]; then
     HINT_FIX_CMD="$cmd"
-    HINT_FIX_LABEL="Start Docker (${cmd})"
+    HINT_FIX_LABEL="Start Docker"
   fi
 }
 
@@ -508,7 +508,7 @@ _hint_enrich_disk_full() {
 _hint_enrich_registry_rate_limit() {
   has_cmd docker || return 0
   HINT_FIX_CMD="docker login"
-  HINT_FIX_LABEL="Log in to Docker Hub (docker login)"
+  HINT_FIX_LABEL="Log in to Docker Hub"
 }
 
 _hint_enrich_registry_pull_denied() {
@@ -524,7 +524,7 @@ _hint_enrich_registry_pull_denied() {
     HINT_FIX_LABEL="Log in to ${reg}"
   else
     HINT_FIX_CMD="docker login"
-    HINT_FIX_LABEL="Log in to the registry (docker login)"
+    HINT_FIX_LABEL="Log in to the registry"
   fi
 }
 
@@ -567,7 +567,7 @@ _hint_enrich_npm_lockfile() {
   dir=$(_hints_project_dir)
   if has_cmd npm && [[ -f "${dir}/package.json" && ! -f "${dir}/pnpm-lock.yaml" && ! -f "${dir}/yarn.lock" ]]; then
     HINT_FIX_CMD="npm install --package-lock-only"
-    HINT_FIX_LABEL="Generate package-lock.json (npm install --package-lock-only)"
+    HINT_FIX_LABEL="Generate package-lock.json"
   fi
 }
 
@@ -621,7 +621,7 @@ _hint_enrich_command_not_found() {
   if [[ -n "$cmd" && "$cmd" != \#* ]]; then
     HINT_TRY="Install it (${cmd}), or use its full path in the hook."
     HINT_FIX_CMD="$cmd"
-    HINT_FIX_LABEL="Install ${tool} (${cmd})"
+    HINT_FIX_LABEL="Install ${tool}"
   elif [[ -n "$cmd" ]]; then
     HINT_TRY="Install it — ${cmd#\# }"
   fi
@@ -891,15 +891,24 @@ hints_print() {
   if [[ "${MUSTER_MINIMAL:-false}" == "true" ]]; then
     printf '%sLikely cause: %s\n' "$ind" "$HINT_TITLE"
     printf '%sTry: %s\n' "$ind" "$HINT_TRY"
-    [[ -n "$HINT_FIX_CMD" ]] && printf '%sFix: %s\n' "$ind" "$HINT_FIX_CMD"
+    [[ -n "$HINT_FIX_CMD" ]] && printf '%sFix: %s (%s)\n' "$ind" "$HINT_FIX_LABEL" "$(_hints_fix_display)"
     return 0
   fi
   printf '%b%bLikely cause:%b %s\n' "$ind" "${BOLD}${YELLOW}" "${RESET}" "$HINT_TITLE"
   printf '%b%bTry:%b %s\n' "$ind" "${BOLD}" "${RESET}" "$HINT_TRY"
   if [[ -n "$HINT_FIX_CMD" ]]; then
-    printf '%b%bFix available:%b %s %b(%s)%b\n' "$ind" "${BOLD}" "${RESET}" "$HINT_FIX_LABEL" "${DIM}" "$HINT_FIX_CMD" "${RESET}"
+    printf '%b%bFix available:%b %s %b(%s)%b\n' "$ind" "${BOLD}" "${RESET}" "$HINT_FIX_LABEL" "${DIM}" "$(_hints_fix_display)" "${RESET}"
   fi
   printf '%b%bMore: %s%b\n' "$ind" "${DIM}" "$HINT_DOCS" "${RESET}"
+}
+
+# How to show a fix command: built-in fixes edit muster.json, so describe
+# them instead of printing an internal function name.
+_hints_fix_display() {
+  case "$HINT_FIX_CMD" in
+    _hints_fix_*) printf 'edits muster.json' ;;
+    *) printf '%s' "$HINT_FIX_CMD" ;;
+  esac
 }
 
 # Record the last failure for `muster explain --last` and the dashboard.
@@ -934,16 +943,19 @@ hints_run_fix() {
   [[ "${1:-}" == "--yes" ]] && yes=true
   if [[ "$yes" != "true" ]]; then
     if [[ ! -t 0 ]]; then
-      printf '  %bFix (not run — no terminal):%b %s\n' "${DIM}" "${RESET}" "$HINT_FIX_CMD"
+      printf '  %bFix (not run — no terminal):%b %s\n' "${DIM}" "${RESET}" "$(_hints_fix_display)"
       return 1
     fi
-    printf '  This will run: %b%s%b\n' "${BOLD}" "$HINT_FIX_CMD" "${RESET}"
+    case "$HINT_FIX_CMD" in
+      _hints_fix_*) printf '  This will: %b%s%b (edits muster.json)\n' "${BOLD}" "$HINT_FIX_LABEL" "${RESET}" ;;
+      *) printf '  This will run: %b%s%b\n' "${BOLD}" "$HINT_FIX_CMD" "${RESET}" ;;
+    esac
     printf '  Run it? [y/N] '
     local ans=""
     IFS= read -r ans || true
     case "$ans" in y|Y|yes|YES) ;; *) printf '  %bSkipped.%b\n' "${DIM}" "${RESET}"; return 1 ;; esac
   else
-    printf '  %bRunning:%b %s\n' "${DIM}" "${RESET}" "$HINT_FIX_CMD"
+    printf '  %bRunning:%b %s\n' "${DIM}" "${RESET}" "$(_hints_fix_display)"
   fi
   local dir rc=0
   dir=$(_hints_project_dir)
@@ -960,7 +972,9 @@ hints_run_fix() {
 hints_json() {
   local fix="null"
   if [[ -n "$HINT_FIX_CMD" ]]; then
-    fix="{\"label\":\"$(_json_escape "$HINT_FIX_LABEL")\",\"command\":\"$(_json_escape "$HINT_FIX_CMD")\"}"
+    local internal=false
+    [[ "$HINT_FIX_CMD" == _hints_fix_* ]] && internal=true
+    fix="{\"label\":\"$(_json_escape "$HINT_FIX_LABEL")\",\"command\":\"$(_json_escape "$HINT_FIX_CMD")\",\"internal\":${internal}}"
   fi
   printf '{"id":"%s","title":"%s","try":"%s","fix":%s,"docs":"%s","line":"%s"}' \
     "$(_json_escape "$HINT_ID")" "$(_json_escape "$HINT_TITLE")" "$(_json_escape "$HINT_TRY")" \

@@ -201,6 +201,14 @@ if command -v python3 >/dev/null 2>&1; then
   _test_eq "port owner was stopped" "no" "$_alive"
   wait "$_victim" 2>/dev/null || true
   _mock_cmd lsof 'exit 1'
+
+  # Deploy failure menu in a TTY: Likely cause above the menu + Fix: entry
+  _mk "$P" '{"name":"Web","health":{"enabled":false}}' 'echo "Error: listen EADDRINUSE: address already in use :::3000"; exit 1'
+  _mock_cmd lsof 'if [[ "$*" == *"TCP:3000"* ]]; then echo 99999; exit 0; fi; exit 1'
+  _out=$(MUSTER_PREFLIGHT_TTL=0 python3 "$SCRIPT_DIR/pty_drive.py" "$P" 20 "Choose [1-5]:=>5\n" "kill=>any key to continue" -- "$MUSTER_BIN" --minimal deploy --yes --no-preflight 2>&1) || true
+  _test_contains "TTY failure shows Likely cause" "Likely cause: Port 3000 is already in use" "$_out"
+  _test_contains "TTY failure menu has a Fix entry" "Fix: Stop" "$_out"
+  _mock_cmd lsof 'exit 1'
 else
   echo "  (python3 not available — skipping TTY tests)"
 fi

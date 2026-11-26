@@ -1409,7 +1409,7 @@ ${_k8s_env_lines}"
               run_skill_hooks "post-deploy" "$svc"
               break
               ;;
-            "Abort")
+            "Abort"|"__back__")
               _service_lock_release "$project_dir" "$svc"
               _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "$_svc_log" "true"
               _deploy_record_remaining "$current" "${services[@]}"
