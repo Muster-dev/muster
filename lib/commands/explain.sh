@@ -229,7 +229,11 @@ _explain_json() {
   local primary="null" list="" i=0
   if [[ "$matched" == "true" ]]; then
     primary=$(hints_json)
-    local ids=("${_HINT_ALL_IDS[@]}") lines=("${_HINT_ALL_LINES[@]}")
+    local ids=() lines=()
+    if (( ${#_HINT_ALL_IDS[@]} > 0 )); then
+      ids=("${_HINT_ALL_IDS[@]}")
+      lines=("${_HINT_ALL_LINES[@]}")
+    fi
     if (( ${#ids[@]} == 0 )); then
       list="$primary"
     else

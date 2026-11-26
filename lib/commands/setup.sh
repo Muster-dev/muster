@@ -7,6 +7,7 @@ source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/tui/order.sh"
 source "$MUSTER_ROOT/lib/core/scanner.sh"
 source "$MUSTER_ROOT/lib/core/templates.sh"
+source "$MUSTER_ROOT/lib/core/setup_txn.sh"
 
 SETUP_TOTAL_STEPS=7
 
@@ -719,10 +720,12 @@ _setup_noninteractive() {
   }
 
   # ── Check for existing config ──
-  if [[ ( -f "${project_path}/muster.json" || -f "${project_path}/deploy.json" ) && "$flag_force" != "true" ]]; then
-    err "Config already exists. Use --force to overwrite."
+  if [[ ( -f "${project_path}/muster.json" || -f "${project_path}/deploy.json" ) && "$flag_force" != "true" && "$_SETUP_TXN_MODE" != "update" ]]; then
+    err "This project already has a muster config."
+    printf '  %bUse --update to add new services and keep your changes, or --force to start over.%b\n' "${DIM}" "${RESET}"
     return 1
   fi
+  [[ "$flag_force" == "true" && "$_SETUP_TXN_MODE" != "update" ]] && _SETUP_TXN_MODE="fresh"
 
   local stack="$flag_stack"
   local selected_services=()
@@ -772,9 +775,19 @@ _setup_noninteractive() {
 
   # Validate
   if [[ ${#selected_services[@]} -eq 0 ]]; then
-    err "No services specified. Use --services or --scan to detect them."
+    if [[ "$flag_scan" == "true" ]]; then
+      warn "Nothing to deploy was detected in ${project_path}."
+      printf '  %bmuster looks for Dockerfiles, compose files, k8s manifests, package.json, go.mod,%b\n' "${DIM}" "${RESET}"
+      printf '  %brequirements.txt and similar. Start from a template instead:%b\n' "${DIM}" "${RESET}"
+      echo "    muster setup --stack bare --services app      # plain scripts"
+      echo "    muster setup --stack docker --services api    # one container"
+      echo "    muster setup --stack dev --services web       # local dev process"
+    else
+      err "No services specified. Use --services or --scan to detect them."
+    fi
     return 1
   fi
+  _setup_dedupe_services
 
   # Validate stack value
   case "$stack" in
@@ -1055,9 +1068,11 @@ _setup_noninteractive() {
   services_json+="}"
   deploy_order_json="${deploy_order_json%,}]"
 
-  # ── Generate files ──
-  local config_path="${project_path}/muster.json"
-  local muster_dir="${project_path}/.muster"
+  # ── Generate files (staged; committed atomically below) ──
+  _setup_check_tools "$stack" false
+  _setup_txn_begin "$project_path" || return 1
+  local config_path="$_SETUP_TXN_CONFIG"
+  local muster_dir="$_SETUP_TXN_MUSTER"
 
   mkdir -p "${muster_dir}/hooks"
   mkdir -p "${muster_dir}/logs"
@@ -1135,6 +1150,9 @@ _setup_noninteractive() {
 
   # Write muster.json (without absolute root path)
   _setup_write_config "$config_path" "$project_name" "$services_json" "$deploy_order_json"
+  _setup_txn_checkpoint "after-hooks"
+  _setup_txn_commit || return 1
+  config_path="${project_path}/muster.json"
 
   # .gitignore
   _setup_update_gitignore "$project_path"
@@ -1150,7 +1168,12 @@ _setup_noninteractive() {
   source "$MUSTER_ROOT/lib/core/hook_security.sh"
   _hook_manifest_generate "$project_path"
 
-  ok "Setup complete"
+  if [[ "$_SETUP_TXN_MODE" == "update" ]]; then
+    ok "Setup updated"
+  else
+    ok "Setup complete"
+  fi
+  _setup_print_notices
 
   # Check for build context overlaps in the new config
   _setup_check_build_context "$config_path"
@@ -1174,6 +1197,8 @@ cmd_setup() {
   _FLAG_CREDS=()
   _FLAG_REMOTE=()
   _FLAG_GIT_PULL=()
+  _SETUP_TXN_MODE="fresh"
+  _SETUP_NOTICES=()
   local has_flags=false
 
   while [[ $# -gt 0 ]]; do
@@ -1203,6 +1228,8 @@ cmd_setup() {
         flag_namespace="$2"; shift 2 ;;
       --force|-f)
         flag_force="true"; shift ;;
+      --update|-u)
+        _SETUP_TXN_MODE="update"; shift ;;
       --help|-h)
         echo "Usage: muster setup [flags]"
         echo ""
@@ -1220,7 +1247,10 @@ cmd_setup() {
         echo "  --git-pull <spec>     Per-service git pull: svc[=remote:branch] (repeatable)"
         echo "  --namespace <ns>      Kubernetes namespace (default: default)"
         echo "  --name, -n <name>     Project name (default: directory basename)"
-        echo "  --force, -f           Overwrite existing muster.json without prompting"
+        echo "  --force, -f           Start over: regenerate muster.json and hooks"
+        echo "                        (hooks you edited are backed up first)"
+        echo "  --update, -u          Re-run on an existing project: add new services,"
+        echo "                        keep your muster.json changes and edited hooks"
         echo ""
         echo "Health spec examples:"
         echo "  --health api=http:/health:8080"
@@ -1249,6 +1279,9 @@ cmd_setup() {
         ;;
       *)
         err "Unknown flag: $1"
+        source "$MUSTER_ROOT/lib/core/suggest.sh"
+        _suggest_print "$1" --path --scan --stack --services --order --health --creds \
+          --remote --git-pull --name --namespace --force --update --help || true
         echo "Run 'muster setup --help' for usage."
         return 1
         ;;
@@ -1429,11 +1462,15 @@ cmd_setup() {
   if [[ -f "${project_path}/muster.json" || -f "${project_path}/deploy.json" ]]; then
     _SETUP_CUR_SUMMARY=("")
     _setup_screen 1 "Existing config found"
-    menu_select "Config already exists at ${project_path}. Overwrite?" "Overwrite" "Cancel"
-    if [[ "$MENU_RESULT" == "Cancel" || "$MENU_RESULT" == "__back__" ]]; then
-      info "Setup cancelled."
-      return 0
-    fi
+    menu_select "This project is already set up. What do you want to do?" \
+      "Update (keep my changes)" "Start over" "Cancel"
+    case "$MENU_RESULT" in
+      "Update (keep my changes)") _SETUP_TXN_MODE="update" ;;
+      "Start over") _SETUP_TXN_MODE="fresh" ;;
+      *)
+        info "Setup cancelled — nothing changed."
+        return 0 ;;
+    esac
   fi
 
   local _setup_env="default"
@@ -1485,6 +1522,7 @@ cmd_setup() {
       _setup_screen 1 "Name your services"
       read -r svc_input
       _SETUP_CUR_PROMPT="false"
+      [[ -z "${svc_input// /}" ]] && svc_input="app"
       local _s
       for _s in $svc_input; do
         _SCAN_SERVICES[${#_SCAN_SERVICES[@]}]="$_s"
@@ -1495,6 +1533,9 @@ cmd_setup() {
       warn "No services selected."
       return 1
     fi
+
+    # Missing tools / Docker not running (offers install in a TTY)
+    _setup_check_tools "$stack" true
 
     # Auto-sort: infra services first, then app services
     _setup_sort_services "${_SCAN_SERVICES[@]}"
@@ -1530,6 +1571,7 @@ cmd_setup() {
     if [[ "$_quick_mode" == "true" ]]; then
       # ── Quick path: write config + hooks immediately with inferred defaults ──
       selected_services=("${ordered_services[@]}")
+      _setup_dedupe_services
       for svc in "${selected_services[@]}"; do
         svc_index=$((svc_index + 1))
         local key
@@ -1655,6 +1697,7 @@ cmd_setup() {
         order_select "Deploy order" "${selected_services[@]}"
         selected_services=("${ORDER_RESULT[@]}")
       fi
+      _setup_dedupe_services
 
       # Per-service questions
       for svc in "${selected_services[@]}"; do
@@ -1675,8 +1718,14 @@ cmd_setup() {
           ""
         )
         _setup_screen 4 "Configure ${svc} (${svc_index}/${#selected_services[@]})"
-        menu_select "Health check for ${svc}?" "TCP" "HTTP" "Command" "None"
+        # Detected type first so Enter accepts it
+        case "${_prefill_health%%|*}" in
+          http) menu_select "Health check for ${svc}? (detected: HTTP)" "HTTP" "TCP" "Command" "None" ;;
+          tcp)  menu_select "Health check for ${svc}? (detected: TCP)" "TCP" "HTTP" "Command" "None" ;;
+          *)    menu_select "Health check for ${svc}?" "TCP" "HTTP" "Command" "None" ;;
+        esac
         local health_choice="$MENU_RESULT"
+        [[ "$health_choice" == "__back__" ]] && health_choice="None"
 
         local health_json="{}"
         local health_display="disabled"
@@ -1694,17 +1743,22 @@ cmd_setup() {
             fi
             printf '\n  %b>%b Health endpoint [%s]: ' "${ACCENT}" "${RESET}" "${_def_ep}"
             read -r endpoint
-            printf '  %b>%b Port [%s]: ' "${ACCENT}" "${RESET}" "${_def_port}"
-            read -r port_num
+            _setup_read_port "Port" "$_def_port"
+            port_num="$_SRP_PORT"
             local _final_ep="${endpoint:-$_def_ep}"
-            local _final_port="${port_num:-$_def_port}"
+            [[ "$_final_ep" != /* ]] && _final_ep="/${_final_ep}"
+            _setup_verify_health "$svc" http "$port_num" "$_final_ep" true
+            port_num="$_SVH_PORT"
+            local _final_port="$port_num"
             health_json="{\"type\":\"http\",\"endpoint\":\"${_final_ep}\",\"port\":${_final_port},\"timeout\":${_setup_health_timeout},\"enabled\":true}"
             health_display="http :${_final_port}${_final_ep}"
             ;;
           TCP)
-            printf '\n  %b>%b Port [%s]: ' "${ACCENT}" "${RESET}" "${_prefill_port:-8080}"
-            read -r port_num
-            local _final_port="${port_num:-${_prefill_port:-8080}}"
+            echo ""
+            _setup_read_port "Port" "${_prefill_port:-8080}"
+            _setup_verify_health "$svc" tcp "$_SRP_PORT" "" true
+            port_num="$_SVH_PORT"
+            local _final_port="$port_num"
             health_json="{\"type\":\"tcp\",\"port\":${_final_port},\"timeout\":${_setup_health_timeout},\"enabled\":true}"
             health_display="tcp :${_final_port}"
             ;;
@@ -1837,8 +1891,9 @@ cmd_setup() {
     project_name=$(basename "$project_path")
     local stack_display
     stack_display=$(_setup_stack_label "$stack")
-    local config_path="${project_path}/muster.json"
-    local muster_dir="${project_path}/.muster"
+    _setup_txn_begin "$project_path" || return 1
+    local config_path="$_SETUP_TXN_CONFIG"
+    local muster_dir="$_SETUP_TXN_MUSTER"
 
     mkdir -p "${muster_dir}/hooks"
     mkdir -p "${muster_dir}/logs"
@@ -1882,6 +1937,8 @@ cmd_setup() {
 
     # Write muster.json (without absolute root path)
     _setup_write_config "$config_path" "$project_name" "$services_json" "$deploy_order_json"
+    _setup_txn_commit || return 1
+    config_path="${project_path}/muster.json"
 
     # .gitignore
     _setup_update_gitignore "$project_path"
@@ -1898,7 +1955,8 @@ cmd_setup() {
     _MUSTER_TUI_FULLSCREEN="false"
     clear 2>/dev/null || true
     echo ""
-    ok "Setup complete"
+    if [[ "$_SETUP_TXN_MODE" == "update" ]]; then ok "Setup updated"; else ok "Setup complete"; fi
+    _setup_print_notices
     _setup_check_build_context "$config_path"
     _setup_print_complete_summary "$project_name" "$stack_display" "muster.json"
     echo ""
@@ -1979,7 +2037,8 @@ cmd_setup() {
 # Manual fallback (no files detected)
 # ══════════════════════════════════════════════════════════════
 _setup_manual_flow() {
-  info "No project files detected. Let's set things up manually."
+  info "Nothing detected here yet — no problem."
+  printf '  %bAnswer a few questions (Enter accepts the default) and muster will\n  generate starter hooks from templates that you can edit later.%b\n' "${DIM}" "${RESET}"
   echo ""
   sleep 1
 
@@ -2043,8 +2102,9 @@ _setup_manual_flow() {
   [[ "$has_proxy" == "yes" ]] && service_list[${#service_list[@]}]="proxy"
 
   if [[ ${#service_list[@]} -eq 0 ]]; then
-    warn "No services defined. Add at least one service."
-    return 1
+    # Nothing chosen: start with one generic service rather than a dead end
+    service_list[0]="app"
+    _setup_notice "Started with a single 'app' service — add more later by re-running muster setup (Update)."
   fi
 
   _SETUP_CUR_SUMMARY=(
@@ -2072,6 +2132,7 @@ _setup_manual_flow() {
     order_select "What order should services deploy?" "${selected_services[@]}"
     selected_services=("${ORDER_RESULT[@]}")
   fi
+  _setup_dedupe_services
 
   # ── Step 5: Per-service config ──
   local services_json="{"
@@ -2105,17 +2166,19 @@ _setup_manual_flow() {
       HTTP)
         printf '\n  %b>%b Health endpoint [/health]: ' "${ACCENT}" "${RESET}"
         read -r endpoint
-        printf '  %b>%b Port [%s]: ' "${ACCENT}" "${RESET}" "${_infra_port:-8080}"
-        read -r port_num
+        _setup_read_port "Port" "${_infra_port:-8080}"
+        port_num="$_SRP_PORT"
         local _m_ep="${endpoint:-/health}"
-        local _m_port="${port_num:-${_infra_port:-8080}}"
+        [[ "$_m_ep" != /* ]] && _m_ep="/${_m_ep}"
+        local _m_port="$port_num"
         health_json="{\"type\":\"http\",\"endpoint\":\"${_m_ep}\",\"port\":${_m_port},\"timeout\":10,\"enabled\":true}"
         health_display="http :${_m_port}${_m_ep}"
         ;;
       TCP)
-        printf '\n  %b>%b Port [%s]: ' "${ACCENT}" "${RESET}" "${_infra_port:-8080}"
-        read -r port_num
-        local _m_port="${port_num:-${_infra_port:-8080}}"
+        echo ""
+        _setup_read_port "Port" "${_infra_port:-8080}"
+        port_num="$_SRP_PORT"
+        local _m_port="$port_num"
         health_json="{\"type\":\"tcp\",\"port\":${_m_port},\"timeout\":10,\"enabled\":true}"
         health_display="tcp :${_m_port}"
         ;;
@@ -2208,9 +2271,10 @@ _setup_manual_flow() {
     esac
   fi
 
-  # ── Step 7: Generate ──
-  local config_path="${project_path}/muster.json"
-  local muster_dir="${project_path}/.muster"
+  # ── Step 7: Generate (staged; committed atomically below) ──
+  _setup_txn_begin "$project_path" || return 1
+  local config_path="$_SETUP_TXN_CONFIG"
+  local muster_dir="$_SETUP_TXN_MUSTER"
 
   mkdir -p "${muster_dir}/hooks"
   mkdir -p "${muster_dir}/logs"
@@ -2246,6 +2310,8 @@ _setup_manual_flow() {
 
   # Write muster.json (without absolute root path)
   _setup_write_config "$config_path" "$project_name" "$services_json" "$deploy_order_json"
+  _setup_txn_commit || return 1
+  config_path="${project_path}/muster.json"
 
   _setup_update_gitignore "$project_path"
 
@@ -2263,7 +2329,8 @@ _setup_manual_flow() {
   _MUSTER_TUI_FULLSCREEN="false"
   clear 2>/dev/null || true
   echo ""
-  ok "Setup complete"
+  if [[ "$_SETUP_TXN_MODE" == "update" ]]; then ok "Setup updated"; else ok "Setup complete"; fi
+  _setup_print_notices
   _setup_check_build_context "$config_path"
   _setup_print_complete_summary "$project_name" "$stack_display" "muster.json"
   echo ""
