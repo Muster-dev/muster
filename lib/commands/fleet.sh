@@ -2262,14 +2262,17 @@ _fleet_cmd_revoke_key() {
   _fleet_load_machine "$machine"
   _fleet_build_opts
 
-  # Unquoted heredoc on purpose: ${label} expands locally, \$-escaped vars remotely
-  # shellcheck disable=SC2086,SC2087
-  ssh $_FLEET_SSH_OPTS "${_FM_USER}@${_FM_HOST}" "bash -s" <<REVOKE_EOF 2>/dev/null
-for f in \$HOME/.muster/fleet/authorized_keys/*.json; do
-  [ -f "\$f" ] || continue
+  # Pass label safely as a single-quoted argument to remote bash -s
+  local _sq="'" _q_label
+  _q_label="'${label//${_sq}/${_sq}\\${_sq}${_sq}}'"
+  # shellcheck disable=SC2086
+  ssh $_FLEET_SSH_OPTS "${_FM_USER}@${_FM_HOST}" "bash -s -- ${_q_label}" <<'REVOKE_EOF' 2>/dev/null
+LABEL="$1"
+for f in "$HOME"/.muster/fleet/authorized_keys/*.json; do
+  [ -f "$f" ] || continue
   if command -v jq >/dev/null 2>&1; then
-    TMP="\${f}.tmp"
-    jq --arg l "${label}" '.keys = [.keys[] | select(.label != \$l)]' "\$f" > "\$TMP" && mv "\$TMP" "\$f"
+    TMP="${f}.tmp"
+    jq --arg l "$LABEL" '.keys = [.keys[] | select(.label != $l)]' "$f" > "$TMP" && mv "$TMP" "$f"
   fi
 done
 REVOKE_EOF

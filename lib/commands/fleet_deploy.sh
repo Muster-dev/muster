@@ -546,9 +546,10 @@ ${_k8s_env}"
     fi
 
     # Acquire per-service lock on remote
-    local _lock_json
-    _lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_source_host}\"}"
-    [[ "$_use_locks" == "true" ]] && { fleet_exec "$machine" "${_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_lock_json}' > .muster/locks/${svc}.lock" 2>/dev/null || true; }
+    local _lock_json _sq="'" _lock_json_q
+    _lock_json=$(_service_lock_json "${USER:-unknown}" "$$" "$(date '+%Y-%m-%d %H:%M:%S')" "fleet-push" "fleet:${machine}" "${_source_host}")
+    _lock_json_q="${_lock_json//${_sq}/${_sq}\\${_sq}${_sq}}"
+    [[ "$_use_locks" == "true" ]] && { fleet_exec "$machine" "${_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_lock_json_q}' > .muster/locks/${svc}.lock" 2>/dev/null || true; }
 
     info "  ${svc} → ${machine}"
     fleet_push_hook "$machine" "$hook" "$env_lines" >> "$log_file" 2>&1
@@ -828,9 +829,10 @@ ${_ke}"
             fi
 
             # Acquire per-service lock on remote
-            local _p_lock_json
-            _p_lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_p_src_host}\"}"
-            [[ "$_p_locks" == "true" ]] && { fleet_exec "$machine" "${_p_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_p_lock_json}' > .muster/locks/${_svc}.lock" 2>/dev/null || true; }
+            local _p_lock_json _p_sq="'" _p_lock_json_q
+            _p_lock_json=$(_service_lock_json "${USER:-unknown}" "$$" "$(date '+%Y-%m-%d %H:%M:%S')" "fleet-push" "fleet:${machine}" "${_p_src_host}")
+            _p_lock_json_q="${_p_lock_json//${_p_sq}/${_p_sq}\\${_p_sq}${_p_sq}}"
+            [[ "$_p_locks" == "true" ]] && { fleet_exec "$machine" "${_p_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_p_lock_json_q}' > .muster/locks/${_svc}.lock" 2>/dev/null || true; }
 
             fleet_push_hook "$machine" "$_hook" "$_env" >> "$log_file" 2>&1
             local _push_rc=$?

@@ -106,6 +106,38 @@ has_cmd() {
   command -v "$1" &>/dev/null
 }
 
+# Escape a string for safe inclusion inside a JSON double-quoted string.
+# Works without jq in Bash 3.2+.
+_json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+# Build a JSON payload for a per-service lock file.
+# Args: user pid started terminal source host
+_service_lock_json() {
+  local _u="$1" _p="$2" _st="$3" _t="$4" _src="$5" _h="$6"
+  if has_cmd jq; then
+    jq -cn \
+      --arg user "$_u" \
+      --argjson pid "$_p" \
+      --arg started "$_st" \
+      --arg terminal "$_t" \
+      --arg source "$_src" \
+      --arg host "$_h" \
+      '{user: $user, pid: $pid, started: $started, terminal: $terminal, source: $source, host: $host}'
+  else
+    printf '{"user":"%s","pid":%d,"started":"%s","terminal":"%s","source":"%s","host":"%s"}\n' \
+      "$(_json_escape "$_u")" "$_p" "$(_json_escape "$_st")" \
+      "$(_json_escape "$_t")" "$(_json_escape "$_src")" "$(_json_escape "$_h")"
+  fi
+}
+
 # ── Path input with Tab autocomplete ──
 
 # Read a directory path with Tab-triggered autocomplete.
@@ -833,19 +865,36 @@ _deploy_lock_acquire() {
 
   # Create lock
   mkdir -p "$(dirname "$lock_file")"
-  local _svcs=""
-  local _i=1
-  while (( _i <= $# )); do
-    [[ -n "$_svcs" ]] && _svcs="${_svcs},"
-    _svcs="${_svcs}\"${!_i}\""
-    _i=$((_i + 1))
-  done
-  local _tty_name
+  local _tty_name _identity _started
   _tty_name=$(tty 2>/dev/null || true)
   [[ -z "$_tty_name" || "$_tty_name" == *"not a tty"* ]] && _tty_name="unknown"
-  cat > "$lock_file" <<EOF
-{"user":"$(_deploy_identity)","pid":$$,"started":"$(date '+%Y-%m-%d %H:%M:%S')","terminal":"${_tty_name}","services":[${_svcs}]}
-EOF
+  _identity=$(_deploy_identity)
+  _started=$(date '+%Y-%m-%d %H:%M:%S')
+  if has_cmd jq; then
+    local _svcs_json="[]" _i=1
+    while (( _i <= $# )); do
+      _svcs_json=$(printf '%s' "$_svcs_json" | jq -c --arg s "${!_i}" '. + [$s]')
+      _i=$((_i + 1))
+    done
+    jq -cn \
+      --arg user "$_identity" \
+      --argjson pid "$$" \
+      --arg started "$_started" \
+      --arg terminal "$_tty_name" \
+      --argjson services "$_svcs_json" \
+      '{user: $user, pid: $pid, started: $started, terminal: $terminal, services: $services}' \
+      > "$lock_file"
+  else
+    local _svcs="" _i=1
+    while (( _i <= $# )); do
+      [[ -n "$_svcs" ]] && _svcs="${_svcs},"
+      _svcs="${_svcs}\"$(_json_escape "${!_i}")\""
+      _i=$((_i + 1))
+    done
+    printf '{"user":"%s","pid":%d,"started":"%s","terminal":"%s","services":[%s]}\n' \
+      "$(_json_escape "$_identity")" "$$" "$(_json_escape "$_started")" \
+      "$(_json_escape "$_tty_name")" "$_svcs" > "$lock_file"
+  fi
   return 0
 }
 
@@ -1009,14 +1058,14 @@ _service_lock_acquire() {
 
   # Create lock
   mkdir -p "$(dirname "$lock_file")"
-  local _tty_name _hostname
+  local _tty_name _hostname _identity _started
   _tty_name=$(tty 2>/dev/null || true)
   [[ -z "$_tty_name" || "$_tty_name" == *"not a tty"* ]] && _tty_name="unknown"
   _hostname=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+  _identity=$(_deploy_identity)
+  _started=$(date '+%Y-%m-%d %H:%M:%S')
   local _source="${MUSTER_LOCK_SOURCE:-local}"
-  cat > "$lock_file" <<EOF
-{"user":"$(_deploy_identity)","pid":$$,"started":"$(date '+%Y-%m-%d %H:%M:%S')","terminal":"${_tty_name}","source":"${_source}","host":"${_hostname}"}
-EOF
+  _service_lock_json "$_identity" "$$" "$_started" "$_tty_name" "$_source" "$_hostname" > "$lock_file"
   return 0
 }
 
