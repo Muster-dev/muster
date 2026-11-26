@@ -37,9 +37,21 @@ with open('$HOME/.muster/settings.json') as f:
   fi
 fi
 
+# MUSTER_ANSI=true when escape sequences (colors, cursor movement, redrawing
+# progress bars) may be written to stdout. Set to false when colors are off so
+# TUI widgets can fall back to plain line-oriented output.
+# shellcheck disable=SC2034
+MUSTER_ANSI=true
+
 _muster_apply_color_mode() {
   local mode="$1"
   local want_color=true
+
+  # https://no-color.org — any non-empty NO_COLOR disables color, unless the
+  # user explicitly forced color_mode=always.
+  if [[ -n "${NO_COLOR:-}" && "$mode" != "always" ]]; then
+    mode="never"
+  fi
 
   case "$mode" in
     never)
@@ -58,6 +70,7 @@ _muster_apply_color_mode() {
 
   # shellcheck disable=SC2034
   if [[ "$want_color" == "false" ]]; then
+    MUSTER_ANSI=false
     BOLD=""
     DIM=""
     RESET=""

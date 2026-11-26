@@ -151,6 +151,13 @@ stream_in_box() {
   local log_file="$2"
   shift 2
 
+  # No terminal to draw on (stdout piped, NO_COLOR, color_mode=never):
+  # run the command straight into the log, no box redraws.
+  if [[ "${MUSTER_ANSI:-true}" == "false" || ! -t 1 ]]; then
+    "$@" >> "$log_file" 2>&1
+    return $?
+  fi
+
   update_term_size
   local box_lines=4
   # Box width: total line = 2 (margin) + 1 (border) + box_w (inner) + 1 (border) = box_w + 4
