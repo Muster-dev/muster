@@ -150,11 +150,14 @@ Before running a deploy hook, `_hook_security_check` scans the script for danger
 
 If a dangerous pattern is detected, the hook is blocked and the user is warned.
 
-### Manifest Integrity
+### Manifest Integrity & Per-Machine Approvals
 
-Setup generates a signed manifest (`.muster/.hook_manifest`) containing SHA-256 hashes of all hook files. The manifest is HMAC-signed with a machine-local secret key (`~/.muster/.hook_signing_key`). Before each deploy, muster verifies:
+Approvals live per machine in `~/.muster/trust/<sha256-of-project-path>/` (containing `hooks.manifest`, its HMAC signature `hooks.manifest.sig`, and approved file copies for diffs) — never inside the repository. Before running deploy or rollback hooks, muster verifies:
 
-1. The manifest signature is valid (not tampered with)
-2. Hook file hashes match the manifest (files not modified by an attacker)
+1. The manifest signature is valid (signed with `~/.muster/trust/.signing_key`)
+2. Hook file and config hashes match the approved manifest
 
-If verification fails, the deploy is blocked with a security warning.
+If a project is freshly cloned or a hook was edited since its last approval, muster blocks execution until you review and approve the changes:
+
+- **Interactive (TTY):** `muster deploy` / `muster rollback` offers to show the diff and approve, or run `muster hooks approve [service]` (shows pending files/diffs and prompts `[y/N]`).
+- **Non-interactive (CI / scripts):** pass `--yes` (`muster hooks approve --yes`, `muster deploy --yes`) or set `MUSTER_APPROVE_HOOKS=1`.

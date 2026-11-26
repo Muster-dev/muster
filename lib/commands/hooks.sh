@@ -23,10 +23,10 @@ cmd_hooks() {
         echo "List and inspect hook scripts for your services."
         echo ""
         echo "Commands:"
-        echo "  verify [service]    Check hooks against integrity manifest"
-        echo "  approve [service]   Re-sign hooks after intentional edits"
-        echo "  lock [service]      Opt-in: set hooks read-only (chmod 555)"
-        echo "  unlock [service]    Allow editing (chmod 755)"
+        echo "  verify [service]          Check hooks against integrity manifest"
+        echo "  approve [service] [--yes] Approve hooks on this machine (prompts on TTY; --yes for CI)"
+        echo "  lock [service]            Opt-in: set hooks read-only (chmod 555)"
+        echo "  unlock [service]          Allow editing (chmod 755)"
         echo ""
         echo "Examples:"
         echo "  muster hooks              List all services and their hooks"
@@ -451,7 +451,40 @@ _hooks_cmd_verify() {
 }
 
 _hooks_cmd_approve() {
-  local service="${1:-}"
+  local service="" _yes=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes|-y) _yes=true; shift ;;
+      --help|-h)
+        echo "Usage: muster hooks approve [service] [--yes]"
+        echo ""
+        echo "Approve hooks on this machine (stored in ~/.muster/trust/)."
+        echo "On a TTY, shows pending files and diffs and asks for confirmation."
+        echo "Without a TTY (scripts/CI), --yes is required."
+        echo ""
+        echo "Flags:"
+        echo "  --yes, -y       Approve without interactive confirmation"
+        echo "  -h, --help      Show this help"
+        return 0
+        ;;
+      -*)
+        err "Unknown flag: $1"
+        echo "Run 'muster hooks approve --help' for usage."
+        return 1
+        ;;
+      *)
+        if [[ -z "$service" ]]; then
+          service="$1"
+        else
+          err "Too many arguments"
+          echo "Run 'muster hooks approve --help' for usage."
+          return 1
+        fi
+        shift
+        ;;
+    esac
+  done
 
   if ! find_config &>/dev/null; then
     err "No muster project found. Run 'muster setup' first."
@@ -462,16 +495,16 @@ _hooks_cmd_approve() {
   source "$MUSTER_ROOT/lib/core/hook_security.sh"
   local project_dir
   project_dir="$(dirname "$CONFIG_FILE")"
+  local hooks_dir="${project_dir}/.muster/hooks"
 
-  # Require authentication to approve hooks
-  if ! sudo -v 2>/dev/null; then
-    err "Authentication required to approve hooks"
+  if [[ -n "$service" && ! -d "${hooks_dir}/${service}" ]]; then
+    err "Service not found: ${service}"
     return 1
   fi
 
   # Scan for dangerous commands before approving
-  local hooks_dir="${project_dir}/.muster/hooks"
   local danger_found=false
+  local _target_svcs=()
   local svc_dir
   for svc_dir in "${hooks_dir}"/*/; do
     [[ ! -d "$svc_dir" ]] && continue
@@ -479,6 +512,7 @@ _hooks_cmd_approve() {
     svc=$(basename "$svc_dir")
     [[ "$svc" == "logs" || "$svc" == "pids" ]] && continue
     [[ -n "$service" && "$svc" != "$service" ]] && continue
+    _target_svcs[${#_target_svcs[@]}]="$svc"
 
     local hook_file
     for hook_file in "${svc_dir}"*.sh; do
@@ -493,6 +527,58 @@ _hooks_cmd_approve() {
     err "Cannot approve — dangerous commands found"
     printf '  %bFix the hooks first, or set MUSTER_HOOK_UNSAFE=1 to bypass%b\n' "${DIM}" "${RESET}"
     return 1
+  fi
+
+  # Collect pending files/diffs for review
+  _hook_trust_pending "$project_dir" "${_target_svcs[@]+"${_target_svcs[@]}"}" || true
+
+  if [[ "$_yes" != "true" ]]; then
+    if [[ ! -t 0 ]]; then
+      err "Refusing to approve hooks non-interactively without --yes"
+      if (( ${#_HOOK_PENDING[@]} > 0 )); then
+        printf '  %bPending files:%b\n' "${DIM}" "${RESET}"
+        local _pi=0
+        while (( _pi < ${#_HOOK_PENDING[@]} )); do
+          local _pe="${_HOOK_PENDING[$_pi]}"
+          local _pst="${_pe%%|*}" _prest="${_pe#*|}"
+          local _pk="${_prest%%|*}"
+          printf '    %s (%s)\n' "${_pk#_config/}" "$_pst"
+          _pi=$(( _pi + 1 ))
+        done
+      fi
+      printf '  %bReview the hooks, then run: muster hooks approve%s --yes%b\n' \
+        "${DIM}" "${service:+ ${service}}" "${RESET}"
+      return 1
+    fi
+
+    # Interactive TTY confirmation: show files and diff summary
+    echo ""
+    if (( ${#_HOOK_PENDING[@]} > 0 )); then
+      printf '  %bFiles to approve on this machine:%b\n' "${BOLD}" "${RESET}"
+      local _pi=0
+      while (( _pi < ${#_HOOK_PENDING[@]} )); do
+        local _pe="${_HOOK_PENDING[$_pi]}"
+        local _pst="${_pe%%|*}" _prest="${_pe#*|}"
+        local _pk="${_prest%%|*}"
+        printf '    %s %b(%s)%b\n' "${_pk#_config/}" "${DIM}" "$_pst" "${RESET}"
+        _pi=$(( _pi + 1 ))
+      done
+      _hook_trust_show_diff "$project_dir"
+    else
+      printf '  %bAll target hooks are already approved on this machine (re-signing).%b\n' "${DIM}" "${RESET}"
+    fi
+
+    echo ""
+    printf '  Approve these hooks on this machine? [y/N] '
+    local _confirm=""
+    read -r _confirm || true
+    case "$_confirm" in
+      y|Y|yes|YES) ;;
+      *)
+        info "Aborted — hooks not approved"
+        return 1
+        ;;
+    esac
   fi
 
   _hook_manifest_approve "$project_dir" "$service"

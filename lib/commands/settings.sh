@@ -383,15 +383,31 @@ _settings_hook_security() {
           load_config
           local _pd3
           _pd3="$(dirname "$CONFIG_FILE")"
-          # Require sudo for approve
-          if ! sudo -v 2>/dev/null; then
-            err "Authentication required to approve hooks"
-            printf '  %bPress any key to continue...%b' "${DIM}" "${RESET}"
-            IFS= read -rsn1 || true
-            continue
+          local _ap_svcs=() _ap_d
+          for _ap_d in "${_pd3}/.muster/hooks"/*/; do
+            [[ -d "$_ap_d" ]] || continue
+            local _ap_s
+            _ap_s=$(basename "$_ap_d")
+            [[ "$_ap_s" == "logs" || "$_ap_s" == "pids" ]] && continue
+            _ap_svcs[${#_ap_svcs[@]}]="$_ap_s"
+          done
+          _hook_trust_pending "$_pd3" "${_ap_svcs[@]+"${_ap_svcs[@]}"}" || true
+          if (( ${#_HOOK_PENDING[@]} > 0 )); then
+            _hook_trust_show_diff "$_pd3"
           fi
-          _hook_manifest_approve "$_pd3"
-          ok "All hooks approved"
+          echo ""
+          printf '  Approve all hooks on this machine? [y/N] '
+          local _ap_confirm=""
+          read -r _ap_confirm || true
+          case "$_ap_confirm" in
+            y|Y|yes|YES)
+              _hook_manifest_approve "$_pd3"
+              ok "All hooks approved"
+              ;;
+            *)
+              info "Aborted — hooks not approved"
+              ;;
+          esac
           printf '  %bPress any key to continue...%b' "${DIM}" "${RESET}"
           IFS= read -rsn1 || true
         fi
