@@ -617,8 +617,9 @@ _hook_scan_dangerous() {
     local pi=0
     while (( pi < ${#_HOOK_DANGER_PATTERNS[@]} )); do
       local entry="${_HOOK_DANGER_PATTERNS[$pi]}"
-      local pattern="${entry%%|*}"
-      local desc="${entry#*|}"
+      # Split at the last "|": patterns may contain "\|" themselves
+      local pattern="${entry%|*}"
+      local desc="${entry##*|}"
 
       if printf '%s' "$line" | grep -qE "$pattern" 2>/dev/null; then
         if (( found == 0 )); then

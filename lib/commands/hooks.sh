@@ -9,7 +9,16 @@ cmd_hooks() {
   # Route security subcommands first
   case "${1:-}" in
     verify)   shift; _hooks_cmd_verify "$@"; return $? ;;
-    approve)  shift; _hooks_cmd_approve "$@"; return $? ;;
+    approve)
+      shift
+      # --yes / --json: non-interactive approval (lib/commands/hooks_api.sh)
+      case " $* " in
+        *" --yes "*|*" -y "*|*" --json "*)
+          source "$MUSTER_ROOT/lib/commands/hooks_api.sh"
+          _hooks_cmd_approve_api "$@"; return $? ;;
+      esac
+      _hooks_cmd_approve "$@"; return $? ;;
+    status)   shift; source "$MUSTER_ROOT/lib/commands/hooks_api.sh"; _hooks_cmd_status "$@"; return $? ;;
     lock)     shift; _hooks_cmd_lock "$@"; return $? ;;
     unlock)   shift; _hooks_cmd_unlock "$@"; return $? ;;
   esac
@@ -25,6 +34,9 @@ cmd_hooks() {
         echo "Commands:"
         echo "  verify [service]    Check hooks against integrity manifest"
         echo "  approve [service]   Re-sign hooks after intentional edits"
+        echo "  approve --yes [service...] [--json]"
+        echo "                      Approve without a prompt (frontends, CI)"
+        echo "  status [--json]     Approval state of every hook, muster.json and .env"
         echo "  lock [service]      Opt-in: set hooks read-only (chmod 555)"
         echo "  unlock [service]    Allow editing (chmod 755)"
         echo ""
