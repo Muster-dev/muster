@@ -370,6 +370,11 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/cloud.sh"
     cmd_cloud "$@"
     ;;
+  ask)
+    shift
+    source "$MUSTER_ROOT/lib/commands/ask.sh"
+    cmd_ask "$@"
+    ;;
   trust)
     shift
     source "$MUSTER_ROOT/lib/commands/trust.sh"
@@ -412,9 +417,12 @@ case "${1:-}" in
     echo "Fleet commands:"
     echo "  fleet       Deploy one project to multiple machines (SSH or cloud)"
     echo "  group       Orchestrate multiple projects as one deploy (local, SSH, or cloud)"
-    echo "  cloud       Fleet Cloud account: login, logout, status"
+    echo "  cloud       Fleet Cloud: login, logout, status, connect (pair this server)"
     echo "  trust       Manage fleet deploy trust (accept, reject, revoke)"
     echo "  deploy fleet <group>   Shortcut for 'muster group deploy <group>'"
+    echo ""
+    echo "Assistant:"
+    echo "  ask         Ask the Muster Assistant why a deploy failed, what to do next"
     echo ""
     echo "Other:"
     echo "  skill       Manage addon skills (add, create, remove, list, run)"

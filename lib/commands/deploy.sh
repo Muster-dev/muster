@@ -1452,6 +1452,7 @@ ${_k8s_env_lines}"
             _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "$_svc_log" "true"
             _deploy_record_remaining "$current" "${services[@]}"
             _deploy_summary false "$project_dir" "$(( $(date +%s) - _deploy_t0 ))"
+            [[ "$(global_config_get assistant 2>/dev/null)" == "off" ]] || printf '  %bGet help: muster ask%b\n' "${DIM}" "${RESET}"
             _deploy_end
             return 1
           fi
@@ -1459,6 +1460,8 @@ ${_k8s_env_lines}"
           # Build menu options (add "Rollback & restart" for k8s update deploys)
           local _fail_opts=()
           _fail_opts[0]="Retry"
+          source "$MUSTER_ROOT/lib/core/assistant.sh"
+          _assistant_available && _fail_opts[${#_fail_opts[@]}]="Explain with AI"
           if [[ "${MUSTER_DEPLOY_MODE:-}" == "update" && -n "${MUSTER_K8S_DEPLOYMENT:-}" ]]; then
             _fail_opts[${#_fail_opts[@]}]="Rollback & restart"
           fi
@@ -1467,6 +1470,11 @@ ${_k8s_env_lines}"
           _fail_opts[${#_fail_opts[@]}]="Abort"
 
           menu_select "Deploy failed. What do you want to do?" "${_fail_opts[@]}"
+          while [[ "$MENU_RESULT" == "Explain with AI" ]]; do
+            MUSTER_ASK_FAILURE_SERVICE="$svc" MUSTER_ASK_FAILURE_EXIT="$rc" MUSTER_ASK_FAILURE_LOG="$log_file" \
+              "$MUSTER_ROOT/bin/muster" ask --read-only || true
+            menu_select "Deploy failed. What do you want to do?" "${_fail_opts[@]}"
+          done
 
           case "$MENU_RESULT" in
             "Retry")

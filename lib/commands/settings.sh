@@ -60,12 +60,13 @@ _settings_global_cli() {
 
   # Validate key
   case "$key" in
-    tui_mode|color_mode|log_color_mode|log_retention_days|default_stack|default_health_timeout|scanner_exclude|update_check|update_mode|minimal|machine_role|deploy_password|signing|service_lock_timeout|deploy_name) ;;
+    tui_mode|color_mode|log_color_mode|log_retention_days|default_stack|default_health_timeout|scanner_exclude|update_check|update_mode|minimal|machine_role|deploy_password|signing|service_lock_timeout|deploy_name|assistant) ;;
     *)
       err "Unknown global setting: ${key}"
       echo "  Valid keys: tui_mode, color_mode, log_color_mode, log_retention_days, default_stack,"
       echo "              default_health_timeout, scanner_exclude, update_check, update_mode, minimal,"
-      echo "              machine_role, deploy_password, signing, service_lock_timeout, deploy_name"
+      echo "              machine_role, deploy_password, signing, service_lock_timeout, deploy_name,"
+      echo "              assistant"
       return 1
       ;;
   esac
@@ -178,6 +179,13 @@ _settings_global_cli() {
       case "$value" in
         bare|docker|compose|k8s) ;;
         *) err "default_stack must be bare, docker, compose, or k8s"; return 1 ;;
+      esac
+      global_config_set "$key" "\"$value\""
+      ;;
+    assistant)
+      case "$value" in
+        on|off) ;;
+        *) err "assistant must be on or off"; return 1 ;;
       esac
       global_config_set "$key" "\"$value\""
       ;;
