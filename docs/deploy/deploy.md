@@ -10,6 +10,9 @@ muster deploy api          # deploy one service
 muster deploy --dry-run    # preview deploy plan without executing
 muster deploy --json       # stream deploy events as NDJSON
 muster deploy --force      # override an existing deploy lock
+muster deploy --stop-on-failure   # stop at the first failure (no recovery menu)
+muster deploy --from web   # resume: start at web in deploy order
+muster restart api         # restart a running service without redeploying
 ```
 
 ## Deploy Flow
@@ -76,6 +79,33 @@ When a deploy hook exits non-zero, muster shows the last 5 log lines, runs K8s d
 The entire deploy execution for each service is wrapped in a `while true` retry loop, so "Retry" seamlessly loops back.
 
 In non-interactive mode, deploy aborts immediately on failure (exit code 1).
+
+### Stop on failure and resume
+
+`--stop-on-failure` skips the recovery menu: the deploy ends after the first failed service and the rest are reported as `not_run` (in the table and in the JSON `summary`). Fix the problem, then resume with `--from <service>`, which starts at that service in deploy order (after `deploy_phases` reordering):
+
+```bash
+muster deploy --json --stop-on-failure
+muster deploy --json --from web
+```
+
+## Restart
+
+`muster restart <service> [--json] [--yes]` restarts a running service without rebuilding it. First match wins:
+
+| Method | When |
+|--------|------|
+| `restart.sh` hook (or a `restart` justfile recipe) | the service has one (approval + security checks apply) |
+| `kubectl rollout restart deployment/<name>` + `rollout status` | k8s services |
+| `docker compose -f <file> restart <service>` | compose services |
+| `docker restart <container>` | docker services |
+| redeploy (`muster deploy <service>`), announced first | anything else (bare, dev) |
+
+Remote services run the command on their remote host. With `--json` it emits the same events as rollback (`start` with `method` and `stack`, `log`, `done`, `health`, `summary`). See [ENGINE-API.md](../ENGINE-API.md).
+
+## Rollback
+
+`muster rollback <service>` runs the service's `rollback.sh`. `--json` streams `start` / `log` / `done` / `diagnosis` / `health` / `summary` events, exits 0 when rolled back and 1 otherwise, and never shows the recovery menu.
 
 ## Timeout
 
@@ -193,7 +223,13 @@ Streams NDJSON (one JSON object per line) for programmatic consumption. Events:
 | `health` | `service`, `status` (`checking`/`healthy`/`unhealthy`) |
 | `verify_warning` | `service`, `message` |
 | `dry_run` | `service`, `name`, `index`, `total`, `hook`, `hook_lines` |
+| `diagnosis` | `service`, `pattern`, `summary`, `hint`, `pod`, `pod_status`, `details`, `log_tail` (k8s failures) |
+| `error` | `reason` (`hooks_not_approved`/`preflight_failed`/`unknown_service`), `message`, `files`, `services` |
+| `stopped` | `reason`, `after`, `remaining` (`--stop-on-failure`) |
 | `complete` | `total`, `dry_run` |
+| `summary` | counts (`deployed`, `failed`, `skipped`, `not_run`, `rolled_back`), `exit_code`, `services[]` |
+
+The full contract for every `--json` command is in [ENGINE-API.md](../ENGINE-API.md).
 
 ## Deploy Lock
 

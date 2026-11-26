@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Engine API for frontends and scripts, documented in `docs/ENGINE-API.md`:
+  - `muster setup --scan --dry-run [--json]`: preview what setup would configure (stack, services, health, hook templates, deploy order, warnings) without writing anything
+  - `muster hooks status [--json]`: per-file approval state (approved / changed / new / missing), plus muster.json and .env
+  - `muster hooks approve --yes [service...] [--json]`: approve pending hooks without a prompt
+  - `muster deploy --stop-on-failure` (rest reported as `not_run`) and `--from <service>` to resume
+  - `muster rollback <service> --json` with the same events as deploy
+  - `muster restart <service> [--json]`: restart.sh hook, `kubectl rollout restart`, `docker compose restart` or `docker restart`, else a clearly announced redeploy
+  - `muster logs <service> --tail N [--follow] [--json]`
+  - k8s failures in `--json` mode emit a `diagnosis` event (pattern, pod, pod status, hint, events, log tail)
+  - richer `status --json` (stack, health target, last deploy, lock holder, k8s replicas, checked_at); `doctor --json` marks checks `fixable`; `history --json` includes `source`
+  - `fleet list --json` / `fleet status --json` return one consistent shape for remotes.json and fleet dirs; `cloud status --json`
+
+### Fixed
+- JSON output escapes tabs and control characters (log lines with tabs or ANSI colors produced invalid JSON)
+- Remote deploys/rollbacks failed with exit 127 when GNU `timeout` was installed (it can't run shell functions)
+- The curl/wget-pipe-to-shell dangerous-command patterns never matched
+- `setup --scan` no longer turns an image name in docker-compose.yml (e.g. `nginx:alpine` on a `web` service) into an extra service
+- `status --json` no longer prints prose into the JSON when a health hook is blocked
+- `fleet status` counted healthy services from a field `status --json` never had
+
 ## [0.6.2] - 2026-11-26
 
 ### Fixed

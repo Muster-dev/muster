@@ -75,6 +75,10 @@ Any flag triggers non-interactive mode. Outputs plain text (no TUI).
 | `--namespace <ns>` | Kubernetes namespace (default: `default`) |
 | `--name, -n <name>` | Project name (default: directory basename) |
 | `--force, -f` | Overwrite existing `muster.json` |
+| `--dry-run` | With `--scan`: run the scanner and show what setup would configure; writes nothing |
+| `--json` | With `--scan --dry-run`: print the preview as one JSON document (needs `MUSTER_TOKEN`) |
+
+`muster setup --scan --dry-run --json` is what frontends use for onboarding previews: stack, services (role, health, hook template, source files, `skip_deploy`), deploy order and warnings. Shape: [ENGINE-API.md](../ENGINE-API.md).
 
 ### Health Spec Format
 

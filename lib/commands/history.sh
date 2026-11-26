@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # muster/lib/commands/history.sh — Deploy history tracking and display
 
+source "$MUSTER_ROOT/lib/core/engine.sh"
+
 # ── Event logger ──
 # Appends a structured line to deploy-events.log
 # Usage: _history_log_event "service" "action" "status"
@@ -189,8 +191,10 @@ cmd_history() {
       local _jact="${actions[$i]}"
       local _jst="${statuses[$i]}"
       local _jcm="${commits[$i]}"
-      printf '{"timestamp":"%s","service":"%s","action":"%s","status":"%s","commit":"%s"}' \
-        "$_jts" "$_jsvc" "$_jact" "$_jst" "$_jcm"
+      local _jsrc="${sources[$i]:-}"
+      printf '{"timestamp":%s,"service":%s,"action":%s,"status":%s,"commit":%s,"source":%s}' \
+        "$(_json_str "$_jts")" "$(_json_str "$_jsvc")" "$(_json_str "$_jact")" "$(_json_str "$_jst")" \
+        "$(_json_str "$_jcm")" "$(_json_str "${_jsrc:-local}")"
     done
     printf ']\n'
     return 0
