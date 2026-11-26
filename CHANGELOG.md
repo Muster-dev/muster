@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - Group deploy service picker matched selections by display name, so picking `api` in one project also selected every other project's `api`; selections are now mapped by item index
 - Group deploy service picker deployed *all* services of a project when none of its services were selected; such projects are now skipped (and the progress total reflects the filtered selection)
+- Scanner `_scan_hint` ran `grep` with no file arguments when no hint files existed, so it read stdin — hanging `muster setup --scan` (and the test suite) whenever stdin was an open pipe, or detecting services from piped input
 - Group remote deploy broke when the deploy identity (e.g. git `user.name`) contained a single quote
 - ShellCheck warnings (`--severity=warning`) across `lib/` so `make lint` passes in CI
 - `make lint` ran ShellCheck over every file in one process, which was OOM-killed (and CI's ubuntu job cancelled); it now runs one file per invocation

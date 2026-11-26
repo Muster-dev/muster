@@ -221,5 +221,10 @@ EOF
 scan_project "$PROJ" 2>/dev/null
 _test_eq "k8s manifest httpGet probe infers http" "http|/healthz|9000" "$(scan_infer_health api)"
 _test_eq "k8s manifest containerPort infers tcp" "tcp||3000" "$(scan_infer_health web)"
+# _scan_hint with no hint files must not read stdin (used to hang on an open
+# pipe, or detect services from whatever was piped in)
+_SCAN_SERVICES=()
+_scan_hint " " "redis" "redis" <<< "redis"
+_test_eq "_scan_hint ignores stdin when no files" "0" "${#_SCAN_SERVICES[@]}"
 
 _test_summary
