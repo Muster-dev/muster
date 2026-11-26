@@ -167,7 +167,7 @@ _setup_remote_agent() {
   fi
 
   echo ""
-  printf '%b\n' "  ${BOLD}Join token${RESET} ${DIM}(from: muster-cloud token create --type agent-join)${RESET}"
+  printf '%b\n' "  ${BOLD}Join token${RESET} ${DIM}(from cloud.getmuster.dev → Connect a machine)${RESET}"
   printf '  %b>%b ' "$ACCENT" "$RESET"
   read -r _join_token
   if [[ -z "$_join_token" ]]; then
@@ -294,68 +294,28 @@ _setup_control_cloud() {
     echo ""
   fi
 
-  printf '%b\n' "  ${BOLD}Relay URL${RESET} ${DIM}(e.g. wss://relay.example.com)${RESET}"
-  printf '  %b>%b ' "$ACCENT" "$RESET"
-  local _relay=""
-  read -r _relay
-  if [[ -z "$_relay" ]]; then
-    err "Relay URL is required for cloud transport"
-    return 1
-  fi
-
-  echo ""
-  printf '%b\n' "  ${BOLD}Organization ID${RESET}"
-  printf '  %b>%b ' "$ACCENT" "$RESET"
-  local _org=""
-  read -r _org
-  if [[ -z "$_org" ]]; then
-    err "Organization ID is required"
-    return 1
-  fi
-
-  echo ""
-  printf '%b\n' "  ${BOLD}CLI token${RESET} ${DIM}(mst_cli_...)${RESET}"
-  printf '  %b>%b ' "$ACCENT" "$RESET"
-  local _token=""
-  read -r _token
-  if [[ -z "$_token" ]]; then
-    err "CLI token is required"
-    return 1
-  fi
-
-  # Verify relay is reachable
-  echo ""
-  start_spinner "Verifying relay..."
-
-  local _relay_ok=false
-  # Convert wss:// to https:// for health check
-  local _health_url="$_relay"
-  _health_url="${_health_url/wss:\/\//https://}"
-  _health_url="${_health_url/ws:\/\//http://}"
-  # Strip trailing path and add /healthz
-  _health_url="${_health_url%/}"
-  _health_url="${_health_url}/healthz"
-
-  if curl -fsSL --connect-timeout 5 --max-time 10 "$_health_url" >/dev/null 2>&1; then
-    _relay_ok=true
-  fi
-  stop_spinner
-
-  if [[ "$_relay_ok" == "true" ]]; then
-    printf '  %b✓%b Relay reachable\n' "${GREEN}" "${RESET}"
-  else
-    printf '  %b!%b Could not reach relay at %s\n' "${YELLOW}" "${RESET}" "$_health_url"
-    echo ""
-    menu_select "Save config anyway?" "Yes — save and fix later" "No — re-enter URL"
-    if [[ "$MENU_RESULT" == *"No"* ]]; then
+  # Sign in through the browser (device code). The token goes to the
+  # keychain; nothing secret is written to settings.json.
+  menu_select "Which relay?" "Fleet Cloud (relay.getmuster.dev)" "Self-hosted relay"
+  local _relay_args=""
+  if [[ "$MENU_RESULT" == "Self-hosted relay" ]]; then
+    printf '%b\n' "  ${BOLD}Relay URL${RESET} ${DIM}(e.g. https://relay.example.com)${RESET}"
+    printf '  %b>%b ' "$ACCENT" "$RESET"
+    read -r _relay_args
+    if [[ -z "$_relay_args" ]]; then
+      err "Relay URL is required for a self-hosted relay"
       return 1
     fi
   fi
 
-  # Save to global settings
-  global_config_set "cloud.relay" "\"$_relay\""
-  global_config_set "cloud.org_id" "\"$_org\""
-  global_config_set "cloud.token" "\"$_token\""
+  source "$MUSTER_ROOT/lib/commands/cloud.sh"
+  if [[ -n "$_relay_args" ]]; then
+    _cloud_login --relay "$_relay_args" || return 1
+  else
+    _cloud_login || return 1
+  fi
+  # Drop any plaintext token saved by older versions
+  global_config_set "cloud.token" 'null' >/dev/null 2>&1 || true
 
   echo ""
   ok "Cloud transport configured"
