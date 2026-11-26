@@ -379,19 +379,21 @@ curl -fsSL https://raw.githubusercontent.com/Muster-dev/muster-fleet-cloud/main/
 ```bash
 # On the remote: register agent with your relay
 muster-agent join --relay wss://relay.example.com \
-  --token mst_agent_<join-token> --org myorg --name prod-east \
+  --token mst_agent_<join-token> --name prod-east \
   --project /opt/myapp
 
 # Start the agent daemon (or install as systemd service)
 muster-agent run
 
-# On your laptop: configure cloud settings
-muster settings --global cloud.relay '"wss://relay.example.com"'
-muster settings --global cloud.org_id '"myorg"'
-muster settings --global cloud.token '"mst_cli_<your-token>"'
+# On the remote, as the agent's user: approve the project's hooks
+cd /opt/myapp && muster hooks approve
 
-# Add a cloud machine to your fleet
-muster fleet add prod-east deploy@prod-east --transport cloud --path /opt/myapp
+# On your laptop: log in (device flow; token goes to the keychain)
+muster cloud login
+
+# Add a cloud machine to your fleet (agent name after the @)
+muster fleet add prod-east deploy@prod-east --transport cloud --mode muster --path /opt/myapp
+muster fleet test prod-east
 ```
 
 ### How It Works
@@ -402,6 +404,41 @@ muster fleet add prod-east deploy@prod-east --transport cloud --path /opt/myapp
 4. The agent executes `muster deploy`, `muster status`, etc. locally and streams output back
 
 Cloud and SSH machines can coexist in the same fleet. Deploy respects the per-machine transport setting.
+
+### What runs over cloud
+
+The agent runs commands **without a shell**: every request is a plain argv
+whose leading words must match the agent's `allowed_commands` (default
+`muster deploy`, `muster status`, `muster rollback`, `muster logs`), any shell
+metacharacter is rejected (`E_COMMAND_REJECTED`), and requests carry no env
+vars. So the CLI never sends SSH-style shell strings to a cloud machine; it
+sends `muster … --no-verify` with `--cwd <project dir>` (or the agent's own
+`--project` dir when none is configured). The agent name is the host part of
+`muster fleet add <name> <user>@<agent> --transport cloud`.
+
+| Operation | SSH | Cloud |
+|-----------|-----|-------|
+| Connectivity | `ssh … echo ok` | `muster-tunnel ping` |
+| `fleet test` | SSH + muster token check | ping + `muster status --json` |
+| Pairing / `muster auth` tokens | auto-pair over SSH | not needed (relay authenticates both ends) |
+| Status | `MUSTER_TOKEN=… muster status --json` | `muster status --json --no-verify` |
+| Deploy (muster mode) | trust check + `muster deploy` with source env | `muster deploy --no-verify [svc]` |
+| Group deploy | background deploy + cancel watcher | `muster deploy --force --no-verify <svc>` per service |
+| Rollback | `muster rollback` | `muster rollback --no-verify <svc>` per service (`--service` to pick) |
+| Push mode | hook piped to `bash -s` | `push_hook` — agent must be joined with `--mode push` |
+
+**SSH only:** hook sync (`--sync` copies), `setup-user`, the monitoring
+agent installer, remote lock files, the `.fleet_deploying` marker and
+dashboard cancel watcher, fleet trust requests, project-dir auto-detection,
+and doctor's root/agent-PID checks.
+
+**Hook approval:** hooks must be approved on the agent's machine, by the
+agent's user. A cloud deploy with unapproved hooks fails with
+`Hooks on <machine> aren't approved yet. On that machine run: muster hooks approve`.
+
+**Cancel:** Ctrl+C stops the local `muster-tunnel`. The relay protocol has no
+cancel message yet, so a deploy that already started on the agent finishes
+there.
 
 ### Cloud Config (Global Settings)
 
