@@ -5,16 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-26
+
+### Added
+- `muster cloud login | logout | status`: sign in to Fleet Cloud with a browser device code; the CLI token is stored in the system keychain (0600 file fallback) and fleet/group cloud transport uses it automatically
+- Cloud transport speaks to hardened Fleet Cloud agents (v0.3.0+) with plain `muster …` commands: fleet add/test/status/deploy/rollback and group deploy/status work end to end through the relay
+- `muster init` alias for `muster setup`
+- Setup infers health checks from compose ports, Dockerfile `EXPOSE`, k8s manifests and well-known infra ports
+- One-screen quick setup: scan → summary → "Create it" (1 prompt instead of 8 for a typical compose app); per-service questions only under "Customize"
+- Deploy summary table (service, result, time, health) and a final `{"event":"summary"}` line in `--json` mode
+- Preflight checks before any hook runs: Docker/Compose running, Kubernetes context reachable
+- Hook approval prompt (show diff / approve and deploy / abort); `--yes` / `MUSTER_APPROVE_HOOKS=1` for CI
+- `muster deploy api web` deploys several services in the order given; flags may come anywhere
+- `muster fleet add` creates the fleet config on first use
+- muster-tui (the full-screen app) is the recommended default in the installer
+
+### Changed
+- Hook approvals live in a per-user trust store (`~/.muster/trust/`) instead of the repo, so teammates no longer see each other's hooks as "tampered"; old in-repo manifests are imported automatically
+- Generated hooks are owner-writable (`755`); `muster hooks lock` is opt-in
+- Generated `muster.json` no longer contains an absolute `root` path; service names default to their keys
+- `muster deploy` / `rollback` exit 1 when any service fails, is blocked, or fails its health check (also in `--json` and CI)
+- No ANSI escape codes or spinner frames when output is piped, `NO_COLOR` is set, or `color_mode=never`
+- The installer only prompts when a terminal can actually be opened (CI / cloud-init installs work); `MUSTER_YES=1` forces non-interactive
+- The token is passed to `muster-tunnel` via `MUSTER_CLOUD_TOKEN`, never on the command line
+- Docs: `muster doctor` described as 6 diagnostic categories (not "13 checks"); fixed stale doc paths in CLAUDE.md/llms.txt; hook template counts now include the `dev` stack
+
 ### Fixed
+- Concurrent `--json` calls could wipe every API token (shared temp file, no lock)
+- Editing your own hook made `muster deploy` silently skip the service, print "Deploy complete" and exit 0
+- `muster setup --scan` printed a raw `jq: error`
+- `--minimal` reported disabled health checks as "unhealthy" (stale shared cache)
+- `muster` inside an already configured project started first-run onboarding
+- Cloud setup wizard stored the CLI token in plaintext in `~/.muster/settings.json`
+- Remote `group add` saved a broken project (jq syntax error); rolling fleet deploy called missing functions; a failed fleet/group deploy retried forever without a TTY
+- Tests could write skills and tokens into the real `~/.muster`
 - Group deploy service picker matched selections by display name, so picking `api` in one project also selected every other project's `api`; selections are now mapped by item index
 - Group deploy service picker deployed *all* services of a project when none of its services were selected; such projects are now skipped (and the progress total reflects the filtered selection)
 - Scanner `_scan_hint` ran `grep` with no file arguments when no hint files existed, so it read stdin — hanging `muster setup --scan` (and the test suite) whenever stdin was an open pipe, or detecting services from piped input
 - Group remote deploy broke when the deploy identity (e.g. git `user.name`) contained a single quote
 - ShellCheck warnings (`--severity=warning`) across `lib/` so `make lint` passes in CI
 - `make lint` ran ShellCheck over every file in one process, which was OOM-killed (and CI's ubuntu job cancelled); it now runs one file per invocation
-
-### Changed
-- Docs: `muster doctor` described as 6 diagnostic categories (not "13 checks"); fixed stale doc paths in CLAUDE.md/llms.txt; hook template counts now include the `dev` stack
 
 ## [0.5.60] - 2026-03-05
 

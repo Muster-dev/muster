@@ -5,10 +5,10 @@
 ## Quick Reference
 
 ```bash
-muster setup       # interactive setup wizard (creates deploy.json + hooks)
+muster setup       # interactive setup wizard (creates muster.json + hooks)
 muster setup --scan                  # non-interactive: auto-detect everything
 muster setup --services api,redis    # non-interactive: explicit services
-muster setup --force --scan          # overwrite existing deploy.json
+muster setup --force --scan          # overwrite existing muster.json
 muster setup --help                  # show all setup flags
 muster             # dashboard (live health + action menu + installed skills)
 muster deploy      # deploy all (interactive: pick "All" or "Select services")
@@ -81,7 +81,7 @@ muster/
 
 ```
 your-project/
-├── deploy.json        ← config: services, health checks, deploy order
+├── muster.json        ← config: services, health checks, deploy order
 ├── .env               ← (optional) auto-loaded env vars for deploys
 ├── .musterignore      ← (optional) patterns to exclude from scanning
 └── .muster/
@@ -103,11 +103,13 @@ your-project/
 
 Edit via `muster settings` (TUI) or `muster settings --global <key> <value>` (scripted).
 
-## Config (deploy.json)
+## Config (muster.json)
+
+`muster setup` writes `muster.json`; an existing `deploy.json` is still read as a legacy fallback (`find_config` in lib/core/utils.sh).
 
 Service keys map to hook directories. Health types: `http`, `tcp`, `command`; disabled via `"enabled": false`. `deploy_order` controls sequencing (infra services auto-sorted first when no explicit `--order`). `skip_deploy: true` excludes a service from `muster deploy` (auto-set for file-detected services not found as k8s deployments). Credential modes: `off`, `save` (keychain), `session` (memory), `always` (prompt every time) — never stored in config or git. Service keys with hyphens work (jq bracket notation via `_jq_quote()`).
 
-K8s config: per-service `"k8s": {"deployment": "waity-api", "namespace": "waity"}`. Hooks read `MUSTER_K8S_DEPLOYMENT`, `MUSTER_K8S_NAMESPACE`, `MUSTER_K8S_SERVICE` env vars at runtime (exported by deploy/status/rollback commands from deploy.json). `MUSTER_K8S_SERVICE` auto-converts underscores to hyphens (e.g., service key `api_v1` → `MUSTER_K8S_SERVICE=api-v1`) since k8s doesn't allow underscores in resource names. Change deployment name in config, all hooks update automatically. Optional `"deploy_timeout": 300` per-service (default 120) → exported as `MUSTER_DEPLOY_TIMEOUT`, used in k8s templates. Optional `"deploy_mode"` per-service → exported as `MUSTER_DEPLOY_MODE`.
+K8s config: per-service `"k8s": {"deployment": "waity-api", "namespace": "waity"}`. Hooks read `MUSTER_K8S_DEPLOYMENT`, `MUSTER_K8S_NAMESPACE`, `MUSTER_K8S_SERVICE` env vars at runtime (exported by deploy/status/rollback commands from muster.json). `MUSTER_K8S_SERVICE` auto-converts underscores to hyphens (e.g., service key `api_v1` → `MUSTER_K8S_SERVICE=api-v1`) since k8s doesn't allow underscores in resource names. Change deployment name in config, all hooks update automatically. Optional `"deploy_timeout": 300` per-service (default 120) → exported as `MUSTER_DEPLOY_TIMEOUT`, used in k8s templates. Optional `"deploy_mode"` per-service → exported as `MUSTER_DEPLOY_MODE`.
 
 K8s infra services use `kubectl rollout restart` (not `kubectl set image`) — they deploy whatever image version is in the YAML manifest, avoiding accidental `:latest` pulls.
 
@@ -119,7 +121,7 @@ Git pull: per-service `"git_pull": {"enabled": true, "remote": "origin", "branch
 
 ## Setup Wizard
 
-**Interactive (no flags):** Scan-first TUI wizard. Detects project files (including subdirectories: `docker/`, `k8s/`, `deploy/`, `infra/`), identifies stack and services. User confirms/overrides, sets deploy order, configures health + credentials per service. Falls back to manual questions if nothing detected. Warns if deploy.json already exists. Requires a TTY — errors cleanly if stdin is not interactive.
+**Interactive (no flags):** Scan-first TUI wizard. Detects project files (including subdirectories: `docker/`, `k8s/`, `deploy/`, `infra/`), identifies stack and services. User confirms/overrides, sets deploy order, configures health + credentials per service. Falls back to manual questions if nothing detected. Warns if muster.json already exists. Requires a TTY — errors cleanly if stdin is not interactive.
 
 **Non-interactive (flags):** `muster setup --scan` or `muster setup --services api,redis --stack k8s`. Flags: `--path/-p`, `--scan`, `--stack/-s`, `--services`, `--order`, `--health` (repeatable), `--creds` (repeatable), `--remote` (repeatable, `svc=user@host[:port][:path]`), `--git-pull` (repeatable, `svc[=remote:branch]`), `--namespace`, `--name/-n`, `--force/-f` (overwrite existing config). See `muster setup --help`.
 
@@ -139,7 +141,7 @@ Deploy and rollback failures show interactive recovery menus instead of aborting
 
 **K8s smart rollout wait** (`_k8s_smart_wait()` in k8s deploy templates): Replaces bare `kubectl rollout status --timeout`. Starts rollout in background, polls pod status every 5s, prints progress (`"2/3 pods ready (15s)"`), and detects terminal errors immediately (ErrImageNeverPull, ImagePullBackOff, CrashLoopBackOff, OOMKilled, CreateContainerConfigError, RunContainerError, InvalidImageName). On terminal error: prints error, shows pod events/logs, kills rollout wait, exits non-zero. Uses deployment's label selector for pod matching.
 
-**Dashboard** (`lib/tui/dashboard.sh`): Services panel auto-refreshes every 20s via `MENU_TIMEOUT=20` in menu.sh. Health check results are cached persistently in `~/.muster/.health_cache/` (not temp dir) so status survives across renders. Build context overlap detection runs on each refresh (cache-based — only re-scans when deploy.json or .dockerignore changes). Shows warning banner and badges the Doctor menu item with `!` when issues found. `--minimal` mode outputs plain text service status and exits.
+**Dashboard** (`lib/tui/dashboard.sh`): Services panel auto-refreshes every 20s via `MENU_TIMEOUT=20` in menu.sh. Health check results are cached persistently in `~/.muster/.health_cache/` (not temp dir) so status survives across renders. Build context overlap detection runs on each refresh (cache-based — only re-scans when muster.json or .dockerignore changes). Shows warning banner and badges the Doctor menu item with `!` when issues found. `--minimal` mode outputs plain text service status and exits.
 
 **Interactive service selection:** `muster deploy` with >1 service in a TTY shows "All services" / "Select services" menu. "Select services" opens a checklist (`lib/tui/checklist.sh`). Non-interactive (scripts, CI) deploys all as before.
 
@@ -149,7 +151,7 @@ Deploy and rollback failures show interactive recovery menus instead of aborting
 
 **Detection flow:** Scan deploy hooks for `docker build` commands → extract context paths → compare pairwise for containment → check `.dockerignore` for exclusions → write results to cache.
 
-**Cache:** `~/.muster/.build_context_cache`. Format: `parent_svc|child_svc|parent_context|child_dir` (one line per issue). Invalidated when deploy.json or .dockerignore mtime changes.
+**Cache:** `~/.muster/.build_context_cache`. Format: `parent_svc|child_svc|parent_context|child_dir` (one line per issue). Invalidated when muster.json or .dockerignore mtime changes.
 
 **Integration points:**
 

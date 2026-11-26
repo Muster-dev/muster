@@ -4,7 +4,7 @@
 # Requires: jq
 set -uo pipefail
 
-MUSTER_VERSION="0.1.0"
+MUSTER_VERSION="0.6.0"
 
 # Resolve symlinks (macOS bash 3.2 has no readlink -f)
 _muster_self="${BASH_SOURCE[0]}"

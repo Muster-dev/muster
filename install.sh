@@ -27,10 +27,10 @@ fi
 # When piped (curl | bash), stdin is the script itself, not the terminal.
 # We can't `exec </dev/tty` because bash is still reading the script from fd 0.
 # Instead, we redirect individual `read` commands from /dev/tty.
+# /dev/tty exists in CI and cloud-init but can't be opened there, so test
+# that it actually opens. MUSTER_YES=1 forces a non-interactive install.
 _interactive=false
-if [[ -t 0 ]]; then
-  _interactive=true
-elif [[ -e /dev/tty ]]; then
+if [[ -z "${MUSTER_YES:-}" ]] && { : </dev/tty; } 2>/dev/null; then
   _interactive=true
 fi
 
@@ -273,25 +273,24 @@ if [[ "$_interactive" = true ]]; then
   if [[ "$_tui_installed" = true ]]; then
     echo ""
     printf '  %b%bmuster-tui%b already installed %b(%s)%b\n' "$_B" "$_M" "$_R" "$_D" "${_tui_existing_ver:-unknown}" "$_R"
-    printf '  %b1)%b Keep current    %b2)%b Reinstall / update\n' "$_M" "$_R" "$_M" "$_R"
+    printf '  %b1)%b Update %b(recommended)%b    %b2)%b Keep current\n' "$_M" "$_R" "$_G" "$_R" "$_M" "$_R"
     printf '  %bChoose [1/2]:%b ' "$_M" "$_R"
     read -r _tui_choice </dev/tty
-    [[ "${_tui_choice:-1}" == "1" ]] && _tui_choice="skip"
-    [[ "${_tui_choice:-}" == "2" ]] && _tui_choice="install"
+    [[ "${_tui_choice:-1}" == "1" ]] && _tui_choice="install"
+    [[ "${_tui_choice:-}" == "2" ]] && _tui_choice="skip"
     if [[ "$_tui_choice" == "skip" ]]; then
       _summary_items[${#_summary_items[@]}]="muster-tui ${_tui_existing_ver:-unknown} (kept)"
     fi
   else
     echo ""
-    printf '  %b%bmuster-tui%b %b— rich TUI frontend with full-screen dashboard,%b\n' "$_B" "$_M" "$_R" "$_D" "$_R"
-    printf '  %bstreaming deploy logs, and scrollable log viewer.%b\n' "$_D" "$_R"
-    printf '  %b(experimental, not recommended)%b\n' "$_Y" "$_R"
+    printf '  %b%bmuster-tui%b %b— the full-screen app you get when you type muster:%b\n' "$_B" "$_M" "$_R" "$_D" "$_R"
+    printf '  %bcommand prompt, live deploys, logs, Docker and servers in one place.%b\n' "$_D" "$_R"
     echo ""
-    printf '  %b1)%b Skip %b(recommended)%b    %b2)%b Install\n' "$_M" "$_R" "$_G" "$_R" "$_M" "$_R"
+    printf '  %b1)%b Install %b(recommended)%b    %b2)%b Skip\n' "$_M" "$_R" "$_G" "$_R" "$_M" "$_R"
     printf '  %bChoose [1/2]:%b ' "$_M" "$_R"
     read -r _tui_choice </dev/tty
-    [[ "${_tui_choice:-1}" == "1" ]] && _tui_choice="skip"
-    [[ "${_tui_choice:-}" == "2" ]] && _tui_choice="install"
+    [[ "${_tui_choice:-1}" == "1" ]] && _tui_choice="install"
+    [[ "${_tui_choice:-}" == "2" ]] && _tui_choice="skip"
   fi
 
   case "${_tui_choice}" in
