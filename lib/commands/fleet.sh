@@ -1930,6 +1930,34 @@ _fleet_skill_configure() {
 
 # ── rollback ──
 
+# Roll back a single fleet machine (cloud muster, SSH muster, or push mode).
+# Args: machine log_file [service...]
+_fleet_rollback_machine() {
+  local machine="$1" log_file="$2"
+  shift 2
+  _fleet_load_machine "$machine"
+  local project_dir
+  project_dir="$(dirname "$CONFIG_FILE")"
+
+  if [[ "$_FM_MODE" == "muster" && "$_FM_TRANSPORT" == "cloud" ]]; then
+    _fleet_cloud_rollback_cmd "$machine" "$@" >> "$log_file" 2>&1
+    return $?
+  elif [[ "$_FM_MODE" == "muster" ]]; then
+    _fleet_ssh_rollback_cmd "$machine" "$@" >> "$log_file" 2>&1
+    return $?
+  else
+    # Push mode: run rollback hooks
+    _fleet_resolve_rollback_services "$@"
+    local _s
+    for _s in "${_FLEET_RB_SVCS[@]}"; do
+      local hook="${project_dir}/.muster/hooks/${_s}/rollback.sh"
+      [[ ! -x "$hook" ]] && continue
+      fleet_push_hook "$machine" "$hook" "" >> "$log_file" 2>&1 || return 1
+    done
+    return 0
+  fi
+}
+
 # MUSTER_FLEET_* / MUSTER_DEPLOY_STATUS are exported by run_fleet_skill_hooks
 # shellcheck disable=SC2034
 _fleet_cmd_rollback() {
@@ -1949,6 +1977,7 @@ _fleet_cmd_rollback() {
         echo ""
         echo "  --service, -s <svc>   Roll back only this service (repeatable)."
         echo "                        Default: every service in deploy order."
+        echo "  --parallel            Roll back machines in parallel (max 10 concurrent)."
         return 0
         ;;
       --*)
@@ -1990,6 +2019,16 @@ _fleet_cmd_rollback() {
   fi
 
   local total=${#machines[@]}
+  if (( total == 0 )); then
+    warn "No machines to roll back"
+    return 0
+  fi
+
+  local project_dir
+  project_dir="$(dirname "$CONFIG_FILE")"
+  local log_dir="${project_dir}/.muster/logs"
+  mkdir -p "$log_dir"
+
   echo ""
   printf '%b\n' "  ${BOLD}${YELLOW}Fleet Rollback${RESET} — ${total} machine(s)"
   echo ""
@@ -2000,82 +2039,130 @@ _fleet_cmd_rollback() {
     _fleet_name=$(fleets_list 2>/dev/null | head -1)
   fi
   MUSTER_FLEET_NAME="$_fleet_name"
-  MUSTER_FLEET_STRATEGY="sequential"
+  if [[ "$parallel" == "true" ]]; then
+    MUSTER_FLEET_STRATEGY="parallel"
+  else
+    MUSTER_FLEET_STRATEGY="sequential"
+  fi
   run_fleet_skill_hooks "fleet-rollback-start" "" "$_fleet_name"
 
   local succeeded=0 failed=0
-  local current=0
 
-  for machine in "${machines[@]}"; do
-    current=$(( current + 1 ))
-    _fleet_load_machine "$machine"
+  if [[ "$parallel" == "true" ]]; then
+    local tmp_dir="${TMPDIR:-/tmp}/muster-fleet-rb-$$"
+    mkdir -p "$tmp_dir"
 
-    # Per-machine skill context
-    MUSTER_FLEET_MACHINE="$machine"
-    MUSTER_FLEET_HOST="${_FM_USER}@${_FM_HOST}"
-    MUSTER_FLEET_MODE="${_FM_MODE:-push}"
-
-    progress_bar "$current" "$total" "Rollback: ${machine}..."
+    info "Rolling back ${total} machines in parallel..."
     echo ""
 
-    local project_dir
-    project_dir="$(dirname "$CONFIG_FILE")"
-    local log_dir="${project_dir}/.muster/logs"
-    local log_file
-    log_file="${log_dir}/fleet-${machine}-rollback-$(date +%Y%m%d-%H%M%S).log"
+    local max_concurrent=10
+    local pids=()
+    local batch_start=0
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
 
-    local rc=0
+    while (( batch_start < total )); do
+      local batch_end=$(( batch_start + max_concurrent ))
+      (( batch_end > total )) && batch_end=$total
 
-    if [[ "$_FM_MODE" == "muster" && "$_FM_TRANSPORT" == "cloud" ]]; then
-      # Cloud: `muster rollback <svc>` per service on the agent (plain argv)
-      mkdir -p "$log_dir"
-      _fleet_cloud_rollback_cmd "$machine" "${_rb_services[@]+"${_rb_services[@]}"}" >> "$log_file" 2>&1
-      rc=$?
-      (( rc != 0 )) && tail -3 "$log_file" | while IFS= read -r _l; do printf '%b\n' "  ${DIM}${_l}${RESET}"; done
-    elif [[ "$_FM_MODE" == "muster" ]]; then
-      local token
-      token=$(fleet_token_get "$machine")
-      if [[ -z "$token" ]]; then
-        err "No token for ${machine}"
+      local i=$batch_start
+      while (( i < batch_end )); do
+        local machine="${machines[$i]}"
+        local log_file="${log_dir}/fleet-${machine}-rollback-${ts}.log"
+        local status_file="${tmp_dir}/${machine}.status"
+
+        (
+          _fleet_load_machine "$machine"
+          MUSTER_FLEET_MACHINE="$machine"
+          MUSTER_FLEET_HOST="${_FM_USER}@${_FM_HOST}"
+          MUSTER_FLEET_MODE="${_FM_MODE:-push}"
+
+          local _rc=0
+          _fleet_rollback_machine "$machine" "$log_file" "${_rb_services[@]+"${_rb_services[@]}"}" || _rc=$?
+
+          if (( _rc == 0 )); then
+            _history_log_event "fleet:${machine}" "rollback" "ok" ""
+            MUSTER_DEPLOY_STATUS="ok"
+            run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
+            echo "0" > "$status_file"
+          else
+            _history_log_event "fleet:${machine}" "rollback" "failed" ""
+            MUSTER_DEPLOY_STATUS="failed"
+            run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
+            echo "1" > "$status_file"
+          fi
+        ) &
+
+        pids[${#pids[@]}]=$!
+        i=$(( i + 1 ))
+      done
+
+      local p_idx=0
+      while (( p_idx < ${#pids[@]} )); do
+        wait "${pids[$p_idx]}" 2>/dev/null || true
+        p_idx=$(( p_idx + 1 ))
+      done
+
+      batch_start=$batch_end
+      pids=()
+    done
+
+    local machine
+    for machine in "${machines[@]}"; do
+      local status_file="${tmp_dir}/${machine}.status"
+      local log_file="${log_dir}/fleet-${machine}-rollback-${ts}.log"
+      local _st="1"
+      [[ -f "$status_file" ]] && _st=$(cat "$status_file" 2>/dev/null)
+      if [[ "$_st" == "0" ]]; then
+        ok "${machine} rolled back"
+        succeeded=$(( succeeded + 1 ))
+      else
+        err "${machine} rollback failed"
+        [[ -f "$log_file" ]] && tail -3 "$log_file" | while IFS= read -r _l; do printf '%b\n' "  ${DIM}${_l}${RESET}"; done
         failed=$(( failed + 1 ))
-        continue
       fi
+    done
 
-      local cmd="MUSTER_TOKEN=${token} muster rollback"
-      [[ -n "$_FM_PROJECT_DIR" ]] && cmd="cd ${_FM_PROJECT_DIR} && ${cmd}"
+    rm -rf "$tmp_dir"
+  else
+    local current=0
+    local machine
+    for machine in "${machines[@]}"; do
+      current=$(( current + 1 ))
+      _fleet_load_machine "$machine"
 
-      fleet_exec "$machine" "$cmd" >> "$log_file" 2>&1
-      rc=$?
-    else
-      # Push mode: run rollback hooks
-      while IFS= read -r svc; do
-        [[ -z "$svc" ]] && continue
-        if (( ${#_rb_services[@]} > 0 )); then
-          case " ${_rb_services[*]} " in *" ${svc} "*) ;; *) continue ;; esac
-        fi
-        local hook="${project_dir}/.muster/hooks/${svc}/rollback.sh"
-        [[ ! -x "$hook" ]] && continue
+      # Per-machine skill context
+      MUSTER_FLEET_MACHINE="$machine"
+      MUSTER_FLEET_HOST="${_FM_USER}@${_FM_HOST}"
+      MUSTER_FLEET_MODE="${_FM_MODE:-push}"
 
-        fleet_push_hook "$machine" "$hook" "" >> "$log_file" 2>&1 || { rc=1; break; }
-      done < <(config_get '.deploy_order[]' 2>/dev/null || config_services)
-    fi
+      progress_bar "$current" "$total" "Rollback: ${machine}..."
+      echo ""
 
-    if (( rc == 0 )); then
-      ok "${machine} rolled back"
-      _history_log_event "fleet:${machine}" "rollback" "ok" ""
-      MUSTER_DEPLOY_STATUS="ok"
-      run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
-      unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
-      succeeded=$(( succeeded + 1 ))
-    else
-      err "${machine} rollback failed"
-      _history_log_event "fleet:${machine}" "rollback" "failed" ""
-      MUSTER_DEPLOY_STATUS="failed"
-      run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
-      unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
-      failed=$(( failed + 1 ))
-    fi
-  done
+      local log_file
+      log_file="${log_dir}/fleet-${machine}-rollback-$(date +%Y%m%d-%H%M%S).log"
+
+      local rc=0
+      _fleet_rollback_machine "$machine" "$log_file" "${_rb_services[@]+"${_rb_services[@]}"}" || rc=$?
+
+      if (( rc == 0 )); then
+        ok "${machine} rolled back"
+        _history_log_event "fleet:${machine}" "rollback" "ok" ""
+        MUSTER_DEPLOY_STATUS="ok"
+        run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
+        unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
+        succeeded=$(( succeeded + 1 ))
+      else
+        err "${machine} rollback failed"
+        [[ -f "$log_file" ]] && tail -3 "$log_file" | while IFS= read -r _l; do printf '%b\n' "  ${DIM}${_l}${RESET}"; done
+        _history_log_event "fleet:${machine}" "rollback" "failed" ""
+        MUSTER_DEPLOY_STATUS="failed"
+        run_fleet_skill_hooks "fleet-machine-deploy-end" "$machine" "$_fleet_name"
+        unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_MACHINE MUSTER_FLEET_HOST MUSTER_FLEET_MODE 2>/dev/null
+        failed=$(( failed + 1 ))
+      fi
+    done
+  fi
 
   echo ""
   if (( failed == 0 )); then
@@ -2088,6 +2175,7 @@ _fleet_cmd_rollback() {
   run_fleet_skill_hooks "fleet-rollback-end" "" "$_fleet_name"
   unset MUSTER_DEPLOY_STATUS MUSTER_FLEET_NAME MUSTER_FLEET_STRATEGY 2>/dev/null
   echo ""
+  (( failed == 0 ))
 }
 
 # ── keygen ──

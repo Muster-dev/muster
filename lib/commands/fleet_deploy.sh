@@ -397,6 +397,25 @@ _fleet_cloud_deploy_cmd() {
   _cloud_run_explained "$machine" _cloud_muster "$_agent" "$_FM_PROJECT_DIR" deploy "$@"
 }
 
+# Resolve services to roll back into _FLEET_RB_SVCS.
+# Explicit args win; otherwise every non-skip_deploy service in deploy order.
+_FLEET_RB_SVCS=()
+_fleet_resolve_rollback_services() {
+  _FLEET_RB_SVCS=()
+  local _s
+  if (( $# > 0 )); then
+    for _s in "$@"; do
+      _FLEET_RB_SVCS[${#_FLEET_RB_SVCS[@]}]="$_s"
+    done
+  else
+    while IFS= read -r _s; do
+      [[ -z "$_s" ]] && continue
+      [[ "$(config_get ".services.${_s}.skip_deploy")" == "true" ]] && continue
+      _FLEET_RB_SVCS[${#_FLEET_RB_SVCS[@]}]="$_s"
+    done < <(config_get '.deploy_order[]' 2>/dev/null || config_services)
+  fi
+}
+
 # Cloud transport, muster mode: `muster rollback <svc>` for each service.
 # Services default to the local project's deploy order (fleet = one project
 # on many machines). Output goes to stdout. Args: machine [service...]
@@ -405,23 +424,47 @@ _fleet_cloud_rollback_cmd() {
   shift
   _fleet_load_machine "$machine"
   source "$MUSTER_ROOT/lib/core/cloud.sh"
-  local _agent _svcs=() _s
+  local _agent _s
   _agent=$(_fleet_cloud_agent "$machine")
-  if (( $# > 0 )); then
-    for _s in "$@"; do _svcs[${#_svcs[@]}]="$_s"; done
-  else
-    while IFS= read -r _s; do
-      [[ -z "$_s" ]] && continue
-      [[ "$(config_get ".services.${_s}.skip_deploy")" == "true" ]] && continue
-      _svcs[${#_svcs[@]}]="$_s"
-    done < <(config_get '.deploy_order[]' 2>/dev/null || config_services)
-  fi
-  if (( ${#_svcs[@]} == 0 )); then
+  _fleet_resolve_rollback_services "$@"
+  if (( ${#_FLEET_RB_SVCS[@]} == 0 )); then
     printf 'No services to roll back on %s\n' "$machine"
     return 1
   fi
-  for _s in "${_svcs[@]}"; do
+  for _s in "${_FLEET_RB_SVCS[@]}"; do
     _cloud_run_explained "$machine" _cloud_muster "$_agent" "$_FM_PROJECT_DIR" rollback "$_s" || return 1
+  done
+  return 0
+}
+
+# SSH transport, muster mode: `MUSTER_TOKEN=... muster rollback <svc>` per service.
+# Matches _fleet_cloud_rollback_cmd so remote rollback never fails without a TTY.
+# Output goes to stdout. Args: machine [service...]
+_fleet_ssh_rollback_cmd() {
+  local machine="$1"
+  shift
+  _fleet_load_machine "$machine"
+  local token
+  token=$(fleet_token_get "$machine")
+  if [[ -z "$token" ]]; then
+    printf 'No token for %s\n' "$machine"
+    return 1
+  fi
+  _fleet_resolve_rollback_services "$@"
+  if (( ${#_FLEET_RB_SVCS[@]} == 0 )); then
+    printf 'No services to roll back on %s\n' "$machine"
+    return 1
+  fi
+  local _s _q_tok _q_svc _q_dir _cmd
+  printf -v _q_tok '%q' "$token"
+  for _s in "${_FLEET_RB_SVCS[@]}"; do
+    printf -v _q_svc '%q' "$_s"
+    _cmd="MUSTER_TOKEN=${_q_tok} muster rollback ${_q_svc}"
+    if [[ -n "$_FM_PROJECT_DIR" ]]; then
+      printf -v _q_dir '%q' "$_FM_PROJECT_DIR"
+      _cmd="cd ${_q_dir} && ${_cmd}"
+    fi
+    fleet_exec "$machine" "$_cmd" || return 1
   done
   return 0
 }
@@ -698,7 +741,7 @@ _fleet_deploy_rolling() {
             if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
               _fleet_cloud_rollback_cmd "$machine" >/dev/null 2>&1 || true
             else
-              fleet_exec "$machine" "muster rollback 2>/dev/null || true" 2>/dev/null || true
+              _fleet_ssh_rollback_cmd "$machine" >/dev/null 2>&1 || true
             fi
             printf '%b\n' "  ${DIM}Rolled back ${machine}${RESET}"
             ;;
