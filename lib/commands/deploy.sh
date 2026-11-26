@@ -242,6 +242,67 @@ _deploy_progress() {
   echo ""
 }
 
+# ── Preflight: check the tools selected services need before any hook runs ──
+# Detection: k8s via the service's "k8s" config key or kubectl in its hooks;
+# docker/compose by grepping the deploy hook (or justfile). Remote services
+# are skipped (their tools live on the remote host; ssh is checked elsewhere).
+# Args: project_dir service...
+# Returns: 0 ok, 1 a required tool is missing/unreachable (message printed)
+_deploy_preflight() {
+  local project_dir="$1"; shift
+  local need_docker=false need_compose=false need_k8s=false
+  local svc
+  for svc in "$@"; do
+    remote_is_enabled "$svc" && continue
+    local hd="${project_dir}/.muster/hooks/${svc}"
+    local files=""
+    [[ -f "${hd}/deploy.sh" ]] && files="${hd}/deploy.sh"
+    [[ -f "${hd}/justfile" ]] && files="${files} ${hd}/justfile"
+    [[ -z "$files" ]] && continue
+    local k8s_cfg
+    k8s_cfg=$(config_get ".services.${svc}.k8s" 2>/dev/null)
+    # shellcheck disable=SC2086
+    if [[ -n "$k8s_cfg" && "$k8s_cfg" != "null" ]] || grep -q 'kubectl' $files 2>/dev/null; then
+      need_k8s=true
+    fi
+    # shellcheck disable=SC2086
+    if grep -Eq '(^|[^-[:alnum:]_])docker[[:space:]]+compose([^-[:alnum:]_]|$)' $files 2>/dev/null; then
+      need_docker=true; need_compose=true
+    elif grep -Eq '(^|[^-[:alnum:]_])docker([^-[:alnum:]_]|$)' $files 2>/dev/null; then
+      need_docker=true
+    fi
+  done
+
+  if [[ "$need_docker" == "true" ]]; then
+    if ! has_cmd docker; then
+      err "Docker isn't installed (no 'docker' on PATH). Install Docker Desktop or colima and retry."
+      return 1
+    fi
+    if [[ "$need_compose" == "true" ]] && ! docker compose version >/dev/null 2>&1; then
+      err "Docker Compose isn't available ('docker compose' failed). Install the Compose v2 plugin and retry."
+      return 1
+    fi
+    if ! _run_with_timeout 15 docker info >/dev/null 2>&1; then
+      err "Docker isn't running. Start Docker Desktop/colima and retry."
+      return 1
+    fi
+  fi
+
+  if [[ "$need_k8s" == "true" ]]; then
+    if ! has_cmd kubectl; then
+      err "kubectl isn't installed. Install it and retry."
+      return 1
+    fi
+    if ! _run_with_timeout 10 kubectl version --request-timeout=5s >/dev/null 2>&1; then
+      local ctx
+      ctx=$(kubectl config current-context 2>/dev/null)
+      err "Can't reach the Kubernetes cluster (context: ${ctx:-none}). Check 'kubectl config current-context' and retry."
+      return 1
+    fi
+  fi
+  return 0
+}
+
 cmd_deploy() {
   _deploy_main "$@"
   local rc=$?
@@ -509,7 +570,7 @@ _deploy_main() {
     _unload_env_file
   }
 
-  # ── Hook approval gate (real deploys only) ──
+  # ── Hook approval gate + tool preflight (real deploys only) ──
   if [[ "$dry_run" == "false" ]] && (( total > 0 )); then
     local _gate_ok=true _gate_reason=""
     if [[ "$_json_mode" == "true" ]]; then
@@ -518,6 +579,13 @@ _deploy_main() {
       local _gate_tty=false
       [[ -t 0 ]] && _gate_tty=true
       _hook_trust_gate "$project_dir" "deploy" "$_gate_tty" "$_approve_hooks" "${services[@]}" || { _gate_ok=false; _gate_reason="hooks_not_approved"; }
+    fi
+    if [[ "$_gate_ok" == "true" ]]; then
+      if [[ "$_json_mode" == "true" ]]; then
+        _deploy_preflight "$project_dir" "${services[@]}" >&2 || { _gate_ok=false; _gate_reason="preflight_failed"; }
+      else
+        _deploy_preflight "$project_dir" "${services[@]}" || { _gate_ok=false; _gate_reason="preflight_failed"; }
+      fi
     fi
     if [[ "$_gate_ok" == "false" ]]; then
       if [[ "$_json_mode" == "true" ]]; then
