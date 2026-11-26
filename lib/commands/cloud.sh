@@ -108,7 +108,7 @@ _cloud_help() {
   echo "Commands:"
   echo "  login [--relay <url>]   Sign in through the browser (device code)"
   echo "  logout                  Forget the stored token on this machine"
-  echo "  status                  Show account, relay and connection status"
+  echo "  status [--json]         Show account, relay and connection status"
   echo ""
   echo "Environment:"
   echo "  MUSTER_CLOUD_RELAY      Relay URL (default: https://relay.getmuster.dev)"
@@ -278,6 +278,13 @@ _cloud_logout() {
 }
 
 _cloud_status() {
+  local json=false
+  [[ "${1:-}" == "--json" ]] && json=true
+  if [[ "$json" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/engine.sh"
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
+  fi
   local relay org name token base health_code
   relay=$(global_config_get "cloud.relay" 2>/dev/null)
   org=$(global_config_get "cloud.org_id" 2>/dev/null)
@@ -286,6 +293,23 @@ _cloud_status() {
   [[ "$org" == "null" ]] && org=""
   [[ "$name" == "null" ]] && name=""
   token=$(_fleet_cloud_token_get default 2>/dev/null)
+
+  if [[ "$json" == "true" ]]; then
+    local logged_in=false reachable=false tunnel=false tunnel_path=""
+    [[ -n "$token" && -n "$org" ]] && logged_in=true
+    [[ -z "$relay" ]] && relay="$MUSTER_CLOUD_DEFAULT_RELAY"
+    base=$(_cloud_http_base "$relay")
+    health_code=$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "${base}/healthz" 2>/dev/null)
+    [[ "$health_code" == "200" ]] && reachable=true
+    if _fleet_cloud_available; then
+      tunnel=true
+      tunnel_path=$(_fleet_cloud_bin)
+    fi
+    printf '{"logged_in":%s,"name":%s,"org_id":%s,"org":%s,"relay":%s,"relay_reachable":%s,"tunnel_installed":%s,"tunnel_path":%s}\n' \
+      "$logged_in" "$(_json_str_or_null "$name")" "$(_json_str_or_null "$org")" "$(_json_str_or_null "$org")" \
+      "$(_json_str "$base")" "$reachable" "$tunnel" "$(_json_str_or_null "$tunnel_path")"
+    return 0
+  fi
 
   echo ""
   if [[ -n "$token" && -n "$org" ]]; then
