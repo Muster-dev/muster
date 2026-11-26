@@ -927,6 +927,8 @@ cmd_dashboard() {
 
     MENU_TIMEOUT=5
     menu_select "Actions" "${actions[@]}"
+    # MENU_TIMEOUT is read by menu_select (lib/tui/menu.sh)
+    # shellcheck disable=SC2034
     MENU_TIMEOUT=0
 
     # Escape from main menu returns to dashboard

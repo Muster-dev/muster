@@ -426,6 +426,8 @@ launchctl load ~/Library/LaunchAgents/dev.getmuster.agent.plist' 2>/dev/null
 
 # ── Agent status ──
 
+# Called with no args from the agent menu (all machines) — args are optional
+# shellcheck disable=SC2120
 _fleet_cmd_agent_status() {
   local machine=""
 

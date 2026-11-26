@@ -196,7 +196,7 @@ payload_list_keys() {
 
   local i=0
   while (( i < count )); do
-    local label added pubkey_pem
+    local label added
     label=$(jq -r --argjson i "$i" '.keys[$i].label' "$auth_file" 2>/dev/null)
     added=$(jq -r --argjson i "$i" '.keys[$i].added' "$auth_file" 2>/dev/null)
 

@@ -485,7 +485,8 @@ ${_k8s_env}"
     fi
 
     # Acquire per-service lock on remote
-    local _lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_source_host}\"}"
+    local _lock_json
+    _lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_source_host}\"}"
     fleet_exec "$machine" "${_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_lock_json}' > .muster/locks/${svc}.lock" 2>/dev/null || true
 
     info "  ${svc} → ${machine}"
@@ -727,7 +728,8 @@ ${_ke}"
             fi
 
             # Acquire per-service lock on remote
-            local _p_lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_p_src_host}\"}"
+            local _p_lock_json
+            _p_lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_p_src_host}\"}"
             fleet_exec "$machine" "${_p_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_p_lock_json}' > .muster/locks/${_svc}.lock" 2>/dev/null || true
 
             fleet_push_hook "$machine" "$_hook" "$_env" >> "$log_file" 2>&1

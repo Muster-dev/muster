@@ -523,7 +523,6 @@ _scan_compose_ports() {
   [[ -z "$compose_file" || ! -f "$compose_file" ]] && return 0
 
   local current_svc="" in_services=false in_ports=false in_healthcheck=false
-  local indent_level=0
 
   while IFS= read -r line; do
     # Track services: section
@@ -747,7 +746,7 @@ _scan_env_files() {
 
       # Check if name suggests a secret
       case "$var_name" in
-        *SECRET*|*KEY*|*TOKEN*|*PASSWORD*|*API_KEY*|*PRIVATE*|*CREDENTIAL*)
+        *SECRET*|*KEY*|*TOKEN*|*PASSWORD*|*PRIVATE*|*CREDENTIAL*)
           # Don't duplicate
           local _dup=false
           local _si=0

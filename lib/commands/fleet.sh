@@ -1728,7 +1728,8 @@ _fleet_skill_enable() {
   local _found=false
   [[ -d "${GLOBAL_SKILLS_DIR}/${skill_name}" ]] && _found=true
   if [[ "$_found" == "false" && -n "${CONFIG_FILE:-}" ]]; then
-    local _proj_skills="$(dirname "$CONFIG_FILE")/.muster/skills"
+    local _proj_skills
+    _proj_skills="$(dirname "$CONFIG_FILE")/.muster/skills"
     [[ -d "${_proj_skills}/${skill_name}" ]] && _found=true
   fi
   if [[ "$_found" == "false" ]]; then
@@ -1816,7 +1817,8 @@ _fleet_skill_configure() {
   if [[ -f "${GLOBAL_SKILLS_DIR}/${skill_name}/skill.json" ]]; then
     skill_json_file="${GLOBAL_SKILLS_DIR}/${skill_name}/skill.json"
   elif [[ -n "${CONFIG_FILE:-}" ]]; then
-    local _proj_skills="$(dirname "$CONFIG_FILE")/.muster/skills"
+    local _proj_skills
+    _proj_skills="$(dirname "$CONFIG_FILE")/.muster/skills"
     if [[ -f "${_proj_skills}/${skill_name}/skill.json" ]]; then
       skill_json_file="${_proj_skills}/${skill_name}/skill.json"
     fi
@@ -1889,11 +1891,12 @@ _fleet_skill_configure() {
 
 # ── rollback ──
 
+# MUSTER_FLEET_* / MUSTER_DEPLOY_STATUS are exported by run_fleet_skill_hooks
+# shellcheck disable=SC2034
 _fleet_cmd_rollback() {
   # Source skill manager for fleet skill hooks
   source "$MUSTER_ROOT/lib/skills/manager.sh"
 
-  # shellcheck disable=SC2034
   local target="" parallel=false
 
   while [[ $# -gt 0 ]]; do
@@ -2205,7 +2208,8 @@ _fleet_cmd_revoke_key() {
   _fleet_load_machine "$machine"
   _fleet_build_opts
 
-  # shellcheck disable=SC2086
+  # Unquoted heredoc on purpose: ${label} expands locally, \$-escaped vars remotely
+  # shellcheck disable=SC2086,SC2087
   ssh $_FLEET_SSH_OPTS "${_FM_USER}@${_FM_HOST}" "bash -s" <<REVOKE_EOF 2>/dev/null
 for f in \$HOME/.muster/fleet/authorized_keys/*.json; do
   [ -f "\$f" ] || continue

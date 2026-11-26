@@ -672,6 +672,7 @@ $(cat "$_hf" 2>/dev/null)"
           # shellcheck disable=SC2034
           FLEET_CONFIG_FILE="$_fleet_cfg"
         else
+          # shellcheck disable=SC2034
           FLEET_CONFIG_FILE="__fleet_dirs__"
         fi
 

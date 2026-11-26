@@ -831,6 +831,8 @@ cmd_fleet_setup() {
         local _path_in=""
         IFS= read -r _path_in
         [[ -n "$_path_in" ]] && _sync_path="$_path_in"
+        # Literal ~ on purpose: expanded on the remote machine, not locally
+        # shellcheck disable=SC2088
         [[ -z "$_sync_path" ]] && _sync_path="~/myapp"
 
         # Update project.json
@@ -860,6 +862,7 @@ cmd_fleet_setup() {
         local _path_in=""
         IFS= read -r _path_in
         [[ -n "$_path_in" ]] && _manual_path="$_path_in"
+        # shellcheck disable=SC2088
         [[ -z "$_manual_path" ]] && _manual_path="~/myapp"
 
         fleet_cfg_project_update "$_fleet_name" "default" "$_mname" \
@@ -933,7 +936,8 @@ cmd_fleet_setup() {
   source "$MUSTER_ROOT/lib/core/fleet_config.sh"
 
   local _keygen_ok=false
-  local _fleet_key_path="$(fleet_dir "$_fleet_name")/fleet.key"
+  local _fleet_key_path
+  _fleet_key_path="$(fleet_dir "$_fleet_name")/fleet.key"
 
   start_spinner "Generating fleet encryption keypair (RSA-4096)..."
   if fleet_crypto_keygen "$_fleet_name" 2>/dev/null; then
@@ -1110,6 +1114,7 @@ cmd_fleet_setup() {
 
   if [[ "$MENU_RESULT" == "Dry run (test deploy)" ]]; then
     echo ""
+    # shellcheck disable=SC2034
     FLEET_CONFIG_FILE="__fleet_dirs__"
     _fleet_cmd_deploy --dry-run
     printf '  %bPress any key to dismiss...%b' "$DIM" "$RESET"

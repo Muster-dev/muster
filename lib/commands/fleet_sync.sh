@@ -276,7 +276,8 @@ _fleet_sync_pubkey() {
   }
 
   # Run script on remote to add key to authorized_keys JSON
-  # shellcheck disable=SC2086
+  # Unquoted heredoc on purpose: local vars expand here, \$-escaped vars remotely
+  # shellcheck disable=SC2086,SC2087
   ssh $_FLEET_SSH_OPTS "${_FM_USER}@${_FM_HOST}" "bash -s" 2>/dev/null <<TRUST_EOF
 AUTH_DIR="\$HOME/.muster/fleet/authorized_keys"
 mkdir -p "\$AUTH_DIR" 2>/dev/null

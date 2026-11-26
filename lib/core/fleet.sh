@@ -272,7 +272,7 @@ _fleet_load_machine() {
 # List all machine names (from fleet dirs or legacy)
 fleet_machines() {
   if fleet_cfg_has_any 2>/dev/null; then
-    local fleet group project
+    local fleet group
     for fleet in $(fleets_list); do
       for group in $(fleet_cfg_groups "$fleet"); do
         fleet_cfg_group_projects "$fleet" "$group"
@@ -297,7 +297,7 @@ fleet_group_machines() {
   local group="$1"
   if fleet_cfg_has_any 2>/dev/null; then
     # Group = fleet in new structure; return all projects
-    local grp proj
+    local grp
     for grp in $(fleet_cfg_groups "$group"); do
       fleet_cfg_group_projects "$group" "$grp"
     done
