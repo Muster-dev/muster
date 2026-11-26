@@ -227,4 +227,48 @@ _SCAN_SERVICES=()
 _scan_hint " " "redis" "redis" <<< "redis"
 _test_eq "_scan_hint ignores stdin when no files" "0" "${#_SCAN_SERVICES[@]}"
 
+# ────────────────────────────────────────
+echo ""
+echo "  Scanner — dev commands, compose stack, exclusions"
+# ────────────────────────────────────────
+
+_p_node="${TMPDIR}/dev-node"
+mkdir -p "$_p_node"
+echo '{"scripts":{"dev":"next dev"}}' > "${_p_node}/package.json"
+_scan_detect_dev_cmds "$_p_node"
+_test "detects Node.js dev cmd" test "${#_SCAN_DEV_CMDS[@]}" -gt 0
+_test_contains "Node.js dev cmd is npm run dev" "npm run dev" "${_SCAN_DEV_CMDS[0]:-}"
+
+_p_go="${TMPDIR}/dev-go"
+mkdir -p "${_p_go}/cmd/server"
+echo 'module example.com/app' > "${_p_go}/go.mod"
+echo 'package main' > "${_p_go}/cmd/server/main.go"
+_scan_detect_dev_cmds "$_p_go"
+_test "detects Go dev cmd" test "${#_SCAN_DEV_CMDS[@]}" -gt 0
+_test_contains "Go dev cmd uses go run" "go run" "${_SCAN_DEV_CMDS[0]:-}"
+
+_p_py="${TMPDIR}/dev-py"
+mkdir -p "$_p_py"
+echo 'django' > "${_p_py}/requirements.txt"
+: > "${_p_py}/manage.py"
+_scan_detect_dev_cmds "$_p_py"
+_test "detects Python dev cmd" test "${#_SCAN_DEV_CMDS[@]}" -gt 0
+_test_contains "Python dev cmd uses manage.py" "manage.py" "${_SCAN_DEV_CMDS[0]:-}"
+
+_p_cmp="${TMPDIR}/stack-compose"
+mkdir -p "$_p_cmp"
+echo 'version: "3"' > "${_p_cmp}/docker-compose.yml"
+scan_project "$_p_cmp" 2>/dev/null
+_test_eq "scan_project sets _SCAN_STACK to compose" "compose" "$_SCAN_STACK"
+
+_SCAN_EXCLUDES=""
+_test "_scan_is_excluded excludes archived/" _scan_is_excluded "$TMPDIR" "archived/foo"
+_test "_scan_is_excluded excludes deprecated/" _scan_is_excluded "$TMPDIR" "deprecated/bar"
+_SCAN_EXCLUDES="node_modules .git"
+_test "_scan_is_excluded respects _SCAN_EXCLUDES" _scan_is_excluded "$TMPDIR" "node_modules/foo"
+_SCAN_EXCLUDES=""
+_excl_rc=0
+_scan_is_excluded "$TMPDIR" "src/main.go" || _excl_rc=$?
+_test "_scan_is_excluded allows normal directory" test "$_excl_rc" -ne 0
+
 _test_summary

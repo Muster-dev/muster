@@ -17,6 +17,8 @@ source "$MUSTER_ROOT/lib/core/utils.sh"
 source "$MUSTER_ROOT/lib/core/config.sh"
 
 TMPDIR=$(mktemp -d)
+export HOME="${TMPDIR}/home"
+mkdir -p "$HOME"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "  Config loading"
@@ -29,14 +31,21 @@ cat > "${TMPDIR}/deploy.json" << 'EOF'
   "services": {
     "api": {
       "name": "API Server",
-      "health": { "type": "http", "port": 8080, "endpoint": "/health" }
+      "skip_deploy": false,
+      "health": { "type": "http", "port": 8080, "endpoint": "/health" },
+      "k8s": { "deployment": "test-api", "namespace": "production" },
+      "deploy_timeout": 300,
+      "deploy_mode": "update"
     },
     "redis": {
       "name": "Redis",
-      "health": { "type": "tcp", "port": 6379 }
+      "skip_deploy": false,
+      "health": { "type": "tcp", "port": 6379 },
+      "k8s": { "deployment": "test-redis", "namespace": "production" }
     },
     "my-svc": {
-      "name": "My Service"
+      "name": "My Service",
+      "skip_deploy": false
     }
   },
   "deploy_order": ["redis", "api"]
@@ -68,9 +77,36 @@ _test_eq "_jq_quote wraps hyphenated segment" '.services["my-svc"].name' "$_quot
 _plain=$(_jq_quote ".services.api.name")
 _test_eq "_jq_quote passes simple segments unchanged" ".services.api.name" "$_plain"
 
-# Test config_get with hyphenated key via bracket notation
-_hyph_name=$(jq -r '.services["my-svc"].name' "$CONFIG_FILE")
-_test_eq "jq bracket notation reads hyphenated key" "My Service" "$_hyph_name"
+# Test config_get with hyphenated key via config_get, numeric, and boolean
+_hyph_name=$(config_get '.services.my-svc.name')
+_test_eq "config_get reads hyphenated service key" "My Service" "$_hyph_name"
+
+_multi_hyph=$(_jq_quote ".services.my-cool-svc.health.enabled")
+_test_eq "_jq_quote handles multiple hyphens" '.services["my-cool-svc"].health.enabled' "$_multi_hyph"
+
+_port=$(config_get '.services.api.health.port')
+_test_eq "config_get reads numeric value" "8080" "$_port"
+
+_skip=$(config_get '.services.api.skip_deploy')
+_test_eq "config_get reads boolean value" "false" "$_skip"
+
+_test_contains "config_services lists hyphenated my-svc" "my-svc" "$_svcs"
+
+echo ""
+echo "  k8s_env_for_service"
+
+_k8s_api=$(k8s_env_for_service "api")
+_test_contains "k8s_env exports deployment" "MUSTER_K8S_DEPLOYMENT=test-api" "$_k8s_api"
+_test_contains "k8s_env exports namespace" "MUSTER_K8S_NAMESPACE=production" "$_k8s_api"
+_test_contains "k8s_env exports service" "MUSTER_K8S_SERVICE=api" "$_k8s_api"
+_test_contains "k8s_env exports deploy_timeout when set" "MUSTER_DEPLOY_TIMEOUT=300" "$_k8s_api"
+_test_contains "k8s_env exports deploy_mode when set" "MUSTER_DEPLOY_MODE=update" "$_k8s_api"
+
+_k8s_redis=$(k8s_env_for_service "redis")
+_test_not_contains "k8s_env omits deploy_timeout when unset" "MUSTER_DEPLOY_TIMEOUT" "$_k8s_redis"
+
+_k8s_none=$(k8s_env_for_service "my-svc")
+_test_eq "k8s_env empty when no k8s config" "" "$_k8s_none"
 
 echo ""
 echo "  Missing config"

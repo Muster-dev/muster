@@ -122,4 +122,39 @@ FAKE_SSH
   _test_eq "other key preserved" "keep-me" "$(jq -r '.keys[0].label' "${AUTH_DIR}/proj.json")"
 fi
 
+# ────────────────────────────────────────
+echo ""
+echo "  .env file loading & unloading"
+# ────────────────────────────────────────
+
+_env_dir="${TMPDIR}/envtest"
+mkdir -p "$_env_dir"
+CONFIG_FILE="${_env_dir}/muster.json"
+: > "$CONFIG_FILE"
+
+printf 'MUSTER_TEST_FOO=bar\nMUSTER_TEST_BAZ=qux\n' > "${_env_dir}/.env"
+_load_env_file "${_env_dir}/.env"
+_test_eq "_load_env_file loads KEY=VALUE (FOO)" "bar" "${MUSTER_TEST_FOO:-}"
+_test_eq "_load_env_file loads KEY=VALUE (BAZ)" "qux" "${MUSTER_TEST_BAZ:-}"
+_unload_env_file
+_test_eq "_unload_env_file clears loaded vars" "" "${MUSTER_TEST_FOO:-}"
+
+printf '# comment\n\nMUSTER_TEST_FOO=bar\n  # indented comment\n' > "${_env_dir}/.env"
+_load_env_file "${_env_dir}/.env"
+_test_eq "_load_env_file skips comments and blank lines" "bar" "${MUSTER_TEST_FOO:-}"
+_unload_env_file
+
+printf 'MUSTER_TEST_DQ="hello world"\nMUSTER_TEST_SQ='\''single quotes'\''\n' > "${_env_dir}/.env"
+_load_env_file "${_env_dir}/.env"
+_test_eq "_load_env_file strips double quotes" "hello world" "${MUSTER_TEST_DQ:-}"
+_test_eq "_load_env_file strips single quotes" "single quotes" "${MUSTER_TEST_SQ:-}"
+_unload_env_file
+
+export MUSTER_TEST_EXISTING="original"
+printf 'MUSTER_TEST_EXISTING=overwritten\n' > "${_env_dir}/.env"
+_load_env_file "${_env_dir}/.env"
+_test_eq "_load_env_file does not override existing env vars" "original" "$MUSTER_TEST_EXISTING"
+_unload_env_file
+unset MUSTER_TEST_EXISTING
+
 _test_summary
