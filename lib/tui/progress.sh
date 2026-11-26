@@ -7,6 +7,13 @@ progress_bar() {
   local label="${3:-}"
   local state="${4:-}"
 
+  # No escape sequences allowed (piped, NO_COLOR, color_mode=never):
+  # one plain line per call, no carriage-return redraws.
+  if [[ "${MUSTER_ANSI:-true}" == "false" ]]; then
+    printf '  [%d/%d] %s\n' "$current" "$total" "$label"
+    return 0
+  fi
+
   # Minimal mode: plain text progress
   if [[ "${MUSTER_MINIMAL:-false}" == "true" ]]; then
     printf '\r  [%d/%d] %s' "$current" "$total" "$label"

@@ -334,7 +334,8 @@ $(cat "$_hf" 2>/dev/null)"
 
     # Hook integrity (manifest verification)
     source "$MUSTER_ROOT/lib/core/hook_security.sh"
-    local _manifest_file="${project_dir}/.muster/hooks.manifest"
+    local _manifest_file
+    _manifest_file=$(_hook_manifest_path "$project_dir")
     if [[ -f "$_manifest_file" ]]; then
       # Manifest signature check
       _hook_manifest_verify_sig "$_manifest_file"
@@ -391,7 +392,7 @@ $(cat "$_hf" 2>/dev/null)"
         fi
       fi
     else
-      _doc_warn "No hooks manifest (run 'muster hooks approve' to create)"
+      _doc_warn "Hooks not approved on this machine (review them, then run 'muster hooks approve')"
     fi
 
     # Justfile checks

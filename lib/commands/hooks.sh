@@ -25,7 +25,7 @@ cmd_hooks() {
         echo "Commands:"
         echo "  verify [service]    Check hooks against integrity manifest"
         echo "  approve [service]   Re-sign hooks after intentional edits"
-        echo "  lock [service]      Set hooks read-only (chmod 555)"
+        echo "  lock [service]      Opt-in: set hooks read-only (chmod 555)"
         echo "  unlock [service]    Allow editing (chmod 755)"
         echo ""
         echo "Examples:"
@@ -239,10 +239,10 @@ _hooks_service_detail() {
 
       # Integrity check
       local _integrity_icon=""
-      if [[ -f "${hooks_dir}/../hooks.manifest" ]]; then
-        source "$MUSTER_ROOT/lib/core/hook_security.sh"
-        local _proj_dir
-        _proj_dir=$(cd "${hooks_dir}/.." 2>/dev/null && pwd)
+      source "$MUSTER_ROOT/lib/core/hook_security.sh"
+      local _proj_dir
+      _proj_dir=$(cd "${hooks_dir}/../.." 2>/dev/null && pwd)
+      if _hook_trust_exists "$_proj_dir"; then
         _hook_manifest_verify "$_hp" "$_proj_dir"
         case $? in
           0) _integrity_icon=" ${GREEN}✓${RESET}" ;;

@@ -288,7 +288,8 @@ _settings_hook_security() {
       load_config
       local _pd0
       _pd0="$(dirname "$CONFIG_FILE")"
-      local _mf0="${_pd0}/.muster/hooks.manifest"
+      local _mf0
+      _mf0=$(_hook_manifest_path "$_pd0")
       if [[ -f "$_mf0" ]]; then
         _hook_manifest_verify_sig "$_mf0"
         case $? in

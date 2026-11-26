@@ -8,9 +8,9 @@ _SPINNER_PREV_EXIT=""
 start_spinner() {
   local msg="$1"
 
-  # Minimal mode: just print the message, no animation
-  if [[ "${MUSTER_MINIMAL:-false}" == "true" ]]; then
-    printf '  %s...\n' "$msg"
+  # Minimal mode or no ANSI (piped / NO_COLOR): print the message, no animation
+  if [[ "${MUSTER_MINIMAL:-false}" == "true" || "${MUSTER_ANSI:-true}" == "false" ]]; then
+    printf '  %s%s\n' "$msg" "$( [[ "$msg" == *... ]] || printf '...' )"
     return 0
   fi
 
