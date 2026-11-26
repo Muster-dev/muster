@@ -65,10 +65,14 @@ muster setup --help                                     # see all flags
 | `muster deploy svc1 svc2` | Deploy multiple specific services in order |
 | `muster deploy --yes` | Approve unreviewed/changed hooks non-interactively (CI) |
 | `muster deploy --dry-run` | Preview deploy plan without executing |
+| `muster deploy --stop-on-failure` | Stop at the first failed service (resume with `--from <svc>`) |
 | `muster status` | Check health of all services |
 | `muster logs` | Stream logs (interactive service picker) |
+| `muster logs api --tail 200` | Print the last N lines and exit (`--follow`, `--json`) |
 | `muster rollback` | Rollback a service |
 | `muster hooks approve [svc] [--yes]` | Review and approve hooks on this machine (`~/.muster/trust/`) |
+| `muster restart api` | Restart a service without redeploying |
+| `muster hooks status` | Show which hooks are approved on this machine |
 | `muster doctor` | Run project diagnostics (6 categories) |
 | `muster doctor --fix` | Auto-fix what it can (permissions, stale PIDs, old logs, .dockerignore) |
 | `muster cleanup` | Clean up stuck processes and old logs |

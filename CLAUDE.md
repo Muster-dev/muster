@@ -11,6 +11,7 @@ muster setup --scan                  # non-interactive: auto-detect everything
 muster setup --services api,redis    # non-interactive: explicit services
 muster setup --force --scan          # overwrite existing muster.json
 muster setup --help                  # show all setup flags
+muster setup --scan --dry-run --json # preview what setup would configure (writes nothing)
 muster             # dashboard (live health + action menu + installed skills)
 muster deploy      # deploy all (interactive: pick "All" or "Select services")
 muster deploy api  # deploy one service
@@ -18,11 +19,17 @@ muster deploy svc1 svc2          # deploy multiple specific services
 muster deploy --yes [svcs...]    # approve changed/unapproved hooks without prompting (CI)
 muster deploy --dry-run        # preview deploy plan without executing
 muster deploy --dry-run api    # dry-run a single service
+muster deploy --json --stop-on-failure   # stop at first failure, rest reported not_run
+muster deploy --from web       # resume from web in deploy order
 muster dev         # deploy + watch health every 5s (Ctrl+C to cleanup)
 muster status      # health check all services
 muster logs <svc>  # stream logs for a service
-muster rollback <svc>  # rollback a service (interactive picker if no arg)
+muster logs <svc> --tail 200   # last N lines and exit (--follow to keep going, --json for events)
+muster rollback <svc>  # rollback a service (interactive picker if no arg; --json streams events)
 muster hooks approve [svc] [--yes]  # approve hooks on this machine (~/.muster/trust/)
+muster restart <svc>   # restart without redeploying (restart.sh / kubectl / compose / docker, else redeploy)
+muster hooks status --json     # per-file hook approval state
+muster hooks approve --yes [svc] --json  # approve pending hooks without a prompt
 muster history     # show deploy/rollback event log
 muster history --all           # show full history (not just recent)
 muster history api             # show history for one service
@@ -69,15 +76,16 @@ muster --minimal deploy api   # build context warnings as stderr comments
 muster/
 ├── bin/muster                     ← entry point (routes commands, startup integrity check)
 ├── bin/muster-mcp                 ← MCP stdio transport (uses shared scanner)
-├── lib/core/                      ← config, colors, logger, platform, utils, scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard
+├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard
 ├── lib/tui/                       ← menu, checklist, spinner, progress, streambox, dashboard, order
-├── lib/commands/                  ← setup, deploy, dev, status, logs, rollback, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, group, verify, auth, trust, hooks, diff, addon, projects
+├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects
 ├── lib/agent/muster-agent.sh     ← standalone fleet monitoring daemon (no lib dependencies)
 ├── lib/skills/manager.sh          ← skill lifecycle (reads name from skill.json)
 ├── templates/deploy.example.json  ← example config
 ├── templates/hooks/               ← stack-specific hook templates (k8s, compose, docker, bare, dev)
 │   ├── {k8s,compose,docker}/infra/ ← infrastructure service variants (pull-only, no build)
 │   └── dev/                       ← local dev stack (PID-managed processes, docker compose infra)
+├── docs/ENGINE-API.md             ← --json contract (every command/event shape; muster-tui relies on it)
 ├── docs/fleet/fleet.md            ← fleet deployment guide
 ├── docs/skills/skills.md          ← skill authoring guide
 ├── FLEET.md                       ← fleet & cloud overview
@@ -215,6 +223,10 @@ Multi-project orchestration via `muster group`. Config in `~/.muster/groups.json
 File integrity verification via SHA256 manifest (`.muster.manifest`) + optional Ed25519/RSA signature (`.muster.manifest.sig`). Both are local-only artifacts (`.gitignore`d), generated at install/update time. Startup check in `bin/muster` uses inline bootstrap trust chain — verifies manifest signature with raw `openssl`, then hash-checks `app_verify.sh` and `payload_sign.sh` with `shasum` before sourcing. `--no-verify` flag or `MUSTER_NO_VERIFY=true` to bypass. Tamper detection shows which files changed, offers `git checkout` repair + manifest regeneration. `muster verify` command for on-demand checking. Doctor includes integrity check.
 
 Key files: `lib/core/app_verify.sh` (manifest gen/verify), `lib/core/payload_sign.sh` (signing), `lib/commands/verify.sh` (verify command).
+
+## JSON API
+
+Every `--json` command prints only JSON on stdout (NDJSON for streams), human text on stderr, honours the `MUSTER_TOKEN` gate (`_json_auth_gate read|deploy`), and exits non-zero on failure. Escape strings with `_json_str` / `_json_esc` from `lib/core/engine.sh` (never hand-rolled sed). `err`/`warn`/`info` print to stdout — redirect them to stderr in JSON paths. Document shape changes in `docs/ENGINE-API.md` and cover them in `tests/test_engine_api.sh`.
 
 ## Bash 3.2 Rules
 

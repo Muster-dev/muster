@@ -292,7 +292,8 @@ _hook_validate_service_key() {
   case "$key" in
     *..*)    return 1 ;;  # Path traversal
     /*)      return 1 ;;  # Absolute path
-    *$'\0'*) return 1 ;;  # Null byte injection
+    */*)     return 1 ;;  # Path separator
+    *[!A-Za-z0-9._-]*) return 1 ;;  # Only safe characters (bash strings can't hold NUL)
   esac
   return 0
 }
@@ -617,8 +618,9 @@ _hook_scan_dangerous() {
     local pi=0
     while (( pi < ${#_HOOK_DANGER_PATTERNS[@]} )); do
       local entry="${_HOOK_DANGER_PATTERNS[$pi]}"
-      local pattern="${entry%%|*}"
-      local desc="${entry#*|}"
+      # Split at the last "|": patterns may contain "\|" themselves
+      local pattern="${entry%|*}"
+      local desc="${entry##*|}"
 
       if printf '%s' "$line" | grep -qE "$pattern" 2>/dev/null; then
         if (( found == 0 )); then

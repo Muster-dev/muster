@@ -4,6 +4,66 @@
 source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/core/remote.sh"
 source "$MUSTER_ROOT/lib/core/just_runner.sh"
+source "$MUSTER_ROOT/lib/core/engine.sh"
+
+# Extra per-service fields for `status --json` (leading comma included):
+# stack, health config + target, remote, last deploy, lock holder, k8s replicas
+_status_json_extra() {
+  local svc="$1" project_dir="$2"
+  local stack htype hport hep htimeout hcmd
+  stack=$(_engine_service_stack "$svc" "$project_dir")
+  htype=$(config_get ".services.${svc}.health.type" 2>/dev/null)
+  hport=$(config_get ".services.${svc}.health.port" 2>/dev/null)
+  hep=$(config_get ".services.${svc}.health.endpoint" 2>/dev/null)
+  htimeout=$(config_get ".services.${svc}.health.timeout" 2>/dev/null)
+  hcmd=$(config_get ".services.${svc}.health.command" 2>/dev/null)
+  local henabled=true
+  [[ "$(config_get ".services.${svc}.health.enabled" 2>/dev/null)" == "false" ]] && henabled=false
+  [[ "$htype" == "null" ]] && htype=""
+  [[ "$hep" == "null" ]] && hep=""
+  [[ "$hcmd" == "null" ]] && hcmd=""
+
+  local host="localhost" target=""
+  if remote_is_enabled "$svc"; then
+    host=$(config_get ".services.${svc}.remote.host" 2>/dev/null)
+  fi
+  case "$htype" in
+    http) [[ -n "$hport" && "$hport" != "null" ]] && target="http://${host}:${hport}${hep}" ;;
+    tcp) [[ -n "$hport" && "$hport" != "null" ]] && target="tcp://${host}:${hport}" ;;
+    command) target="$hcmd" ;;
+  esac
+
+  local remote="null"
+  if remote_is_enabled "$svc"; then
+    remote=$(_json_str "$(remote_desc "$svc")")
+  fi
+
+  # Service lock (a deploy of this service running anywhere)
+  local locked="null" lf
+  lf=$(_service_lock_file "$project_dir" "$svc")
+  if [[ -f "$lf" ]] && ! _service_lock_is_stale "$lf" 2>/dev/null; then
+    _service_lock_read "$lf"
+    locked="{\"user\":$(_json_str "$_SLOCK_USER"),\"host\":$(_json_str "$_SLOCK_HOST"),\"source\":$(_json_str "$_SLOCK_SOURCE"),\"pid\":$(_json_int "$_SLOCK_PID"),\"started\":$(_json_str "$_SLOCK_STARTED")}"
+  fi
+  local deploying=false
+  [[ "$locked" != "null" ]] && deploying=true
+
+  # k8s replica counts (only when kubectl can answer quickly)
+  local replicas="null"
+  if [[ "$stack" == "k8s" && "${MUSTER_HAS_KUBECTL:-false}" == "true" ]] && ! remote_is_enabled "$svc"; then
+    local rr
+    rr=$(_run_with_timeout 5 kubectl get deployment "$(_engine_k8s_deployment "$svc")" \
+      -n "$(_engine_k8s_namespace "$svc")" -o 'jsonpath={.status.readyReplicas}/{.spec.replicas}' 2>/dev/null)
+    if [[ "$rr" == */* ]]; then
+      replicas="{\"ready\":$(_json_int "${rr%%/*}" 0),\"desired\":$(_json_int "${rr#*/}" 0)}"
+    fi
+  fi
+
+  printf ',"stack":%s,"health":{"type":%s,"port":%s,"endpoint":%s,"command":%s,"timeout":%s,"enabled":%s},"target":%s,"remote":%s,"last_deploy":%s,"locked_by":%s,"deploying":%s,"replicas":%s' \
+    "$(_json_str "$stack")" "$(_json_str_or_null "$htype")" "$(_json_int "$hport")" "$(_json_str_or_null "$hep")" \
+    "$(_json_str_or_null "$hcmd")" "$(_json_int "$htimeout")" "$henabled" "$(_json_str_or_null "$target")" "$remote" \
+    "$(_engine_last_event "$svc" "deploy" "$project_dir")" "$locked" "$deploying" "$replicas"
+}
 
 cmd_status() {
   local _json_mode=false
@@ -16,7 +76,7 @@ cmd_status() {
         echo "Check health of all services."
         echo ""
         echo "Flags:"
-        echo "  --json          Output as JSON"
+        echo "  --json          Output as JSON (exits 0 even when services are unhealthy)"
         echo "  -h, --help      Show this help"
         return 0
         ;;
@@ -54,7 +114,18 @@ cmd_status() {
   # JSON mode: collect results, print at end
   local _json_first=true
   if [[ "$_json_mode" == "true" ]]; then
-    printf '{"project":"%s","services":{' "$project"
+    local _dl_file _dl_json="null"
+    _dl_file=$(_deploy_lock_file "$project_dir")
+    if [[ -f "$_dl_file" ]]; then
+      _deploy_lock_read "$_dl_file"
+      if [[ -n "$_LOCK_PID" ]] && kill -0 "$_LOCK_PID" 2>/dev/null; then
+        _dl_json="{\"user\":$(_json_str "$_LOCK_USER"),\"pid\":$(_json_int "$_LOCK_PID"),\"started\":$(_json_str "$_LOCK_STARTED"),\"services\":$(_json_str "$_LOCK_SERVICES")}"
+      fi
+    fi
+    local _dl_active=false
+    [[ "$_dl_json" != "null" ]] && _dl_active=true
+    printf '{"project":%s,"checked_at":%s,"deploying":%s,"deploy_lock":%s,"services":{' \
+      "$(_json_str "$project")" "$(_json_str "$(_engine_now_iso)")" "$_dl_active" "$_dl_json"
   fi
 
   while IFS= read -r svc; do
@@ -69,7 +140,14 @@ cmd_status() {
     if [[ -f "$hook" ]]; then
       source "$MUSTER_ROOT/lib/core/hook_security.sh"
       if ! _hook_security_check "$hook" "$project_dir" "silent"; then
-        printf '  %b!%b %s: %bhook blocked by security check%b\n' "${YELLOW}" "${RESET}" "$name" "${DIM}" "${RESET}"
+        if [[ "$_json_mode" == "true" ]]; then
+          $_json_first || printf ','
+          _json_first=false
+          printf '%s:{"name":%s,"status":"blocked","health_type":"","detail":"health hook blocked by security check (muster hooks status --json)"%s}' \
+            "$(_json_str "$svc")" "$(_json_str "$name")" "$(_status_json_extra "$svc" "$project_dir")"
+        else
+          printf '  %b!%b %s: %bhook blocked by security check%b\n' "${YELLOW}" "${RESET}" "$name" "${DIM}" "${RESET}"
+        fi
         continue
       fi
     fi
@@ -98,8 +176,8 @@ cmd_status() {
       if [[ "$_json_mode" == "true" ]]; then
         $_json_first || printf ','
         _json_first=false
-        printf '"%s":{"name":"%s","status":"disabled","health_type":"%s","detail":"health check disabled"}' \
-          "$svc" "$name" "$health_type"
+        printf '%s:{"name":%s,"status":"disabled","health_type":%s,"detail":"health check disabled"%s}' \
+          "$(_json_str "$svc")" "$(_json_str "$name")" "$(_json_str "$health_type")" "$(_status_json_extra "$svc" "$project_dir")"
       else
         printf '  %b○%b %s%s %b(disabled)%b\n' "${GRAY}" "${RESET}" "$name" "$_remote_tag" "${DIM}" "${RESET}"
       fi
@@ -145,8 +223,8 @@ cmd_status() {
         _json_first=false
         local _status="unhealthy"
         [[ "$_health_ok" == "true" ]] && _status="healthy"
-        printf '"%s":{"name":"%s","status":"%s","health_type":"%s"}' \
-          "$svc" "$name" "$_status" "$health_type"
+        printf '%s:{"name":%s,"status":"%s","health_type":%s%s}' \
+          "$(_json_str "$svc")" "$(_json_str "$name")" "$_status" "$(_json_str "$health_type")" "$(_status_json_extra "$svc" "$project_dir")"
       else
         if [[ "$_health_ok" == "true" ]]; then
           stop_spinner
@@ -160,8 +238,8 @@ cmd_status() {
       if [[ "$_json_mode" == "true" ]]; then
         $_json_first || printf ','
         _json_first=false
-        printf '"%s":{"name":"%s","status":"no_health_check","health_type":"","detail":"no health hook"}' \
-          "$svc" "$name"
+        printf '%s:{"name":%s,"status":"no_health_check","health_type":"","detail":"no health hook"%s}' \
+          "$(_json_str "$svc")" "$(_json_str "$name")" "$(_status_json_extra "$svc" "$project_dir")"
       else
         printf '  %b○%b %s%s %b(no health check)%b\n' "${GRAY}" "${RESET}" "$name" "$_remote_tag" "${DIM}" "${RESET}"
       fi

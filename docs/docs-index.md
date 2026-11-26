@@ -1,5 +1,9 @@
 # Muster Documentation
 
+## Engine API
+
+- [Engine API](ENGINE-API.md) -- Every `--json` command and event shape (the contract for muster-tui and scripts)
+
 ## Deploy
 
 - [Deploy](deploy/deploy.md) -- Deploy flow, service selection, dry-run, failure recovery, JSON mode

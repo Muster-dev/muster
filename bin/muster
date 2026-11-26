@@ -190,6 +190,7 @@ source "$MUSTER_ROOT/lib/core/colors.sh"
 source "$MUSTER_ROOT/lib/core/logger.sh"
 source "$MUSTER_ROOT/lib/core/utils.sh"
 source "$MUSTER_ROOT/lib/core/config.sh"
+source "$MUSTER_ROOT/lib/core/engine.sh"
 source "$MUSTER_ROOT/lib/core/platform.sh"
 source "$MUSTER_ROOT/lib/core/registry.sh"
 source "$MUSTER_ROOT/lib/core/fleet_config.sh"
@@ -288,6 +289,11 @@ case "${1:-}" in
     shift
     source "$MUSTER_ROOT/lib/commands/rollback.sh"
     cmd_rollback "$@"
+    ;;
+  restart)
+    shift
+    source "$MUSTER_ROOT/lib/commands/restart.sh"
+    cmd_restart "$@"
     ;;
   dev)
     shift
@@ -394,6 +400,7 @@ case "${1:-}" in
     echo "  status      Check service health"
     echo "  logs        Stream service logs"
     echo "  rollback    Revert last deploy"
+    echo "  restart     Restart a service without redeploying (restart <service>)"
     echo "  diff        Show what changed since last deploy (<service> or all)"
     echo "  history     Show deploy/rollback history (--all, <service>)"
     echo "  hooks       List and inspect hook scripts (hooks <svc> <hook>)"

@@ -8,6 +8,7 @@ source "$MUSTER_ROOT/lib/tui/progress.sh"
 source "$MUSTER_ROOT/lib/tui/streambox.sh"
 source "$MUSTER_ROOT/lib/core/credentials.sh"
 source "$MUSTER_ROOT/lib/core/remote.sh"
+source "$MUSTER_ROOT/lib/core/engine.sh"
 source "$MUSTER_ROOT/lib/core/k8s_diag.sh"
 source "$MUSTER_ROOT/lib/core/just_runner.sh"
 source "$MUSTER_ROOT/lib/core/hook_security.sh"
@@ -99,20 +100,31 @@ _deploy_record() {
 }
 
 # Record every service after position $1 (0-based) as skipped — used when a
-# deploy stops early (non-interactive failure, Abort).
+# deploy stops early (non-interactive failure, Abort). With --stop-on-failure
+# they are recorded as "not_run" instead (not an error by themselves).
 # Args: next_index service...
+_DR_STOP_ON_FAILURE=false
 _deploy_record_remaining() {
   local next="$1"; shift
-  local idx=0 svc
+  local idx=0 svc _res="skipped" _is_err="true"
+  if [[ "$_DR_STOP_ON_FAILURE" == "true" ]]; then
+    _res="not_run"; _is_err="false"
+  fi
   for svc in "$@"; do
     if (( idx >= next )); then
       local _rn
       _rn=$(config_get ".services.${svc}.name" 2>/dev/null)
       [[ -z "$_rn" || "$_rn" == "null" ]] && _rn="$svc"
-      _deploy_record "$svc" "$_rn" "skipped" 0 "-" "" "true"
+      _deploy_record "$svc" "$_rn" "$_res" 0 "-" "" "$_is_err"
     fi
     idx=$(( idx + 1 ))
   done
+}
+
+# True when the most recently recorded service should fail the deploy
+_deploy_last_failed() {
+  local n=${#_DR_ERROR[@]}
+  (( n > 0 )) && [[ "${_DR_ERROR[$(( n - 1 ))]}" == "true" ]]
 }
 
 # Format seconds as 41s / 2m05s
@@ -133,13 +145,14 @@ _deploy_fmt_dur() {
 _deploy_summary() {
   local json="$1" project_dir="$2" total_s="$3"
   local n=${#_DR_SVC[@]}
-  local deployed=0 failed=0 skipped=0 rolled=0 errors=0
+  local deployed=0 failed=0 skipped=0 rolled=0 errors=0 not_run=0
   local i=0
   while (( i < n )); do
     case "${_DR_RESULT[$i]}" in
       deployed) deployed=$(( deployed + 1 )) ;;
       failed) failed=$(( failed + 1 )) ;;
       skipped) skipped=$(( skipped + 1 )) ;;
+      not_run) not_run=$(( not_run + 1 )) ;;
       "rolled back") rolled=$(( rolled + 1 )) ;;
     esac
     [[ "${_DR_ERROR[$i]}" == "true" ]] && errors=$(( errors + 1 ))
@@ -153,11 +166,13 @@ _deploy_summary() {
     i=0
     while (( i < n )); do
       [[ "$first" == "true" ]] && first=false || items="${items},"
-      items="${items}{\"service\":\"${_DR_SVC[$i]}\",\"result\":\"${_DR_RESULT[$i]}\",\"duration\":${_DR_DUR[$i]},\"health\":\"${_DR_HEALTH[$i]}\",\"log_file\":\"${_DR_LOG[$i]}\"}"
+      items="${items}{\"service\":$(_json_str "${_DR_SVC[$i]}"),\"name\":$(_json_str "${_DR_NAME[$i]}"),\"result\":$(_json_str "${_DR_RESULT[$i]}"),\"duration\":$(_json_int "${_DR_DUR[$i]}" 0),\"health\":$(_json_str "${_DR_HEALTH[$i]}"),\"log_file\":$(_json_str "${_DR_LOG[$i]}")}"
       i=$(( i + 1 ))
     done
-    printf '{"event":"summary","total":%d,"deployed":%d,"failed":%d,"skipped":%d,"rolled_back":%d,"duration":%d,"exit_code":%d,"services":[%s]}\n' \
-      "$n" "$deployed" "$failed" "$skipped" "$rolled" "$total_s" "$rc" "$items"
+    local _stopped=false
+    (( not_run > 0 )) && _stopped=true
+    printf '{"event":"summary","total":%d,"deployed":%d,"failed":%d,"skipped":%d,"not_run":%d,"rolled_back":%d,"duration":%d,"exit_code":%d,"stopped_early":%s,"services":[%s]}\n' \
+      "$n" "$deployed" "$failed" "$skipped" "$not_run" "$rolled" "$total_s" "$rc" "$_stopped" "$items"
     return $rc
   fi
 
@@ -179,7 +194,7 @@ _deploy_summary() {
     local color="$GREEN" hcolor="$DIM"
     case "${_DR_RESULT[$i]}" in
       failed) color="$RED" ;;
-      skipped|"rolled back") color="$YELLOW" ;;
+      skipped|not_run|"rolled back") color="$YELLOW" ;;
     esac
     case "${_DR_HEALTH[$i]}" in
       healthy) hcolor="$GREEN" ;;
@@ -199,6 +214,7 @@ _deploy_summary() {
   (( failed > 0 )) && parts="${parts}, ${failed} failed"
   (( rolled > 0 )) && parts="${parts}, ${rolled} rolled back"
   (( skipped > 0 )) && parts="${parts}, ${skipped} skipped"
+  (( not_run > 0 )) && parts="${parts}, ${not_run} not run"
 
   if (( rc == 0 )); then
     ok "${parts} in $(_deploy_fmt_dur "$total_s")"
@@ -337,7 +353,9 @@ _deploy_main() {
   local _json_mode=false
   local _force=false
   local _approve_hooks=false
+  local _stop_on_failure=false _from_svc=""
   [[ "${MUSTER_APPROVE_HOOKS:-}" == "1" || "${MUSTER_APPROVE_HOOKS:-}" == "true" ]] && _approve_hooks=true
+  _DR_STOP_ON_FAILURE=false
   _DR_SVC=(); _DR_NAME=(); _DR_RESULT=(); _DR_DUR=(); _DR_HEALTH=(); _DR_LOG=(); _DR_ERROR=()
   local _deploy_t0
   _deploy_t0=$(date +%s)
@@ -355,6 +373,9 @@ _deploy_main() {
         echo "  --dry-run       Preview deploy plan without executing"
         echo "  --force         Override deploy lock if one exists"
         echo "  --json          Output as NDJSON (one JSON object per line)"
+        echo "  --stop-on-failure  Stop at the first failed service; the rest are"
+        echo "                  reported as not_run (no recovery menu)"
+        echo "  --from <service>   Start at this service in deploy order (resume)"
         echo "  --yes           Approve changed/unapproved hooks without review (for CI;"
         echo "                  same as MUSTER_APPROVE_HOOKS=1)"
         echo "  -h, --help      Show this help"
@@ -370,6 +391,8 @@ _deploy_main() {
         echo "  muster deploy api web      Deploy several services, in that order"
         echo "  muster deploy --dry-run    Preview all services"
         echo "  muster deploy --json       Stream deploy events as NDJSON"
+        echo "  muster deploy --json --stop-on-failure   Stop at the first failure"
+        echo "  muster deploy --from web   Resume the deploy from web onwards"
         echo "  muster deploy fleet test   Deploy a fleet group (shortcut for muster group deploy)"
         return 0
         ;;
@@ -377,6 +400,14 @@ _deploy_main() {
       --force) _force=true; shift ;;
       --json) _json_mode=true; shift ;;
       --yes) _approve_hooks=true; shift ;;
+      --stop-on-failure) _stop_on_failure=true; _DR_STOP_ON_FAILURE=true; shift ;;
+      --from)
+        if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+          err "--from needs a service name"
+          return 1
+        fi
+        _from_svc="$2"; shift 2 ;;
+      --from=*) _from_svc="${1#--from=}"; shift ;;
       -*)
         err "Unknown flag: $1"
         echo "Run 'muster deploy --help' for usage."
@@ -602,6 +633,27 @@ _deploy_main() {
     fi
   fi
 
+  # ── --from <svc>: resume from that service in deploy order ──
+  if [[ -n "$_from_svc" ]]; then
+    local _from_list=() _from_hit=false _fsi=0
+    while (( _fsi < ${#services[@]} )); do
+      [[ "${services[$_fsi]}" == "$_from_svc" ]] && _from_hit=true
+      [[ "$_from_hit" == "true" ]] && _from_list[${#_from_list[@]}]="${services[$_fsi]}"
+      _fsi=$(( _fsi + 1 ))
+    done
+    if [[ "$_from_hit" == "false" ]]; then
+      if [[ "$_json_mode" == "true" ]]; then
+        printf '{"event":"error","reason":"unknown_service","message":%s,"service":%s}\n' \
+          "$(_json_str "--from ${_from_svc} is not in this deploy")" "$(_json_str "$_from_svc")"
+      fi
+      err "--from ${_from_svc}: not in this deploy (services: ${services[*]:-none})" >&2
+      [[ "$dry_run" == "false" ]] && { _service_lock_release_all "$project_dir" 2>/dev/null; _deploy_lock_release "$project_dir"; trap - EXIT; trap '_on_sigint' INT; trap - TERM USR2; }
+      _unload_env_file
+      return 1
+    fi
+    services=("${_from_list[@]}")
+  fi
+
   local total=${#services[@]}
   local current=0
 
@@ -628,16 +680,34 @@ _deploy_main() {
       [[ -t 0 ]] && _gate_tty=true
       _hook_trust_gate "$project_dir" "deploy" "$_gate_tty" "$_approve_hooks" "${services[@]}" || { _gate_ok=false; _gate_reason="hooks_not_approved"; }
     fi
+    local _gate_msg=""
     if [[ "$_gate_ok" == "true" ]]; then
       if [[ "$_json_mode" == "true" ]]; then
-        _deploy_preflight "$project_dir" "${services[@]}" >&2 || { _gate_ok=false; _gate_reason="preflight_failed"; }
+        local _pf_out="" _pf_rc=0
+        _pf_out=$(_deploy_preflight "$project_dir" "${services[@]}" 2>&1) || _pf_rc=$?
+        [[ -n "$_pf_out" ]] && printf '%s\n' "$_pf_out" >&2
+        if (( _pf_rc != 0 )); then
+          _gate_ok=false; _gate_reason="preflight_failed"
+          _gate_msg=$(printf '%s\n' "$_pf_out" | sed "s/$(printf '\033')\[[0-9;]*m//g; s/^[[:space:]]*x[[:space:]]*//" | tail -1)
+        fi
       else
         _deploy_preflight "$project_dir" "${services[@]}" || { _gate_ok=false; _gate_reason="preflight_failed"; }
       fi
     fi
     if [[ "$_gate_ok" == "false" ]]; then
       if [[ "$_json_mode" == "true" ]]; then
-        printf '{"event":"error","reason":"%s"}\n' "$_gate_reason"
+        local _gate_extra=""
+        if [[ "$_gate_reason" == "hooks_not_approved" ]]; then
+          _gate_extra=",\"message\":\"Hooks changed or not approved on this machine (muster hooks status --json)\",\"files\":$(_engine_pending_files_json)"
+        elif [[ -n "$_gate_msg" ]]; then
+          _gate_extra=",\"message\":$(_json_str "$_gate_msg")"
+        fi
+        local _gsvcs="" _gs
+        for _gs in "${services[@]}"; do
+          [[ -n "$_gsvcs" ]] && _gsvcs="${_gsvcs},"
+          _gsvcs="${_gsvcs}$(_json_str "$_gs")"
+        done
+        printf '{"event":"error","reason":"%s"%s,"services":[%s]}\n' "$_gate_reason" "$_gate_extra" "$_gsvcs"
         _deploy_record_remaining 0 "${services[@]}"
         _deploy_summary true "$project_dir" "$(( $(date +%s) - _deploy_t0 ))"
       else
@@ -698,6 +768,17 @@ _deploy_main() {
 
   for svc in ${services[@]+"${services[@]}"}; do
     _deploy_check_cancel
+    # --stop-on-failure: the previous service failed — report the rest as not_run
+    if [[ "$_stop_on_failure" == "true" ]] && _deploy_last_failed; then
+      if [[ "$_json_mode" == "true" ]]; then
+        printf '{"event":"stopped","reason":"failure","after":%s,"remaining":%d}\n' \
+          "$(_json_str "${_DR_SVC[$(( ${#_DR_SVC[@]} - 1 ))]}")" "$(( total - current ))"
+      else
+        warn "Stopping after ${_DR_NAME[$(( ${#_DR_NAME[@]} - 1 ))]} failed (--stop-on-failure)"
+      fi
+      _deploy_record_remaining "$current" "${services[@]}"
+      break
+    fi
     (( current++ ))
 
     local name
@@ -734,8 +815,8 @@ _deploy_main() {
       else
         _hook_lines=$(wc -l < "$hook" | tr -d ' ')
       fi
-      printf '{"event":"dry_run","service":"%s","name":"%s","index":%d,"total":%d,"hook":"%s","hook_lines":%s}\n' \
-        "$svc" "$name" "$current" "$total" "$_hook_display" "$_hook_lines"
+      printf '{"event":"dry_run","service":%s,"name":%s,"index":%d,"total":%d,"hook":%s,"hook_lines":%s}\n' \
+        "$(_json_str "$svc")" "$(_json_str "$name")" "$current" "$total" "$(_json_str "$_hook_display")" "$(_json_int "$_hook_lines" 0)"
       continue
 
     elif [[ "$_json_mode" == "true" ]]; then
@@ -771,8 +852,8 @@ _deploy_main() {
       local log_file
       log_file="${log_dir}/${svc}-deploy-$(date +%Y%m%d-%H%M%S).log"
 
-      printf '{"event":"start","service":"%s","name":"%s","index":%d,"total":%d,"log_file":"%s"}\n' \
-        "$svc" "$name" "$current" "$total" "$log_file"
+      printf '{"event":"start","service":%s,"name":%s,"index":%d,"total":%d,"log_file":%s}\n' \
+        "$(_json_str "$svc")" "$(_json_str "$name")" "$current" "$total" "$(_json_str "$log_file")"
 
       # Auto git pull (JSON mode)
       local _gp_enabled=""
@@ -848,9 +929,7 @@ ${_k8s_env_lines}"
         fi
       } | while IFS= read -r _jline; do
         printf '%s\n' "$_jline" >> "$log_file"
-        # Escape backslashes and double quotes for JSON
-        _jline=$(printf '%s' "$_jline" | sed 's/\\/\\\\/g;s/"/\\"/g' | tr -d '\r')
-        printf '{"event":"log","service":"%s","line":"%s"}\n' "$svc" "$_jline"
+        printf '{"event":"log","service":"%s","line":"%s"}\n' "$svc" "$(_json_esc "${_jline//$_JSON_CR/}")"
       done
       _deploy_rc=${PIPESTATUS[0]}
       _deploy_check_cancel
@@ -910,6 +989,8 @@ ${_k8s_env_lines}"
           printf '{"event":"done","service":"%s","status":"failed","exit_code":%d}\n' "$svc" "$_deploy_rc"
         fi
         _history_log_event "$svc" "deploy" "failed" ""
+        # k8s: structured diagnosis (ImagePullBackOff, OOMKilled, …)
+        k8s_diagnose_json "$svc" 2>/dev/null
         export MUSTER_DEPLOY_STATUS="failed"
         run_skill_hooks "post-deploy" "$svc" 2>/dev/null
       fi
@@ -1365,7 +1446,7 @@ ${_k8s_env_lines}"
           run_skill_hooks "post-deploy" "$svc"
 
           _svc_result="failed"
-          if [[ ! -t 0 ]]; then
+          if [[ ! -t 0 || "$_stop_on_failure" == "true" ]]; then
             # Non-interactive: stop here; remaining services are not attempted
             _service_lock_release "$project_dir" "$svc"
             _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "$_svc_log" "true"

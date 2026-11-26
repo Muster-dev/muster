@@ -1093,13 +1093,86 @@ _fleet_cmd_pair() {
 
 # ── list ──
 
+# Machines and groups as one JSON document with the same shape for
+# remotes.json and fleet dirs (docs/ENGINE-API.md)
+_fleet_list_json() {
+  local src="none"
+  if [[ "$FLEET_CONFIG_FILE" == "__fleet_dirs__" ]]; then
+    src="fleet_dirs"
+  elif [[ -n "$FLEET_CONFIG_FILE" ]]; then
+    src="remotes.json"
+  fi
+
+  # Groups first (machine → group lookup for remotes.json)
+  local groups_json="" g m members map=" "
+  if [[ "$src" == "fleet_dirs" ]]; then
+    local fl grp
+    for fl in $(fleets_list); do
+      for grp in $(fleet_cfg_groups "$fl"); do
+        members=""
+        for m in $(fleet_cfg_group_projects "$fl" "$grp"); do
+          [[ -n "$members" ]] && members="${members},"
+          members="${members}$(_json_str "$m")"
+        done
+        [[ -n "$groups_json" ]] && groups_json="${groups_json},"
+        groups_json="${groups_json}{\"name\":$(_json_str "$grp"),\"fleet\":$(_json_str "$fl"),\"machines\":[${members}]}"
+      done
+    done
+  elif [[ "$src" == "remotes.json" ]]; then
+    while IFS= read -r g; do
+      [[ -z "$g" ]] && continue
+      members=""
+      while IFS= read -r m; do
+        [[ -z "$m" ]] && continue
+        [[ -n "$members" ]] && members="${members},"
+        members="${members}$(_json_str "$m")"
+        [[ "$map" != *" ${m}="* ]] && map="${map}${m}=${g} "
+      done < <(fleet_group_machines "$g")
+      [[ -n "$groups_json" ]] && groups_json="${groups_json},"
+      groups_json="${groups_json}{\"name\":$(_json_str "$g"),\"fleet\":\"\",\"machines\":[${members}]}"
+    done < <(fleet_groups)
+  fi
+
+  local machines_json="" fleet group paired
+  if [[ "$src" != "none" ]]; then
+    while IFS= read -r m; do
+      [[ -z "$m" ]] && continue
+      _FP_FLEET="" _FP_GROUP=""
+      _fleet_load_machine "$m"
+      if [[ "$src" == "fleet_dirs" ]]; then
+        fleet="$_FP_FLEET"; group="$_FP_GROUP"
+      else
+        fleet=""; group=""
+        if [[ "$map" == *" ${m}="* ]]; then
+          group="${map#* "${m}"=}"; group="${group%% *}"
+        fi
+      fi
+      paired=false
+      if [[ "$_FM_TRANSPORT" == "cloud" || "$_FM_MODE" != "muster" ]]; then
+        paired=true
+      elif [[ -n "$(fleet_token_get "$m" 2>/dev/null)" ]]; then
+        paired=true
+      fi
+      [[ -n "$machines_json" ]] && machines_json="${machines_json},"
+      machines_json="${machines_json}{\"name\":$(_json_str "$m"),\"host\":$(_json_str "$_FM_HOST"),\"user\":$(_json_str "$_FM_USER"),\"port\":$(_json_int "$_FM_PORT" 22),\"transport\":$(_json_str "${_FM_TRANSPORT:-ssh}"),\"mode\":$(_json_str "$_FM_MODE"),\"hook_mode\":$(_json_str "${_FM_HOOK_MODE:-manual}"),\"project_dir\":$(_json_str "$_FM_PROJECT_DIR"),\"identity_file\":$(_json_str_or_null "$_FM_IDENTITY"),\"fleet\":$(_json_str "$fleet"),\"group\":$(_json_str_or_null "$group"),\"paired\":${paired}}"
+    done < <(fleet_machines)
+  fi
+  printf '{"source":"%s","machines":[%s],"groups":[%s]}\n' "$src" "$machines_json" "$groups_json"
+}
+
 _fleet_cmd_list() {
   local json_mode=false
   [[ "${1:-}" == "--json" ]] && json_mode=true
 
+  if [[ "$json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/engine.sh"
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
+  fi
+
   if ! fleet_load_config; then
     if [[ "$json_mode" == "true" ]]; then
-      printf '{"machines":[],"groups":[]}\n'
+      printf '{"source":"none","machines":[],"groups":[]}\n'
     else
       info "No remotes.json found. Run 'muster fleet init' to get started."
     fi
@@ -1107,21 +1180,7 @@ _fleet_cmd_list() {
   fi
 
   if [[ "$json_mode" == "true" ]]; then
-    if [[ "$FLEET_CONFIG_FILE" == "__fleet_dirs__" ]]; then
-      # Build JSON from fleet dirs
-      printf '{"machines":{'
-      local _jfirst=true
-      while IFS= read -r _jm; do
-        [[ -z "$_jm" ]] && continue
-        _fleet_load_machine "$_jm"
-        [[ "$_jfirst" == "true" ]] && _jfirst=false || printf ','
-        printf '"%s":{"host":"%s","user":"%s","port":%s,"transport":"%s","hook_mode":"%s"}' \
-          "$_jm" "$_FM_HOST" "$_FM_USER" "$_FM_PORT" "$_FM_TRANSPORT" "$_FM_HOOK_MODE"
-      done < <(fleet_machines)
-      printf '}}\n'
-    else
-      jq '.' "$FLEET_CONFIG_FILE"
-    fi
+    _fleet_list_json
     return 0
   fi
 
@@ -1511,7 +1570,17 @@ _fleet_cmd_status() {
     esac
   done
 
+  if [[ "$json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/engine.sh"
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
+  fi
+
   if ! fleet_load_config; then
+    if [[ "$json_mode" == "true" ]]; then
+      printf '{"status":[]}\n'
+      return 0
+    fi
     err "No remotes.json found"
     return 1
   fi
@@ -1590,7 +1659,7 @@ _fleet_cmd_status() {
           if printf '%s' "$remote_status" | jq -e '.services' &>/dev/null; then
             local svc_count healthy_count
             svc_count=$(printf '%s' "$remote_status" | jq '.services | length')
-            healthy_count=$(printf '%s' "$remote_status" | jq '[.services[] | select(.healthy == true)] | length')
+            healthy_count=$(printf '%s' "$remote_status" | jq '[.services[] | select(.status == "healthy")] | length')
             status_icon="●"; status_color="$GREEN"
             tag=" ${healthy_count}/${svc_count} healthy"
           else
@@ -1640,18 +1709,46 @@ _fleet_cmd_status() {
   echo ""
 }
 
+# {"status":[{machine, host, user, port, transport, mode, reachable,
+#   services:[…]|null, healthy, total, error}]} — services come from the
+# machine's own `muster status --json` (muster mode, paired or cloud)
 _fleet_status_json() {
-  printf '['
-  local first=true
+  local out="" machine
   for machine in "$@"; do
-    [[ "$first" == "true" ]] && first=false || printf ','
+    [[ -z "$machine" ]] && continue
     _fleet_load_machine "$machine"
-    local reachable=false
-    fleet_check "$machine" && reachable=true
-    printf '{"machine":"%s","host":"%s","port":%s,"mode":"%s","reachable":%s}' \
-      "$machine" "$_FM_HOST" "$_FM_PORT" "$_FM_MODE" "$reachable"
+    local reachable=false services="null" healthy="null" total="null" error=""
+    if fleet_check "$machine" >/dev/null 2>&1; then
+      reachable=true
+      local remote_status=""
+      if [[ "$_FM_MODE" == "muster" ]]; then
+        if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+          source "$MUSTER_ROOT/lib/core/cloud.sh"
+          remote_status=$(_cloud_status_json "$(_fleet_cloud_agent "$machine")" "$_FM_PROJECT_DIR" 2>/dev/null) || error="no status from agent"
+        else
+          local token
+          token=$(fleet_token_get "$machine")
+          if [[ -n "$token" ]]; then
+            remote_status=$(fleet_exec "$machine" "MUSTER_TOKEN=${token} muster status --json" 2>/dev/null | sed -n '/^{/,$p')
+          else
+            error="unpaired"
+          fi
+        fi
+      fi
+      if [[ -n "$remote_status" ]] && has_cmd jq && printf '%s' "$remote_status" | jq -e '.services' >/dev/null 2>&1; then
+        services=$(printf '%s' "$remote_status" | jq -c '[.services | to_entries[] | {service: .key} + .value]')
+        total=$(printf '%s' "$remote_status" | jq '.services | length')
+        healthy=$(printf '%s' "$remote_status" | jq '[.services[] | select(.status == "healthy")] | length')
+      elif [[ "$_FM_MODE" == "muster" && -z "$error" ]]; then
+        error="no status"
+      fi
+    else
+      error="unreachable"
+    fi
+    [[ -n "$out" ]] && out="${out},"
+    out="${out}{\"machine\":$(_json_str "$machine"),\"host\":$(_json_str "$_FM_HOST"),\"user\":$(_json_str "$_FM_USER"),\"port\":$(_json_int "$_FM_PORT" 22),\"transport\":$(_json_str "${_FM_TRANSPORT:-ssh}"),\"mode\":$(_json_str "$_FM_MODE"),\"reachable\":${reachable},\"services\":${services},\"healthy\":${healthy},\"total\":${total},\"error\":$(_json_str_or_null "$error")}"
   done
-  printf ']\n'
+  printf '{"status":[%s]}\n' "$out"
 }
 
 # ── fleet skill management ──

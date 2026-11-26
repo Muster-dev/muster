@@ -1170,6 +1170,7 @@ cmd_setup() {
   # ── Parse flags ──
   local flag_path="" flag_scan="false" flag_stack="" flag_services=""
   local flag_order="" flag_name="" flag_force="false" flag_namespace=""
+  local flag_dry_run="false" flag_json="false"
   _FLAG_HEALTH=()
   _FLAG_CREDS=()
   _FLAG_REMOTE=()
@@ -1203,6 +1204,10 @@ cmd_setup() {
         flag_namespace="$2"; shift 2 ;;
       --force|-f)
         flag_force="true"; shift ;;
+      --dry-run)
+        flag_dry_run="true"; shift ;;
+      --json)
+        flag_json="true"; shift ;;
       --help|-h)
         echo "Usage: muster setup [flags]"
         echo ""
@@ -1221,6 +1226,8 @@ cmd_setup() {
         echo "  --namespace <ns>      Kubernetes namespace (default: default)"
         echo "  --name, -n <name>     Project name (default: directory basename)"
         echo "  --force, -f           Overwrite existing muster.json without prompting"
+        echo "  --dry-run             With --scan: show what setup would configure, write nothing"
+        echo "  --json                With --scan --dry-run: print the preview as JSON"
         echo ""
         echo "Health spec examples:"
         echo "  --health api=http:/health:8080"
@@ -1245,6 +1252,7 @@ cmd_setup() {
         echo "  muster setup --path /app --scan"
         echo "  muster setup --stack k8s --services api,redis --name myapp"
         echo "  muster setup --scan --health api=http:/health:3000 --name myapp"
+        echo "  muster setup --scan --dry-run --json    Preview detected services as JSON"
         return 0
         ;;
       *)
@@ -1254,6 +1262,13 @@ cmd_setup() {
         ;;
     esac
   done
+
+  # Scan preview: run the scanner, report, write nothing
+  if [[ "$flag_dry_run" == "true" || "$flag_json" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/commands/setup_scan.sh"
+    _setup_scan_preview "${flag_path:-.}" "$flag_stack" "$flag_namespace" "$flag_name" "$flag_force" "$flag_json"
+    return $?
+  fi
 
   # If flags were provided, run non-interactive
   if [[ "$has_flags" == "true" ]]; then

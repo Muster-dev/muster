@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # muster/lib/commands/doctor.sh — Comprehensive project diagnostics
 
+source "$MUSTER_ROOT/lib/core/engine.sh"
+
 cmd_doctor() {
   local fix=false
   local _json_mode=false
@@ -67,13 +69,18 @@ cmd_doctor() {
   _JSON_FILE=$(mktemp 2>/dev/null || echo "/tmp/muster-doc-json-$$")
   printf '' > "$_JSON_FILE"
 
+  # Args: name status category [fix] — fix: what `doctor --fix` would do
+  # (marks the check fixable)
   _doc_json_add() {
-    local _name="$1" _status="$2" _cat="$3"
-    # Escape quotes in name
-    _name="${_name//\"/\\\"}"
-    local _sep=""
+    local _name="$1" _status="$2" _cat="$3" _fix="${4:-}"
+    local _sep="" _fixable=false _fix_json="null"
     [[ -s "$_JSON_FILE" ]] && _sep=","
-    printf '%s{"name":"%s","status":"%s","category":"%s"}' "$_sep" "$_name" "$_status" "$_cat" >> "$_JSON_FILE"
+    if [[ -n "$_fix" && "$_status" != "pass" ]]; then
+      _fixable=true
+      _fix_json=$(_json_str "$_fix")
+    fi
+    printf '%s{"name":%s,"status":"%s","category":%s,"fixable":%s,"fix":%s}' \
+      "$_sep" "$(_json_str "$_name")" "$_status" "$(_json_str "$_cat")" "$_fixable" "$_fix_json" >> "$_JSON_FILE"
   }
 
   # Current category for JSON tagging
@@ -92,7 +99,7 @@ cmd_doctor() {
   _doc_warn() {
     _doc_bump warn
     if [[ "$_json_mode" == "true" ]]; then
-      _doc_json_add "$1" "warn" "$_DOC_CAT"
+      _doc_json_add "$1" "warn" "$_DOC_CAT" "${2:-}"
     elif [[ "$MUSTER_MINIMAL" == "true" ]]; then
       printf 'WARN: %s\n' "$1"
     else
@@ -102,7 +109,7 @@ cmd_doctor() {
   _doc_fail() {
     _doc_bump fail
     if [[ "$_json_mode" == "true" ]]; then
-      _doc_json_add "$1" "fail" "$_DOC_CAT"
+      _doc_json_add "$1" "fail" "$_DOC_CAT" "${2:-}"
     elif [[ "$MUSTER_MINIMAL" == "true" ]]; then
       printf 'FAIL: %s\n' "$1"
     else
@@ -325,7 +332,7 @@ $(cat "$_hf" 2>/dev/null)"
       _doc_warn "${_missing_hooks} hook script(s) missing"
     fi
     if (( _not_exec > 0 )); then
-      _doc_fail "${_not_exec} hook scripts not executable (--fix)"
+      _doc_fail "${_not_exec} hook scripts not executable (--fix)" "chmod +x the hook scripts"
     elif (( _fixed_exec > 0 )); then
       _doc_pass "Fixed ${_fixed_exec} hook scripts (chmod +x)"
     elif (( _missing_dirs == 0 && _missing_hooks == 0 )); then
@@ -897,7 +904,7 @@ $(cat "$_hf" 2>/dev/null)"
       if (( _removed_pids > 0 )); then
         _doc_pass "Removed ${_removed_pids} stale PID files"
       elif (( _stale_pids > 0 )); then
-        _doc_warn "${_stale_pids} stale PID files (--fix to remove)"
+        _doc_warn "${_stale_pids} stale PID files (--fix to remove)" "remove PID files of processes that are no longer running"
       else
         _doc_pass "No stale PID files"
       fi
@@ -926,7 +933,7 @@ $(cat "$_hf" 2>/dev/null)"
           find "$_log_dir" -name "*.log" -mtime +"$_retention" -delete 2>/dev/null
           _doc_pass "Removed ${_old_logs} old log files (>${_retention} days)"
         else
-          _doc_warn "${_old_logs} log files older than ${_retention} days (--fix)"
+          _doc_warn "${_old_logs} log files older than ${_retention} days (--fix)" "delete log files older than ${_retention} days"
         fi
       else
         _doc_pass "No old log files"
@@ -938,7 +945,7 @@ $(cat "$_hf" 2>/dev/null)"
 
     if (( ${#_BUILD_CONTEXT_ISSUES[@]} > 0 )); then
       local _bc_count=${#_BUILD_CONTEXT_ISSUES[@]}
-      _doc_warn "Build context overlap (${_bc_count} issue$( (( _bc_count > 1 )) && echo s))"
+      _doc_warn "Build context overlap (${_bc_count} issue$( (( _bc_count > 1 )) && echo s))" "add the nested service directories to .dockerignore"
 
       if [[ "$_json_mode" == "false" && "$MUSTER_MINIMAL" != "true" ]]; then
         local _bi=0
@@ -1026,8 +1033,10 @@ $(cat "$_hf" 2>/dev/null)"
   if [[ "$_json_mode" == "true" ]]; then
     local _json_checks_str
     _json_checks_str=$(cat "$_JSON_FILE")
-    printf '{"pass":%d,"warnings":%d,"failures":%d,"checks":[%s]}\n' \
-      "$_p" "$_w" "$_f" "$_json_checks_str"
+    local _fixable_n
+    _fixable_n=$(printf '%s' "$_json_checks_str" | grep -o '"fixable":true' | wc -l | tr -d ' ')
+    printf '{"pass":%d,"warnings":%d,"failures":%d,"fixable":%d,"checks":[%s]}\n' \
+      "$_p" "$_w" "$_f" "${_fixable_n:-0}" "$_json_checks_str"
   elif [[ "$MUSTER_MINIMAL" == "true" ]]; then
     printf '%d passed, %d warnings, %d failures\n' "$_p" "$_w" "$_f"
   else
