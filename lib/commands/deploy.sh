@@ -328,10 +328,13 @@ _deploy_main() {
   _DR_SVC=(); _DR_NAME=(); _DR_RESULT=(); _DR_DUR=(); _DR_HEALTH=(); _DR_LOG=(); _DR_ERROR=()
   local _deploy_t0
   _deploy_t0=$(date +%s)
-  while [[ "${1:-}" == --* ]]; do
+  # Flags and service names may come in any order:
+  #   muster deploy api web --dry-run
+  local _targets=()
+  while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo "Usage: muster deploy [flags] [service]"
+        echo "Usage: muster deploy [flags] [service...]"
         echo ""
         echo "Deploy services. Without a service name, choose interactively."
         echo ""
@@ -351,6 +354,7 @@ _deploy_main() {
         echo "Examples:"
         echo "  muster deploy              Interactive: pick all or select services"
         echo "  muster deploy api          Deploy just the api service"
+        echo "  muster deploy api web      Deploy several services, in that order"
         echo "  muster deploy --dry-run    Preview all services"
         echo "  muster deploy --json       Stream deploy events as NDJSON"
         echo "  muster deploy fleet test   Deploy a fleet group (shortcut for muster group deploy)"
@@ -360,13 +364,15 @@ _deploy_main() {
       --force) _force=true; shift ;;
       --json) _json_mode=true; shift ;;
       --yes) _approve_hooks=true; shift ;;
-      *)
+      -*)
         err "Unknown flag: $1"
         echo "Run 'muster deploy --help' for usage."
         return 1
         ;;
+      *) _targets[${#_targets[@]}]="$1"; shift ;;
     esac
   done
+  set -- "${_targets[@]+"${_targets[@]}"}"
 
   # Redirect: muster deploy fleet <name> → muster group deploy <name>
   if [[ "${1:-}" == "fleet" ]]; then
@@ -380,7 +386,20 @@ _deploy_main() {
   _load_env_file
   source "$MUSTER_ROOT/lib/core/build_context.sh"
 
-  local target="${1:-all}"
+  local target="all"
+  [[ $# -gt 0 ]] && target="selected"
+  if [[ $# -gt 0 ]]; then
+    local _known_early _te
+    _known_early=" $(config_services | tr '\n' ' ') "
+    for _te in "$@"; do
+      if [[ "$_known_early" != *" ${_te} "* ]]; then
+        err "Unknown service: ${_te}"
+        printf '  %bServices in this project:%b %s\n' "$DIM" "$RESET" "$(config_services | tr '\n' ' ')"
+        _unload_env_file
+        return 1
+      fi
+    done
+  fi
   local project_dir
   project_dir="$(dirname "$CONFIG_FILE")"
   local log_dir="${project_dir}/.muster/logs"
@@ -509,7 +528,18 @@ _deploy_main() {
       done
     fi
   else
-    services[0]="$target"
+    # Explicit services, in the order given; reject unknown names up front
+    local _known _t
+    _known=" $(config_services | tr '\n' ' ') "
+    for _t in "$@"; do
+      if [[ "$_known" != *" ${_t} "* ]]; then
+        err "Unknown service: ${_t}"
+        printf '  %bServices in this project:%b %s\n' "$DIM" "$RESET" "$(config_services | tr '\n' ' ')"
+        _unload_env_file
+        return 1
+      fi
+      services[${#services[@]}]="$_t"
+    done
   fi
 
   # ── Check for deploy_phases (phased parallel deploy) ──
