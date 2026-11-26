@@ -1246,26 +1246,21 @@ _group_cmd_deploy() {
         if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
           _groups_load_ssh_password
         fi
-        local _pk_remote_svcs=""
+        local _pk_remote_svcs="" _pk_keys=""
         if [[ "$_GP_CLOUD" == "true" ]]; then
           # Cloud: `muster status --json` as plain argv (agent's project dir
           # when none is configured)
           source "$MUSTER_ROOT/lib/core/cloud.sh"
           _groups_cloud_config
           _pk_remote_svcs=$(_cloud_status_json "$_GP_HOST" "$_GP_PROJECT_DIR") || true
-        else
-          local _pk_cmd="MUSTER_NO_VERIFY=true muster status --json 2>/dev/null"
-          if [[ -n "$_GP_PROJECT_DIR" ]]; then
-            local _pk_edir
-            printf -v _pk_edir '%q' "$_GP_PROJECT_DIR"
-            _pk_cmd="cd ${_pk_edir} && ${_pk_cmd}"
+          if [[ -n "$_pk_remote_svcs" ]] && printf '%s' "$_pk_remote_svcs" | jq -e '.services' &>/dev/null; then
+            _pk_keys=$(printf '%s' "$_pk_remote_svcs" | jq -r '.services | keys[]' 2>/dev/null)
           fi
-          _pk_remote_svcs=$(groups_remote_exec "$group_name" "$_pi" "$_pk_cmd" 2>/dev/null) || true
+        else
+          _pk_keys=$(_group_ssh_picker_services "$group_name" "$_pi") || true
         fi
 
-        if [[ -n "$_pk_remote_svcs" ]] && printf '%s' "$_pk_remote_svcs" | jq -e '.services' &>/dev/null; then
-          local _pk_keys=""
-          _pk_keys=$(printf '%s' "$_pk_remote_svcs" | jq -r '.services | keys[]' 2>/dev/null)
+        if [[ -n "$_pk_keys" ]]; then
           local _pk_s
           while IFS= read -r _pk_s; do
             [[ -z "$_pk_s" ]] && continue
@@ -2085,6 +2080,305 @@ _group_build_svc_filter() {
   done
 }
 
+# ── SSH status & remote project-dir helpers ──
+
+# Look up a stored fleet auth token for user@host:port (reuses fleet pairing).
+_group_ssh_token_get() {
+  local user="$1" host="$2" port="${3:-22}"
+  local tok_file="$HOME/.muster/tokens/fleet.json"
+  [[ ! -f "$tok_file" && -f "$HOME/.muster/fleet-tokens.json" ]] && tok_file="$HOME/.muster/fleet-tokens.json"
+  [[ -f "$tok_file" ]] || return 0
+  has_cmd jq || return 0
+  local key="${user}@${host}:${port}"
+  local val
+  val=$(jq -r --arg k "$key" '.tokens[$k] // ""' "$tok_file" 2>/dev/null)
+  [[ -n "$val" && "$val" != "null" ]] && printf '%s' "$val"
+}
+
+# Convert `muster --minimal` plain-text dashboard output into `muster status --json`
+# shape so unpaired SSH remotes (and local projects without MUSTER_TOKEN) still report
+# per-service health without bypassing the JSON auth gate.
+_group_parse_minimal_status() {
+  local raw="$1"
+  [[ -n "$raw" ]] || return 1
+  has_cmd jq || return 1
+
+  local proj="" svcs_json="{}" line count=0
+  while IFS= read -r line; do
+    case "$line" in
+      "muster: "*" services ("*)
+        continue
+        ;;
+      "muster: no project found"*)
+        return 1
+        ;;
+      "muster: "*)
+        proj="${line#muster: }"
+        ;;
+      "  "*)
+        local trimmed="${line#  }"
+        if [[ "$trimmed" == *": "* ]]; then
+          local sname="${trimmed%%: *}"
+          local sstate="${trimmed#*: }"
+          sstate="${sstate%% *}"
+          svcs_json=$(printf '%s' "$svcs_json" | jq -c \
+            --arg k "$sname" --arg n "$sname" --arg st "$sstate" \
+            '.[$k] = {name: $n, status: $st}')
+          count=$(( count + 1 ))
+        fi
+        ;;
+    esac
+  done <<< "$raw"
+
+  (( count > 0 )) || return 1
+  jq -cn --arg p "$proj" --argjson s "$svcs_json" '{project: $p, services: $s}'
+}
+
+# Fetch status JSON for an SSH remote group project.
+# Uses MUSTER_TOKEN from ~/.muster/tokens/fleet.json when paired; falls back to
+# `muster --minimal` (no auth gate) parsed into the same JSON structure.
+# Requires _groups_load_remote to have populated _GP_* vars.
+_group_ssh_status_json() {
+  local group_name="$1" index="$2"
+  local _cd_prefix=""
+  if [[ -n "$_GP_PROJECT_DIR" ]]; then
+    local _edir
+    printf -v _edir '%q' "$_GP_PROJECT_DIR"
+    _cd_prefix="cd ${_edir} && "
+  fi
+
+  local _tok=""
+  _tok=$(_group_ssh_token_get "$_GP_USER" "$_GP_HOST" "$_GP_PORT")
+  if [[ -n "$_tok" ]]; then
+    local _q_tok _res=""
+    printf -v _q_tok '%q' "$_tok"
+    _res=$(groups_remote_exec "$group_name" "$index" \
+      "${_cd_prefix}MUSTER_TOKEN=${_q_tok} MUSTER_NO_VERIFY=true muster status --json 2>/dev/null" 2>/dev/null) || true
+    if [[ -n "$_res" ]] && printf '%s' "$_res" | jq -e '.services' &>/dev/null; then
+      printf '%s\n' "$_res"
+      return 0
+    fi
+  fi
+
+  # Unpaired fallback: plain-text `muster --minimal` (no JSON auth gate)
+  local _min=""
+  _min=$(groups_remote_exec "$group_name" "$index" \
+    "${_cd_prefix}MUSTER_NO_VERIFY=true muster --minimal 2>/dev/null" 2>/dev/null) || true
+  _group_parse_minimal_status "$_min"
+}
+
+# Fetch deployable service keys for an SSH remote in the group service picker.
+# Prefers authenticated `muster status --json` (exact service keys), falling back
+# to reading remote muster.json/deploy.json or parsing `muster --minimal`.
+_group_ssh_picker_services() {
+  local group_name="$1" index="$2"
+  local _cd_prefix=""
+  if [[ -n "$_GP_PROJECT_DIR" ]]; then
+    local _edir
+    printf -v _edir '%q' "$_GP_PROJECT_DIR"
+    _cd_prefix="cd ${_edir} && "
+  fi
+
+  local _tok=""
+  _tok=$(_group_ssh_token_get "$_GP_USER" "$_GP_HOST" "$_GP_PORT")
+  if [[ -n "$_tok" ]]; then
+    local _q_tok _res=""
+    printf -v _q_tok '%q' "$_tok"
+    _res=$(groups_remote_exec "$group_name" "$index" \
+      "${_cd_prefix}MUSTER_TOKEN=${_q_tok} MUSTER_NO_VERIFY=true muster status --json 2>/dev/null" 2>/dev/null) || true
+    if [[ -n "$_res" ]] && printf '%s' "$_res" | jq -e '.services' &>/dev/null; then
+      printf '%s' "$_res" | jq -r '.services | keys[]' 2>/dev/null
+      return 0
+    fi
+  fi
+
+  # Fallback 1: read service keys directly from remote muster.json / deploy.json
+  local _cfg_cmd
+  _cfg_cmd='cfg=""; [ -f muster.json ] && cfg=muster.json; [ -z "$cfg" ] && [ -f deploy.json ] && cfg=deploy.json; [ -n "$cfg" ] && command -v jq >/dev/null 2>&1 && jq -r "(.deploy_order // (.services | keys))[] as \$k | select(.services[\$k].skip_deploy != true) | \$k" "$cfg" 2>/dev/null'
+  local _keys=""
+  _keys=$(groups_remote_exec "$group_name" "$index" "${_cd_prefix}${_cfg_cmd}" 2>/dev/null) || true
+  if [[ -n "$_keys" ]]; then
+    printf '%s\n' "$_keys"
+    return 0
+  fi
+
+  # Fallback 2: parse `muster --minimal`
+  local _min="" _parsed=""
+  _min=$(groups_remote_exec "$group_name" "$index" \
+    "${_cd_prefix}MUSTER_NO_VERIFY=true muster --minimal 2>/dev/null" 2>/dev/null) || true
+  _parsed=$(_group_parse_minimal_status "$_min" 2>/dev/null) || true
+  if [[ -n "$_parsed" ]] && printf '%s' "$_parsed" | jq -e '.services' &>/dev/null; then
+    printf '%s' "$_parsed" | jq -r '.services | keys[]' 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
+# Find all muster.json / deploy.json candidates under ~ (maxdepth 3) on remote.
+# Emits "<dir>\t<project>\t<filename>" lines.
+_group_find_remote_projects() {
+  local group_name="$1" index="$2"
+  local _find_cmd
+  _find_cmd='find ~ -maxdepth 3 \( -name "muster.json" -o -name "deploy.json" \) 2>/dev/null | sort | while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  d=$(dirname "$f")
+  p=""
+  if command -v jq >/dev/null 2>&1; then
+    p=$(jq -r ".project // \"\"" "$f" 2>/dev/null)
+  elif command -v python3 >/dev/null 2>&1; then
+    p=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"project\",\"\"))" "$f" 2>/dev/null)
+  fi
+  printf "%s\t%s\t%s\n" "$d" "$p" "$(basename "$f")"
+done'
+  groups_remote_exec "$group_name" "$index" "$_find_cmd" 2>/dev/null || true
+}
+
+# Select a remote project directory from "<dir>\t<project>[\t<filename>]" lines.
+# Sets _GROUP_DETECTED_DIR on success, or _GROUP_DETECT_ERR on failure.
+# Prefers a unique match whose .project equals local_project; if several or none
+# match, asks via menu_select on a TTY or fails listing candidates on non-TTY.
+_GROUP_DETECTED_DIR=""
+_GROUP_DETECT_ERR=""
+_group_select_remote_project_dir() {
+  local local_project="$1" candidates="$2" remote_label="$3"
+  _GROUP_DETECTED_DIR=""
+  _GROUP_DETECT_ERR=""
+
+  local _dirs=() _projs=() _files=()
+  local _line _tab=$'\t'
+  while IFS= read -r _line; do
+    [[ -z "$_line" ]] && continue
+    local _d _rest _p _fn=""
+    _d="${_line%%${_tab}*}"
+    [[ -z "$_d" || "$_d" == "." ]] && continue
+    if [[ "$_line" == *"${_tab}"* ]]; then
+      _rest="${_line#*${_tab}}"
+      if [[ "$_rest" == *"${_tab}"* ]]; then
+        _p="${_rest%%${_tab}*}"
+        _fn="${_rest#*${_tab}}"
+      else
+        _p="$_rest"
+      fi
+    else
+      _p=""
+    fi
+
+    # Deduplicate by directory, preferring muster.json over deploy.json
+    local _existing=-1 _idx=0
+    while (( _idx < ${#_dirs[@]} )); do
+      if [[ "${_dirs[$_idx]}" == "$_d" ]]; then
+        _existing=$_idx
+        break
+      fi
+      _idx=$(( _idx + 1 ))
+    done
+    if (( _existing >= 0 )); then
+      if [[ "$_fn" == "muster.json" || "${_files[$_existing]}" != "muster.json" ]]; then
+        _projs[$_existing]="$_p"
+        _files[$_existing]="$_fn"
+      fi
+    else
+      local _n=${#_dirs[@]}
+      _dirs[$_n]="$_d"
+      _projs[$_n]="$_p"
+      _files[$_n]="$_fn"
+    fi
+  done <<< "$candidates"
+
+  local _total=${#_dirs[@]}
+  if (( _total == 0 )); then
+    _GROUP_DETECT_ERR="No muster project found on ${remote_label} — set remote path via Edit or run muster setup on remote"
+    return 1
+  fi
+
+  # Collect candidates matching local_project (if known)
+  local _pick_dirs=() _pick_labels=()
+  local _reason=""
+  if [[ -n "$local_project" ]]; then
+    local _match_dirs=() _match_labels=()
+    local _i=0
+    while (( _i < _total )); do
+      if [[ "${_projs[$_i]}" == "$local_project" ]]; then
+        _match_dirs[${#_match_dirs[@]}]="${_dirs[$_i]}"
+        _match_labels[${#_match_labels[@]}]="${_dirs[$_i]} (${_projs[$_i]})"
+      fi
+      _i=$(( _i + 1 ))
+    done
+
+    if (( ${#_match_dirs[@]} == 1 )); then
+      _GROUP_DETECTED_DIR="${_match_dirs[0]}"
+      return 0
+    elif (( ${#_match_dirs[@]} > 1 )); then
+      _reason="Multiple remote projects named '${local_project}' found on ${remote_label}"
+      local _mi=0
+      while (( _mi < ${#_match_dirs[@]} )); do
+        _pick_dirs[${#_pick_dirs[@]}]="${_match_dirs[$_mi]}"
+        _pick_labels[${#_pick_labels[@]}]="${_match_labels[$_mi]}"
+        _mi=$(( _mi + 1 ))
+      done
+    else
+      _reason="No remote project matching '${local_project}' found on ${remote_label}"
+      local _ai=0
+      while (( _ai < _total )); do
+        _pick_dirs[${#_pick_dirs[@]}]="${_dirs[$_ai]}"
+        local _lbl="${_dirs[$_ai]}"
+        [[ -n "${_projs[$_ai]}" ]] && _lbl="${_lbl} (${_projs[$_ai]})"
+        _pick_labels[${#_pick_labels[@]}]="$_lbl"
+        _ai=$(( _ai + 1 ))
+      done
+    fi
+  else
+    if (( _total == 1 )); then
+      _GROUP_DETECTED_DIR="${_dirs[0]}"
+      return 0
+    fi
+    _reason="Multiple muster projects found on ${remote_label}"
+    local _ai=0
+    while (( _ai < _total )); do
+      _pick_dirs[${#_pick_dirs[@]}]="${_dirs[$_ai]}"
+      local _lbl="${_dirs[$_ai]}"
+      [[ -n "${_projs[$_ai]}" ]] && _lbl="${_lbl} (${_projs[$_ai]})"
+      _pick_labels[${#_pick_labels[@]}]="$_lbl"
+      _ai=$(( _ai + 1 ))
+    done
+  fi
+
+  # Ambiguous or no match: ask on TTY, fail listing candidates on non-TTY
+  if [[ -t 0 ]]; then
+    local _menu_opts=() _oi=0
+    while (( _oi < ${#_pick_labels[@]} )); do
+      _menu_opts[${#_menu_opts[@]}]="${_pick_labels[$_oi]}"
+      _oi=$(( _oi + 1 ))
+    done
+    _menu_opts[${#_menu_opts[@]}]="Cancel"
+    menu_select "${_reason} — select project directory:" "${_menu_opts[@]}"
+    if [[ "$MENU_RESULT" == "Cancel" || "$MENU_RESULT" == "__back__" || -z "$MENU_RESULT" ]]; then
+      _GROUP_DETECT_ERR="Remote project directory selection cancelled"
+      return 1
+    fi
+    _oi=0
+    while (( _oi < ${#_pick_labels[@]} )); do
+      if [[ "${_pick_labels[$_oi]}" == "$MENU_RESULT" ]]; then
+        _GROUP_DETECTED_DIR="${_pick_dirs[$_oi]}"
+        return 0
+      fi
+      _oi=$(( _oi + 1 ))
+    done
+    _GROUP_DETECT_ERR="Remote project directory selection cancelled"
+    return 1
+  else
+    local _list="" _ci=0
+    while (( _ci < ${#_pick_labels[@]} )); do
+      _list="${_list}
+  - ${_pick_labels[$_ci]}"
+      _ci=$(( _ci + 1 ))
+    done
+    _GROUP_DETECT_ERR="${_reason}. Candidates found:${_list}
+Set remote_path explicitly (muster group edit / --path) to choose one."
+    return 1
+  fi
+}
+
 _group_deploy_remote() {
   local group_name="$1" index="$2" log_file="$3"
   _groups_load_remote "$group_name" "$index"
@@ -2101,21 +2395,26 @@ _group_deploy_remote() {
 
   # Auto-detect project directory if not set (manual mode)
   if [[ -z "$_GP_PROJECT_DIR" ]]; then
-    local _detected_dir
-    _detected_dir=$(groups_remote_exec "$group_name" "$index" \
-      "find ~ -maxdepth 3 -name 'muster.json' -o -name 'deploy.json' 2>/dev/null | head -1 | xargs dirname 2>/dev/null" 2>/dev/null) || true
-    if [[ -n "$_detected_dir" && "$_detected_dir" != "." ]]; then
-      _GP_PROJECT_DIR="$_detected_dir"
+    local _local_proj="" _local_cfg="${CONFIG_FILE:-}"
+    [[ -z "$_local_cfg" ]] && _local_cfg=$(find_config 2>/dev/null || true)
+    if [[ -n "$_local_cfg" && -f "$_local_cfg" ]] && has_cmd jq; then
+      _local_proj=$(jq -r '.project // ""' "$_local_cfg" 2>/dev/null || true)
+    fi
+
+    local _remote_candidates=""
+    _remote_candidates=$(_group_find_remote_projects "$group_name" "$index")
+    if _group_select_remote_project_dir "$_local_proj" "$_remote_candidates" "${_GP_USER}@${_GP_HOST}"; then
+      _GP_PROJECT_DIR="$_GROUP_DETECTED_DIR"
       # Save to config so we don't detect again
       _group_load_project_at "$group_name" "$index"
       local _pdir
       _pdir="$(fleet_cfg_project_dir "$_FP_FLEET" "$_FP_GROUP" "$_FP_PROJECT")/project.json"
       if [[ -f "$_pdir" ]]; then
         local _tmp="${_pdir}.tmp"
-        jq --arg d "$_detected_dir" '.remote_path = $d' "$_pdir" > "$_tmp" && mv "$_tmp" "$_pdir"
+        jq --arg d "$_GROUP_DETECTED_DIR" '.remote_path = $d' "$_pdir" > "$_tmp" && mv "$_tmp" "$_pdir"
       fi
     elif [[ "$_FP_HOOK_MODE" != "sync" ]]; then
-      printf 'No muster project found on %s@%s — set remote path via Edit or run muster setup on remote\n' "$_GP_USER" "$_GP_HOST" > "$log_file"
+      printf '%s\n' "$_GROUP_DETECT_ERR" > "$log_file"
       return 1
     fi
   fi
@@ -2443,7 +2742,12 @@ _group_cmd_status() {
         _icon="●"; _color="${RED}"; _tag="missing"
       else
         local _muster_bin="${MUSTER_ROOT}/bin/muster"
-        _result=$(cd "$_path" && "$_muster_bin" status --json 2>/dev/null) || true
+        _result=$(cd "$_path" && "$_muster_bin" --no-verify status --json 2>/dev/null) || true
+        if [[ -z "$_result" ]] || ! printf '%s' "$_result" | jq -e '.services' &>/dev/null; then
+          local _local_min=""
+          _local_min=$(cd "$_path" && "$_muster_bin" --no-verify --minimal 2>/dev/null) || true
+          _result=$(_group_parse_minimal_status "$_local_min" 2>/dev/null) || true
+        fi
       fi
     else
       # Remote: check connectivity then muster status (via transport dispatch)
@@ -2453,20 +2757,13 @@ _group_cmd_status() {
       fi
 
       if groups_remote_check "$group_name" "$i"; then
-        local cmd="export MUSTER_NO_VERIFY=true; muster status --json"
         if [[ "$_GP_CLOUD" == "true" ]]; then
           # Cloud: plain-argv `muster status --json --no-verify` with --cwd
           source "$MUSTER_ROOT/lib/core/cloud.sh"
           _groups_cloud_config
           _result=$(_cloud_status_json "$_GP_HOST" "$_GP_PROJECT_DIR") || true
         else
-          # SSH: prepend cd for project dir
-          if [[ -n "$_GP_PROJECT_DIR" ]]; then
-            local _escaped_dir
-            printf -v _escaped_dir '%q' "$_GP_PROJECT_DIR"
-            cmd="cd ${_escaped_dir} && ${cmd}"
-          fi
-          _result=$(groups_remote_exec "$group_name" "$i" "$cmd" 2>/dev/null) || true
+          _result=$(_group_ssh_status_json "$group_name" "$i") || true
         fi
       else
         _icon="●"; _color="${RED}"; _tag="unreachable"
@@ -2499,7 +2796,7 @@ _group_cmd_status() {
       fi
     elif [[ -z "$_tag" ]]; then
       # No result and no tag set yet (not missing/unreachable)
-      if [[ "$_type" != "local" ]]; then
+      if [[ "$_is_local_st" != "true" ]]; then
         _icon="●"; _color="${GREEN}"; _tag="reachable"
       else
         _icon="●"; _color="${YELLOW}"; _tag="no status"
