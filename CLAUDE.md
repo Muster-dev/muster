@@ -6,6 +6,7 @@
 
 ```bash
 muster setup       # interactive setup wizard (creates muster.json + hooks)
+muster init        # alias for muster setup
 muster setup --scan                  # non-interactive: auto-detect everything
 muster setup --services api,redis    # non-interactive: explicit services
 muster setup --force --scan          # overwrite existing muster.json
@@ -13,12 +14,15 @@ muster setup --help                  # show all setup flags
 muster             # dashboard (live health + action menu + installed skills)
 muster deploy      # deploy all (interactive: pick "All" or "Select services")
 muster deploy api  # deploy one service
+muster deploy svc1 svc2          # deploy multiple specific services
+muster deploy --yes [svcs...]    # approve changed/unapproved hooks without prompting (CI)
 muster deploy --dry-run        # preview deploy plan without executing
 muster deploy --dry-run api    # dry-run a single service
 muster dev         # deploy + watch health every 5s (Ctrl+C to cleanup)
 muster status      # health check all services
 muster logs <svc>  # stream logs for a service
 muster rollback <svc>  # rollback a service (interactive picker if no arg)
+muster hooks approve [svc] [--yes]  # approve hooks on this machine (~/.muster/trust/)
 muster history     # show deploy/rollback event log
 muster history --all           # show full history (not just recent)
 muster history api             # show history for one service
@@ -33,16 +37,19 @@ muster verify      # full file integrity check
 muster verify --quick          # signature-only check
 muster verify --json           # machine-readable output
 muster --no-verify             # bypass startup integrity check
-muster fleet init              # create remotes.json
-muster fleet add <name> user@host  # add machine (--mode, --port, --path, --key)
+muster cloud login             # sign in to Fleet Cloud (device flow)
+muster cloud status            # show Fleet Cloud login & relay status
+muster cloud logout            # clear Fleet Cloud credentials
+muster fleet init              # create fleet config
+muster fleet add <name> user@host  # add machine (--mode, --transport, --port, --path, --key)
 muster fleet remove <name>     # remove machine
 muster fleet group <name> <machines...>  # create machine group
 muster fleet ungroup <name>    # remove group
 muster fleet list              # show machines and groups
-muster fleet test [target]     # test SSH connectivity
+muster fleet test [target]     # test SSH/cloud connectivity
 muster fleet deploy [target]   # deploy to machines (--parallel, --dry-run, --json)
 muster fleet status [target]   # check health across fleet
-muster fleet rollback [target] # rollback across fleet
+muster fleet rollback [target] # rollback across fleet (--service, --parallel)
 muster fleet sync [target]     # sync project files to fleet
 muster fleet pair <name> --token <t>  # manual auth pairing
 muster group create <name>     # create project group
@@ -94,14 +101,40 @@ your-project/
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `color_mode` | `auto` | `auto`/`always`/`never` |
+| `color_mode` | `auto` | Color output: `auto`/`always`/`never` |
+| `log_color_mode` | `auto` | Streamed deploy log colors: `auto`/`raw`/`none` |
 | `log_retention_days` | `7` | Days to keep deploy logs |
-| `default_stack` | `bare` | Default stack for setup |
+| `default_stack` | `bare` | Default stack for setup (`bare`/`docker`/`compose`/`k8s`) |
 | `default_health_timeout` | `10` | Health check timeout (seconds) |
 | `scanner_exclude` | `[]` | Global patterns to exclude from scanning |
-| `update_check` | `on` | Check for updates |
+| `update_check` | `on` | Check for updates (`on`/`off`) |
+| `update_mode` | `release` | Update channel: `release` or `source` (main branch) |
+| `tui_mode` | `go` | Dashboard TUI backend: `go` (uses `muster-tui` if installed) or `bash` |
+| `minimal` | `false` | Always use plain-text minimal mode (`true`/`false`) |
+| `machine_role` | `""` | Machine role chosen during setup (`local`/`control`/`target`/`both`) |
+| `deploy_name` | `""` | Custom deployer identity for locks/history (falls back to git `user.name` / `whoami`) |
+| `service_lock_timeout` | `1800` | Stale timeout in seconds for fleet service locks (`60`–`86400`) |
+| `signing` | `off` | Sign pushed fleet hook payloads (`on`/`off`) |
+| `require_signing` | `off` | Require signed payloads in relay guard (`on`/`off`) |
+| `hook_security` | `on` | Per-machine hook approval & dangerous-command gate (`on`/`off`) |
+| `deploy_password_hash` | `""` | SHA-256 hash of optional deploy password (set via `muster settings --global deploy_password <pw\|off>`) |
+| `cloud.*` | `{}` | Fleet Cloud metadata (`cloud.relay`, `cloud.org_id`, `cloud.token_ref`, `cloud.token_id`, `cloud.name`); managed by `muster cloud login` / `logout` (token stored in OS keychain or `~/.muster/tokens/cloud.json`) |
 
 Edit via `muster settings` (TUI) or `muster settings --global <key> <value>` (scripted).
+
+## Hook Approvals, Exit Codes & Cancel Behaviour
+
+**Per-machine hook approvals (`~/.muster/trust/`):** Hook approvals are stored per machine under `~/.muster/trust/<sha256-of-project-path>/` (`hooks.manifest`, HMAC signature `hooks.manifest.sig`, and approved file copies for diffs) — never committed to the repo. Before running deploy or rollback hooks, muster verifies the manifest signature and file hashes. Unapproved or modified hooks block execution until approved:
+- Interactive (TTY): `muster deploy` / `muster rollback` offers to inspect the diff and approve, or run `muster hooks approve [service]` (shows pending files/diffs and prompts `[y/N]`).
+- Non-interactive (CI/scripts): pass `--yes` (`muster hooks approve --yes`, `muster deploy --yes`, `muster rollback --yes`) or set `MUSTER_APPROVE_HOOKS=1`.
+
+**Exit codes:**
+- `0` — success (all selected services deployed/rolled back and passed health checks)
+- `1` — failure, abort, missing/invalid config, lock conflict, or unapproved hooks
+- `124` — hook exceeded `deploy_timeout` (default 120s)
+- `130` — cancelled via Ctrl+C (`SIGINT`) or `SIGTERM`
+
+**Ctrl+C / Cancel behaviour:** Pressing Ctrl+C (or sending `SIGTERM`) during `muster deploy` stops the active hook and its entire child process tree (including when wrapped by GNU `timeout`/`gtimeout`), releases both the project deploy lock and any per-service locks, logs a `cancelled` event in `.muster/logs/deploy-events.log`, emits `{"event":"cancelled"}` in `--json` mode, and exits `130`.
 
 ## Config (muster.json)
 
