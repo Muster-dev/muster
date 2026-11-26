@@ -299,6 +299,11 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/history.sh"
     cmd_history "$@"
     ;;
+  explain|why)
+    shift
+    source "$MUSTER_ROOT/lib/commands/explain.sh"
+    cmd_explain "$@"
+    ;;
   diff)
     shift
     source "$MUSTER_ROOT/lib/commands/diff.sh"
@@ -398,6 +403,7 @@ case "${1:-}" in
     echo "  history     Show deploy/rollback history (--all, <service>)"
     echo "  hooks       List and inspect hook scripts (hooks <svc> <hook>)"
     echo "  doctor      Run project diagnostics (--fix to auto-repair)"
+    echo "  explain     Explain the last failure in plain words (<service>, --log FILE, --fix)"
     echo "  cleanup     Clean up stuck processes"
     echo "  settings    View and edit project/global settings"
     echo "  uninstall   Remove muster from project (--system to uninstall muster itself)"
@@ -448,7 +454,15 @@ case "${1:-}" in
         # Build context warnings to stderr
         _build_context_warn_minimal
       else
-        echo "muster: no project found (run muster setup)"
+        echo "muster: no project found here (run: muster setup)"
+        if [[ -f "$HOME/.muster/projects.json" ]] && has_cmd jq; then
+          _recent=$(jq -r '.projects[]? | "  \(.name)\t\(.path)"' "$HOME/.muster/projects.json" 2>/dev/null | head -5)
+          if [[ -n "$_recent" ]]; then
+            echo "Recent projects:"
+            printf '%s\n' "$_recent"
+          fi
+          unset _recent
+        fi
       fi
       exit 0
     fi
@@ -500,6 +514,9 @@ case "${1:-}" in
     ;;
   *)
     err "Unknown command: $1"
+    source "$MUSTER_ROOT/lib/core/suggest.sh"
+    # shellcheck disable=SC2046
+    _suggest_print "$1" $(_suggest_commands) || true
     echo "Run 'muster --help' for usage."
     exit 1
     ;;
