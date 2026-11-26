@@ -254,7 +254,8 @@ case "${1:-}" in
   deploy)
     shift
     source "$MUSTER_ROOT/lib/commands/deploy.sh"
-    cmd_deploy "$@"
+    _deploy_rc=0
+    cmd_deploy "$@" || _deploy_rc=$?
     # Return to dashboard if interactive (skip in JSON mode)
     _has_json=false
     for _arg in "$@"; do [[ "$_arg" == "--json" ]] && _has_json=true; done
@@ -265,6 +266,7 @@ case "${1:-}" in
       source "$MUSTER_ROOT/lib/tui/dashboard.sh"
       cmd_dashboard
     fi
+    exit "$_deploy_rc"
     ;;
   status)
     shift
@@ -432,30 +434,10 @@ case "${1:-}" in
         load_config
         source "$MUSTER_ROOT/lib/core/build_context.sh"
 
-        _project=$(config_get '.project')
-        echo "muster: ${_project}"
-
-        # shellcheck disable=SC2178
-        _services=$(config_services)
-        _svc_count=0; _healthy=0; _unhealthy=0; _disabled=0
-        # shellcheck disable=SC2128
-        while IFS= read -r _svc; do
-          [[ -z "$_svc" ]] && continue
-          _svc_count=$(( _svc_count + 1 ))
-          _hstatus=""
-          if [[ -f "${HOME}/.muster/health_cache/${_svc}" ]]; then
-            _hstatus=$(cat "${HOME}/.muster/health_cache/${_svc}")
-          fi
-          _name=$(config_get ".services.${_svc}.name")
-          case "$_hstatus" in
-            healthy)   _healthy=$(( _healthy + 1 )); echo "  ${_name}: healthy" ;;
-            unhealthy) _unhealthy=$(( _unhealthy + 1 )); echo "  ${_name}: unhealthy" ;;
-            disabled)  _disabled=$(( _disabled + 1 )); echo "  ${_name}: disabled" ;;
-            *)         echo "  ${_name}: unknown" ;;
-          esac
-        done <<< "$_services"
-
-        echo "muster: ${_svc_count} services (${_healthy} healthy, ${_unhealthy} unhealthy, ${_disabled} disabled)"
+        # Same classification as `muster status` (per-project health,
+        # disabled checks reported as disabled)
+        source "$MUSTER_ROOT/lib/tui/dashboard.sh"
+        _dashboard_minimal_status
 
         # Build context warnings to stderr
         _build_context_warn_minimal
