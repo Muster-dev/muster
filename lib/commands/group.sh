@@ -538,10 +538,13 @@ _group_cmd_add() {
   fi
 
   # Detect local vs remote
-  if [[ "$_add_cloud" == "true" && "$target" != *"@"* ]]; then
-    # Cloud target: bare hostname (no user@host)
-    local host="$target"
+  if [[ "$_add_cloud" == "true" ]]; then
+    # Cloud target: the agent name (user@ prefix accepted and ignored for
+    # transport; SSH-only steps like the muster check and trust request are
+    # skipped because the agent only runs allowlisted muster commands)
+    local host="${target#*@}"
     local user="deploy"
+    [[ "$target" == *"@"* ]] && user="${target%%@*}"
     _group_validate_host "$host" || return 1
 
     echo ""
@@ -1244,13 +1247,21 @@ _group_cmd_deploy() {
           _groups_load_ssh_password
         fi
         local _pk_remote_svcs=""
-        local _pk_cmd="MUSTER_NO_VERIFY=true muster status --json 2>/dev/null"
-        if [[ -n "$_GP_PROJECT_DIR" ]]; then
-          local _pk_edir
-          printf -v _pk_edir '%q' "$_GP_PROJECT_DIR"
-          _pk_cmd="cd ${_pk_edir} && ${_pk_cmd}"
+        if [[ "$_GP_CLOUD" == "true" ]]; then
+          # Cloud: `muster status --json` as plain argv (agent's project dir
+          # when none is configured)
+          source "$MUSTER_ROOT/lib/core/cloud.sh"
+          _groups_cloud_config
+          _pk_remote_svcs=$(_cloud_status_json "$_GP_HOST" "$_GP_PROJECT_DIR") || true
+        else
+          local _pk_cmd="MUSTER_NO_VERIFY=true muster status --json 2>/dev/null"
+          if [[ -n "$_GP_PROJECT_DIR" ]]; then
+            local _pk_edir
+            printf -v _pk_edir '%q' "$_GP_PROJECT_DIR"
+            _pk_cmd="cd ${_pk_edir} && ${_pk_cmd}"
+          fi
+          _pk_remote_svcs=$(groups_remote_exec "$group_name" "$_pi" "$_pk_cmd" 2>/dev/null) || true
         fi
-        _pk_remote_svcs=$(groups_remote_exec "$group_name" "$_pi" "$_pk_cmd" 2>/dev/null) || true
 
         if [[ -n "$_pk_remote_svcs" ]] && printf '%s' "$_pk_remote_svcs" | jq -e '.services' &>/dev/null; then
           local _pk_keys=""
@@ -1620,6 +1631,17 @@ _group_cmd_deploy() {
         while (( _preflight_tries < 3 )); do
           _groups_build_ssh_opts
           local _ssh_err=""
+          if [[ "$_GP_CLOUD" == "true" ]]; then
+            # Cloud: relay ping instead of SSH (no password/key recovery)
+            source "$MUSTER_ROOT/lib/core/cloud.sh"
+            _groups_cloud_config
+            if _fleet_cloud_check "$_GP_HOST"; then
+              _preflight_ok=true
+            else
+              _ssh_err="Cloud agent ${_GP_HOST} is not connected to the relay (check muster-agent there, and muster cloud login here)"
+            fi
+            break
+          fi
           if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
             export SSHPASS="$_GP_PASSWORD"
             # shellcheck disable=SC2086
@@ -1957,7 +1979,8 @@ _group_cmd_deploy() {
         echo ""
         _section_h=$(( _section_h + 1 ))
         menu_select "Deploy failed on ${_pname}" \
-          "Retry" "Skip and continue" "Abort"
+          "Retry" "Skip and continue" "Abort" \
+          || MENU_RESULT="Abort" # no TTY: never loop on Retry
         # menu_select net footprint: 3 lines (blank + title + collapsed choice)
         _section_h=$(( _section_h + 3 ))
 
@@ -2069,6 +2092,11 @@ _group_deploy_remote() {
   # Re-load password from session cache (pre-auth stored it, but _groups_load_remote resets _GP_PASSWORD)
   if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
     _groups_load_ssh_password
+  fi
+
+  if [[ "$_GP_CLOUD" == "true" ]]; then
+    _group_deploy_cloud "$log_file" "${4:-}"
+    return $?
   fi
 
   # Auto-detect project directory if not set (manual mode)
@@ -2191,37 +2219,80 @@ REMOTECMD
   cmd="${cmd}; [ -f .muster/.dashboard_pid ] && kill -USR1 \$(cat .muster/.dashboard_pid) 2>/dev/null"
   cmd="${cmd}; exit \$_rc"
 
-  if [[ "$_GP_CLOUD" == "true" ]]; then
-    # Cloud transport — pass cwd natively (agent handles directory change)
-    source "$MUSTER_ROOT/lib/core/cloud.sh"
-    _groups_cloud_config
-    if ! _fleet_cloud_check "$_GP_HOST" 2>/dev/null; then
-      printf 'Cannot reach cloud agent %s — check tunnel and relay\n' "$_GP_HOST" > "$log_file"
-      return 1
-    fi
-    _fleet_cloud_exec "$_GP_HOST" "$cmd" "$_GP_PROJECT_DIR" >> "$log_file" 2>&1
-  else
-    # SSH transport — prepend cd for project dir
-    if [[ -n "$_GP_PROJECT_DIR" ]]; then
-      local _escaped_dir
-      printf -v _escaped_dir '%q' "$_GP_PROJECT_DIR"
-      cmd="cd ${_escaped_dir} && ${cmd}"
-    fi
-    # SSH transport (pre-flight already done in foreground)
-    _groups_build_ssh_opts
-
-    if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
-      export SSHPASS="$_GP_PASSWORD"
-      # shellcheck disable=SC2086
-      sshpass -e ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" >> "$log_file" 2>&1
-      local _rc=$?
-      unset SSHPASS
-      return $_rc
-    else
-      # shellcheck disable=SC2086
-      ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" >> "$log_file" 2>&1
-    fi
+  # SSH transport — prepend cd for project dir
+  if [[ -n "$_GP_PROJECT_DIR" ]]; then
+    local _escaped_dir
+    printf -v _escaped_dir '%q' "$_GP_PROJECT_DIR"
+    cmd="cd ${_escaped_dir} && ${cmd}"
   fi
+  # SSH transport (pre-flight already done in foreground)
+  _groups_build_ssh_opts
+
+  if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
+    export SSHPASS="$_GP_PASSWORD"
+    # shellcheck disable=SC2086
+    sshpass -e ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" >> "$log_file" 2>&1
+    local _rc=$?
+    unset SSHPASS
+    return $_rc
+  else
+    # shellcheck disable=SC2086
+    ssh $_GROUPS_SSH_OPTS "${_GP_USER}@${_GP_HOST}" "$cmd" >> "$log_file" 2>&1
+  fi
+}
+
+# Kill a process and all of its descendants (deepest first)
+_group_kill_tree() {
+  local pid="$1" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    _group_kill_tree "$child"
+  done
+  kill "$pid" 2>/dev/null || true
+}
+
+# Cloud transport deploy for the project loaded in _GP_* (run in background
+# by the group deploy loop; output goes to log_file).
+#
+# Each selected service is deployed with `muster deploy --force <svc>` (or a
+# single `muster deploy --force`) as a plain argv on the agent, in the
+# configured project dir or, when none is set, the agent's own --project dir.
+# Compared with SSH there is no project-dir search, fleet trust check, remote
+# env (MUSTER_DEPLOY_USER/SOURCE), .fleet_deploying marker, dashboard USR1
+# signal or remote cancel watcher: those need a shell on the target.
+# Cancel: stopping this process stops the local muster-tunnel (SIGTERM →
+# session closed). The relay protocol has no cancel message yet, so a deploy
+# that already started on the agent runs to completion there.
+_group_deploy_cloud() {
+  local log_file="$1" svc_filter="${2:-}"
+  source "$MUSTER_ROOT/lib/core/cloud.sh"
+  _groups_cloud_config
+
+  if ! _fleet_cloud_check "$_GP_HOST"; then
+    printf 'Cannot reach cloud agent %s — check muster-agent on that machine and your Fleet Cloud login\n' "$_GP_HOST" >> "$log_file"
+    return 1
+  fi
+
+  local _svcs=() _s
+  for _s in $svc_filter; do
+    _svcs[${#_svcs[@]}]="$_s"
+  done
+
+  (
+    if (( ${#_svcs[@]} == 0 )); then
+      _cloud_run_explained "$_GP_HOST" _cloud_muster "$_GP_HOST" "$_GP_PROJECT_DIR" deploy --force
+    else
+      for _s in "${_svcs[@]}"; do
+        _cloud_run_explained "$_GP_HOST" _cloud_muster "$_GP_HOST" "$_GP_PROJECT_DIR" deploy --force "$_s" || exit $?
+      done
+    fi
+  ) >> "$log_file" 2>&1 &
+  local _cpid=$!
+  # shellcheck disable=SC2064
+  trap "_group_kill_tree ${_cpid}; printf 'Cancelled locally (a deploy already running on %s finishes there)\\n' '${_GP_HOST}' >> '${log_file}'; exit 130" TERM INT
+  wait "$_cpid"
+  local _rc=$?
+  trap - TERM INT
+  return $_rc
 }
 
 _group_deploy_dry_run() {
@@ -2384,10 +2455,10 @@ _group_cmd_status() {
       if groups_remote_check "$group_name" "$i"; then
         local cmd="export MUSTER_NO_VERIFY=true; muster status --json"
         if [[ "$_GP_CLOUD" == "true" ]]; then
-          # Cloud: agent handles cwd natively
+          # Cloud: plain-argv `muster status --json --no-verify` with --cwd
           source "$MUSTER_ROOT/lib/core/cloud.sh"
           _groups_cloud_config
-          _result=$(_fleet_cloud_exec "$_GP_HOST" "$cmd" "$_GP_PROJECT_DIR" 2>/dev/null) || true
+          _result=$(_cloud_status_json "$_GP_HOST" "$_GP_PROJECT_DIR") || true
         else
           # SSH: prepend cd for project dir
           if [[ -n "$_GP_PROJECT_DIR" ]]; then

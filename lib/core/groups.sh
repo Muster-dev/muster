@@ -377,15 +377,17 @@ _groups_wrap_cmd() {
 # Execute a command on a remote group project (SSH or cloud)
 groups_remote_exec() {
   local name="$1" index="$2" cmd
-  cmd=$(_groups_wrap_cmd "$3")
   _groups_load_remote "$name" "$index"
   [[ "$_GP_AUTH_METHOD" == "password" ]] && _groups_load_ssh_password
 
   if [[ "$_GP_CLOUD" == "true" ]]; then
+    # Cloud agents run plain `muster …` argv only (no shell, no PATH tweaks);
+    # anything else is refused locally. Prefer _cloud_muster at call sites.
     source "$MUSTER_ROOT/lib/core/cloud.sh"
     _groups_cloud_config
-    _fleet_cloud_exec "$_GP_HOST" "$cmd"
+    _cloud_exec_plain "$_GP_HOST" "$3" "$_GP_PROJECT_DIR"
   else
+    cmd=$(_groups_wrap_cmd "$3")
     _groups_build_ssh_opts
     if [[ "$_GP_AUTH_METHOD" == "password" ]]; then
       export SSHPASS="$_GP_PASSWORD"
