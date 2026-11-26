@@ -26,6 +26,49 @@ _auth_ensure_file() {
   chmod 600 "$MUSTER_TOKENS_FILE"
 }
 
+# Rewrite the token store safely: one writer at a time (mkdir lock), a unique
+# temp file, a validity check, then an atomic rename. Concurrent `--json`
+# calls used to share "${MUSTER_TOKENS_FILE}.tmp" and could leave the store
+# empty, wiping every token.
+# Usage: _auth_update_tokens [--best-effort] <jq args…> <filter>
+_auth_update_tokens() {
+  local best_effort=false
+  if [[ "${1:-}" == "--best-effort" ]]; then
+    best_effort=true
+    shift
+  fi
+  local lock="${MUSTER_TOKENS_FILE}.lock" tries=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    # Break a lock left behind by a killed process (older than 10s)
+    if [[ -d "$lock" ]] && [[ -n "$(find "$lock" -maxdepth 0 -mmin +0.17 2>/dev/null)" ]]; then
+      rmdir "$lock" 2>/dev/null || true
+      continue
+    fi
+    [[ "$best_effort" == "true" ]] && return 0
+    tries=$((tries + 1))
+    if ((tries > 100)); then
+      err "Token store is busy (${lock}); try again"
+      return 1
+    fi
+    sleep 0.05 2>/dev/null || sleep 1
+  done
+
+  local tmp rc=0
+  tmp=$(mktemp "${MUSTER_TOKENS_FILE}.XXXXXX") || {
+    rmdir "$lock" 2>/dev/null
+    return 1
+  }
+  if jq "$@" "$MUSTER_TOKENS_FILE" > "$tmp" 2>/dev/null && jq -e '.tokens | type == "array"' "$tmp" >/dev/null 2>&1; then
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$MUSTER_TOKENS_FILE" || rc=1
+  else
+    rm -f "$tmp"
+    rc=1
+  fi
+  rmdir "$lock" 2>/dev/null || true
+  return "$rc"
+}
+
 # SHA-256 hash a raw token
 _auth_hash() {
   printf '%s' "$1" | openssl dgst -sha256 -r | cut -d' ' -f1
@@ -86,14 +129,11 @@ _auth_create_token_internal() {
   local created
   created=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-  local tmp="${MUSTER_TOKENS_FILE}.tmp"
-  jq --arg name "$name" \
-     --arg hash "sha256:${token_hash}" \
-     --arg scope "$scope" \
-     --arg created "$created" \
-     '.tokens += [{"name":$name,"token_hash":$hash,"scope":$scope,"created":$created,"last_used":""}]' \
-     "$MUSTER_TOKENS_FILE" > "$tmp" && mv "$tmp" "$MUSTER_TOKENS_FILE"
-  chmod 600 "$MUSTER_TOKENS_FILE"
+  _auth_update_tokens --arg name "$name" \
+    --arg hash "sha256:${token_hash}" \
+    --arg scope "$scope" \
+    --arg created "$created" \
+    '.tokens += [{"name":$name,"token_hash":$hash,"scope":$scope,"created":$created,"last_used":""}]' || return 1
 
   printf '%s\n' "$raw_token"
 }
@@ -146,14 +186,11 @@ auth_create_token() {
   created=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
   # Add to tokens file
-  local tmp="${MUSTER_TOKENS_FILE}.tmp"
-  jq --arg name "$name" \
-     --arg hash "sha256:${token_hash}" \
-     --arg scope "$scope" \
-     --arg created "$created" \
-     '.tokens += [{"name":$name,"token_hash":$hash,"scope":$scope,"created":$created,"last_used":""}]' \
-     "$MUSTER_TOKENS_FILE" > "$tmp" && mv "$tmp" "$MUSTER_TOKENS_FILE"
-  chmod 600 "$MUSTER_TOKENS_FILE"
+  _auth_update_tokens --arg name "$name" \
+    --arg hash "sha256:${token_hash}" \
+    --arg scope "$scope" \
+    --arg created "$created" \
+    '.tokens += [{"name":$name,"token_hash":$hash,"scope":$scope,"created":$created,"last_used":""}]' || return 1
 
   # Print the raw token (shown only once)
   printf '%s\n' "$raw_token"
@@ -186,11 +223,8 @@ auth_validate_token() {
   # Update last_used timestamp
   local now
   now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  local tmp="${MUSTER_TOKENS_FILE}.tmp"
-  jq --arg h "sha256:${token_hash}" --arg now "$now" \
-    '(.tokens[] | select(.token_hash == $h)).last_used = $now' \
-    "$MUSTER_TOKENS_FILE" > "$tmp" && mv "$tmp" "$MUSTER_TOKENS_FILE"
-  chmod 600 "$MUSTER_TOKENS_FILE"
+  _auth_update_tokens --best-effort --arg h "sha256:${token_hash}" --arg now "$now" \
+    '(.tokens[] | select(.token_hash == $h)).last_used = $now' || true
 
   return 0
 }
@@ -306,10 +340,7 @@ auth_revoke_token() {
     return 1
   fi
 
-  local tmp="${MUSTER_TOKENS_FILE}.tmp"
-  jq --arg n "$name" '.tokens = [.tokens[] | select(.name != $n)]' \
-    "$MUSTER_TOKENS_FILE" > "$tmp" && mv "$tmp" "$MUSTER_TOKENS_FILE"
-  chmod 600 "$MUSTER_TOKENS_FILE"
+  _auth_update_tokens --arg n "$name" '.tokens = [.tokens[] | select(.name != $n)]' || return 1
 
   ok "Token '${name}' revoked"
 }
