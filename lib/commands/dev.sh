@@ -31,7 +31,7 @@ _dev_cleanup() {
       ok "${name} stopped"
     elif [[ -x "$hook" ]]; then
       start_spinner "Cleaning up ${name}..."
-      bash "$hook" &>/dev/null
+      _run_hook "$hook" &>/dev/null
       stop_spinner
       ok "${name} stopped"
     fi
@@ -125,7 +125,7 @@ _dev_show_status() {
         just --justfile "${_dev_health_dir}/justfile" health &>/dev/null &
         _hpid=$!
       else
-        bash "$hook" &>/dev/null &
+        _run_hook "$hook" &>/dev/null &
         _hpid=$!
       fi
       # Wait with timeout — kill if health hook hangs

@@ -54,7 +54,7 @@ cmd_logs() {
   elif [[ -x "$hook" ]]; then
     info "Streaming logs for ${target}... (Ctrl+C to stop)"
     echo ""
-    bash "$hook"
+    _run_hook "$hook"
   else
     # Fallback: show recent deploy logs
     local log_dir="${project_dir}/.muster/logs"

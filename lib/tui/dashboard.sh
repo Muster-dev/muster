@@ -53,7 +53,7 @@ _dashboard_minimal_status() {
         state="unhealthy"
       fi
     elif [[ -x "${hook_dir}/health.sh" ]]; then
-      if _run_with_timeout "$timeout" bash "${hook_dir}/health.sh" &>/dev/null; then
+      if _run_hook_with_timeout "$timeout" "${hook_dir}/health.sh" &>/dev/null; then
         state="healthy"
       else
         state="unhealthy"

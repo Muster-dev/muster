@@ -127,7 +127,7 @@ cmd_status() {
           _health_ok=true
         fi
       else
-        if bash "$hook" &>/dev/null; then
+        if _run_hook "$hook" &>/dev/null; then
           _health_ok=true
         fi
       fi

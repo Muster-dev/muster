@@ -390,6 +390,48 @@ _read_path() {
   done
 }
 
+# ── Hook execution ──
+
+# True when a local hook is executable and starts with a #! shebang.
+_hook_has_shebang() {
+  local hook="$1"
+  [[ -x "$hook" ]] || return 1
+  local _hdr=""
+  IFS= read -r _hdr < "$hook" 2>/dev/null || true
+  [[ "$_hdr" == "#!"* ]]
+}
+
+# Run a local hook directly when it is executable and starts with #!
+# (allowing Python/Node/etc. hooks), otherwise fall back to bash.
+# Usage: _run_hook <hook> [args...]
+_run_hook() {
+  local _h="$1"
+  shift
+  if _hook_has_shebang "$_h"; then
+    local _exec="$_h"
+    [[ "$_exec" != */* ]] && _exec="./${_exec}"
+    "$_exec" "$@"
+  else
+    bash "$_h" "$@"
+  fi
+}
+
+# Run a local hook wrapped in _run_with_timeout, respecting its #! shebang.
+# Passes an executable path (not a shell function) to _run_with_timeout so
+# external GNU timeout/gtimeout works properly.
+# Usage: _run_hook_with_timeout <timeout_secs> <hook> [args...]
+_run_hook_with_timeout() {
+  local _t="$1" _h="$2"
+  shift 2
+  if _hook_has_shebang "$_h"; then
+    local _exec="$_h"
+    [[ "$_exec" != */* ]] && _exec="./${_exec}"
+    _run_with_timeout "$_t" "$_exec" "$@"
+  else
+    _run_with_timeout "$_t" bash "$_h" "$@"
+  fi
+}
+
 # ── Hook timeout wrapper ──
 
 # Run a command with a timeout. Returns the command's exit code, or 124 on timeout.
