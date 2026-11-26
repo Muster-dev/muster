@@ -246,7 +246,7 @@ _first_run_check() {
 
 # ── Route commands ──
 case "${1:-}" in
-  setup)
+  setup|init)
     shift
     source "$MUSTER_ROOT/lib/commands/setup.sh"
     cmd_setup "$@"
@@ -380,6 +380,7 @@ case "${1:-}" in
     echo "Project commands:"
     echo "  (none)      Open the dashboard"
     echo "  setup       Guided setup wizard (or setup --help for flags)"
+    echo "  init        Alias for setup"
     echo "  deploy      Deploy services (--dry-run to preview, <service> for one)"
     echo "  dev         Deploy + watch health (Ctrl+C to cleanup)"
     echo "  status      Check service health"

@@ -210,7 +210,7 @@ scan_project() {
       fi
       if [[ "$in_services" == "true" ]]; then
         # Top-level key under services (2-space indent, no further indent)
-        if [[ "$line" =~ ^[[:space:]][[:space:]][a-zA-Z_-]+: && ! "$line" =~ ^[[:space:]][[:space:]][[:space:]] ]]; then
+        if [[ "$line" =~ ^[[:space:]][[:space:]][a-zA-Z0-9_-]+: && ! "$line" =~ ^[[:space:]][[:space:]][[:space:]] ]]; then
           local svc
           svc=$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | sed 's/:.*//')
           # Don't duplicate if already found via k8s
@@ -309,14 +309,23 @@ scan_project() {
 
   # ── Service hints via grep (root + subdirectories) ──
   local hint_files=""
+  local _ls_out=""
   for pattern in "*.json" "*.yml" "*.yaml" "*.env" "*.env.*"; do
-    hint_files="${hint_files} $(ls ${dir}/${pattern} 2>/dev/null || true)"
+    # shellcheck disable=SC2086
+    _ls_out=$(ls ${dir}/${pattern} 2>/dev/null || true)
+    if [[ -n "$_ls_out" ]]; then
+      hint_files="${hint_files:+${hint_files} }${_ls_out}"
+    fi
   done
   for _subdir in $_SCAN_SUBDIRS; do
     [[ ! -d "${dir}/${_subdir}" ]] && continue
     _scan_is_excluded "$dir" "$_subdir" && continue
     for pattern in "*.json" "*.yml" "*.yaml" "*.env" "*.env.*"; do
-      hint_files="${hint_files} $(ls ${dir}/${_subdir}/${pattern} 2>/dev/null || true)"
+      # shellcheck disable=SC2086
+      _ls_out=$(ls ${dir}/${_subdir}/${pattern} 2>/dev/null || true)
+      if [[ -n "$_ls_out" ]]; then
+        hint_files="${hint_files:+${hint_files} }${_ls_out}"
+      fi
     done
   done
 
@@ -334,10 +343,10 @@ scan_project() {
   fi
 
   # ── Enhanced detection ──
-  _scan_dockerfile_ports "$dir"
-  _scan_compose_ports "$dir" "$compose_file"
   _scan_folder_structure "$dir"
-  _scan_framework_health "$dir"
+  _scan_compose_ports "$dir" "$compose_file"
+  _scan_dockerfile_ports "$dir"
+  _scan_k8s_manifest_ports "$dir" "$k8s_dir"
   _scan_env_files "$dir"
   _scan_git_info "$dir"
 
@@ -422,8 +431,13 @@ _scan_hint() {
     i=$((i + 1))
   done
 
+  local trimmed_files
+  trimmed_files=$(printf '%s' "$files" | tr -d '[:space:]')
+  [[ -z "$trimmed_files" ]] && return 0
+
   # Grep for pattern (-w = whole word matching to avoid false positives)
-  if grep -qwilE "$pattern" $files 2>/dev/null; then
+  # shellcheck disable=SC2086
+  if grep -qwilE "$pattern" $files </dev/null 2>/dev/null; then
     _SCAN_SERVICES[${#_SCAN_SERVICES[@]}]="$name"
   fi
 }
@@ -466,65 +480,258 @@ scan_print_results() {
 # Enhanced detection: ports, health, .env, git, folder structure
 # ══════════════════════════════════════════════════════════════
 
+# Add a port entry to _SCAN_PORTS if not already recorded for this service
+_scan_add_port() {
+  local svc="$1" port="$2"
+  [[ -z "$svc" || -z "$port" ]] && return 0
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port <= 0 || port > 65535 )); then
+    return 0
+  fi
+  local i=0
+  while (( i < ${#_SCAN_PORTS[@]} )); do
+    [[ "${_SCAN_PORTS[$i]}" == "${svc}|${port}" ]] && return 0
+    i=$((i + 1))
+  done
+  _SCAN_PORTS[${#_SCAN_PORTS[@]}]="${svc}|${port}"
+}
+
+# Add a path entry to _SCAN_PATHS if exact service+type is not already recorded
+_scan_add_path() {
+  local svc="$1" ptype="$2" rel_path="$3"
+  local i=0
+  while (( i < ${#_SCAN_PATHS[@]} )); do
+    local entry="${_SCAN_PATHS[$i]}"
+    local e_svc="${entry%%|*}"
+    local e_rest="${entry#*|}"
+    local e_type="${e_rest%%|*}"
+    if [[ "$e_svc" == "$svc" && "$e_type" == "$ptype" ]]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  _SCAN_PATHS[${#_SCAN_PATHS[@]}]="${svc}|${ptype}|${rel_path}"
+}
+
+# Default TCP port for known infrastructure services (empty if unknown)
+_scan_infra_default_port() {
+  local lower
+  lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    redis)                    echo "6379" ;;
+    postgres|postgresql)      echo "5432" ;;
+    mysql|mariadb)            echo "3306" ;;
+    mongo|mongodb)            echo "27017" ;;
+    rabbitmq)                 echo "5672" ;;
+    memcached)                echo "11211" ;;
+    elasticsearch|opensearch) echo "9200" ;;
+    meilisearch)              echo "7700" ;;
+    minio)                    echo "9000" ;;
+    kafka)                    echo "9092" ;;
+    nginx|caddy|traefik)      echo "80" ;;
+    etcd)                     echo "2379" ;;
+    zookeeper)                echo "2181" ;;
+    consul)                   echo "8500" ;;
+    vault)                    echo "8200" ;;
+    nats)                     echo "4222" ;;
+    clickhouse)               echo "8123" ;;
+    cassandra)                echo "9042" ;;
+    cockroach|cockroachdb)    echo "26257" ;;
+    prometheus)               echo "9090" ;;
+    grafana)                  echo "3000" ;;
+    jaeger)                   echo "16686" ;;
+    mailhog|mailpit)          echo "1025" ;;
+    *)                        echo "" ;;
+  esac
+}
+
+# Extract a numeric port from a compose port mapping string
+# Prefers host port; falls back to container port if host part is non-numeric or absent
+_scan_parse_port_spec() {
+  local spec="$1"
+  # Strip quotes, spaces, brackets, braces, and protocol suffix (/tcp, /udp)
+  spec=$(printf '%s' "$spec" | tr -d "\"'[]{} ")
+  spec="${spec%%/*}"
+  [[ -z "$spec" ]] && return 0
+
+  local host_part="" container_part=""
+  if [[ "$spec" == *:* ]]; then
+    container_part="${spec##*:}"
+    local before_container="${spec%:*}"
+    host_part="${before_container##*:}"
+  else
+    container_part="$spec"
+  fi
+
+  # Handle port ranges like 8080-8085 -> 8080
+  host_part="${host_part%%-*}"
+  container_part="${container_part%%-*}"
+
+  if [[ "$host_part" =~ ^[0-9]+$ ]] && (( host_part > 0 && host_part <= 65535 )); then
+    echo "$host_part"
+  elif [[ "$container_part" =~ ^[0-9]+$ ]] && (( container_part > 0 && container_part <= 65535 )); then
+    echo "$container_part"
+  fi
+}
+
+# Parse EXPOSE lines from a single Dockerfile and associate with a service
+_scan_parse_dockerfile_expose() {
+  local svc="$1" full_path="$2"
+  [[ -z "$svc" || ! -f "$full_path" ]] && return 0
+
+  local _line
+  while IFS= read -r _line; do
+    # Match: EXPOSE 3000, EXPOSE 3000/tcp, EXPOSE 8080 8443
+    local _ports
+    _ports=$(printf '%s' "$_line" | sed -E 's/^[[:space:]]*[Ee][Xx][Pp][Oo][Ss][Ee][[:space:]]+//' | sed -E 's|/[a-zA-Z]+||g')
+    local _p
+    for _p in $_ports; do
+      _scan_add_port "$svc" "$_p"
+    done
+  done < <(grep -i '^[[:space:]]*EXPOSE[[:space:]]' "$full_path" 2>/dev/null || true)
+}
+
 # Parse EXPOSE directives from Dockerfiles
 # Populates _SCAN_PORTS[] with "service|port"
 _scan_dockerfile_ports() {
   local dir="$1"
+
+  # 1. Check service-named subdirectories (<svc>/Dockerfile) for known services
+  local si=0
+  while (( si < ${#_SCAN_SERVICES[@]} )); do
+    local _svc="${_SCAN_SERVICES[$si]}"
+    si=$((si + 1))
+    if [[ -f "${dir}/${_svc}/Dockerfile" ]] && ! _scan_is_excluded "$dir" "${_svc}/Dockerfile"; then
+      _scan_add_path "$_svc" "dockerfile" "${_svc}/Dockerfile"
+    fi
+  done
+
+  # 2. Scan all Dockerfile paths recorded in _SCAN_PATHS
   local i=0
-  while (( i < ${#_SCAN_FILES[@]} )); do
-    local entry="${_SCAN_FILES[$i]}"
-    local file="${entry%%|*}"
-    local desc="${entry#*|}"
+  while (( i < ${#_SCAN_PATHS[@]} )); do
+    local entry="${_SCAN_PATHS[$i]}"
     i=$((i + 1))
+    local p_svc="${entry%%|*}"
+    local rest="${entry#*|}"
+    local p_type="${rest%%|*}"
+    local p_path="${rest#*|}"
+    [[ "$p_type" != "dockerfile" ]] && continue
 
-    # Only process Dockerfile entries
-    case "$desc" in
-      Docker\ build*) ;;
-      *) continue ;;
-    esac
-
-    local full_path="${dir}/${file}"
+    local full_path="${dir}/${p_path}"
     [[ ! -f "$full_path" ]] && continue
 
-    # Determine which service this Dockerfile belongs to
-    local svc=""
-    case "$file" in
-      Dockerfile.*) svc="${file#Dockerfile.}" ;;
-      */Dockerfile.*) svc="${file##*/Dockerfile.}" ;;
-      *) # Plain Dockerfile — use first service or skip
-        if (( ${#_SCAN_SERVICES[@]} > 0 )); then
-          svc="${_SCAN_SERVICES[0]}"
-        else
-          continue
+    local svc="$p_svc"
+    if [[ "$svc" == "_default" ]]; then
+      # Plain root Dockerfile — prefer first non-infra service, else first service
+      svc=""
+      local _j=0
+      while (( _j < ${#_SCAN_SERVICES[@]} )); do
+        if [[ -z "$(_scan_infra_default_port "${_SCAN_SERVICES[$_j]}")" ]]; then
+          svc="${_SCAN_SERVICES[$_j]}"
+          break
         fi
-        ;;
-    esac
-
-    # Parse EXPOSE lines
-    local _line
-    while IFS= read -r _line; do
-      # Match: EXPOSE 3000, EXPOSE 3000/tcp, EXPOSE 8080 8443
-      local _ports
-      _ports=$(printf '%s' "$_line" | sed 's/^EXPOSE[[:space:]]*//' | sed 's|/[a-z]*||g')
-      local _p
-      for _p in $_ports; do
-        case "$_p" in
-          [0-9]*) _SCAN_PORTS[${#_SCAN_PORTS[@]}]="${svc}|${_p}" ;;
-        esac
+        _j=$((_j + 1))
       done
-    done < <(grep -i '^[[:space:]]*EXPOSE' "$full_path" 2>/dev/null || true)
+      if [[ -z "$svc" && ${#_SCAN_SERVICES[@]} -gt 0 ]]; then
+        svc="${_SCAN_SERVICES[0]}"
+      fi
+      [[ -z "$svc" ]] && continue
+    fi
+
+    _scan_parse_dockerfile_expose "$svc" "$full_path"
   done
 }
 
-# Parse ports and healthcheck from docker-compose files
-# Populates _SCAN_PORTS[] and _SCAN_HEALTH[]
+# Parse inline ports/expose/build/healthcheck on a compose line for current_svc
+_scan_compose_inline_attrs() {
+  local dir="$1" svc="$2" line="$3"
+
+  # Inline build: ./api (or build: api)
+  local _bdir=""
+  _bdir=$(printf '%s' "$line" | sed -nE 's/.*build:[[:space:]]*["'\'']?(\.?\/?[a-zA-Z0-9._\/-]+)["'\'']?.*/\1/p')
+  if [[ -n "$_bdir" ]]; then
+    _bdir="${_bdir#./}"
+    _bdir="${_bdir%/}"
+    if [[ -n "$_bdir" && "$_bdir" != "." && -f "${dir}/${_bdir}/Dockerfile" ]]; then
+      _scan_add_path "$svc" "dockerfile" "${_bdir}/Dockerfile"
+    fi
+  fi
+
+  # Inline ports: ["8080:8080", "8443:8443"] or ports: [8080:8080]
+  local _ports_inline=""
+  _ports_inline=$(printf '%s' "$line" | sed -nE 's/.*ports:[[:space:]]*\[([^]]*)\].*/\1/p')
+  if [[ -n "$_ports_inline" ]]; then
+    local _old_ifs="$IFS"
+    IFS=','
+    local _tok
+    for _tok in $_ports_inline; do
+      local _p
+      _p=$(_scan_parse_port_spec "$_tok")
+      if [[ -n "$_p" ]]; then
+        _scan_add_port "$svc" "$_p"
+      fi
+    done
+    IFS="$_old_ifs"
+  fi
+
+  # Inline expose: ["8080"]
+  local _expose_inline=""
+  _expose_inline=$(printf '%s' "$line" | sed -nE 's/.*expose:[[:space:]]*\[([^]]*)\].*/\1/p')
+  if [[ -n "$_expose_inline" ]]; then
+    local _old_ifs="$IFS"
+    IFS=','
+    local _tok
+    for _tok in $_expose_inline; do
+      local _p
+      _p=$(_scan_parse_port_spec "$_tok")
+      if [[ -n "$_p" ]]; then
+        _scan_add_port "$svc" "$_p"
+      fi
+    done
+    IFS="$_old_ifs"
+  fi
+
+  # Inline healthcheck HTTP URL
+  if printf '%s' "$line" | grep -q 'healthcheck:'; then
+    _scan_compose_health_url "$svc" "$line"
+  fi
+  return 0
+}
+
+# Extract an HTTP healthcheck URL from a compose healthcheck line
+_scan_compose_health_url() {
+  local svc="$1" line="$2"
+  local health_url=""
+  health_url=$(printf '%s' "$line" | grep -oE 'https?://(localhost|127\.0\.0\.1):[0-9]+[^] "'\'',]*' | head -1 || true)
+  if [[ -n "$health_url" ]]; then
+    local _no_proto="${health_url#*://}"
+    local _host_port="${_no_proto%%/*}"
+    local h_port="${_host_port##*:}"
+    local h_path="/"
+    if [[ "$_no_proto" == */* ]]; then
+      h_path="/${_no_proto#*/}"
+    fi
+    local _already=""
+    _already=$(scan_get_health "$svc")
+    if [[ -z "$_already" && -n "$h_port" ]]; then
+      _SCAN_HEALTH[${#_SCAN_HEALTH[@]}]="${svc}|http|${h_path}|${h_port}"
+    fi
+  fi
+  return 0
+}
+
+# Parse ports, build paths, and healthcheck from docker-compose files
+# Populates _SCAN_PORTS[], _SCAN_PATHS[], and _SCAN_HEALTH[]
 _scan_compose_ports() {
   local dir="$1" compose_file="$2"
   [[ -z "$compose_file" || ! -f "$compose_file" ]] && return 0
 
-  local current_svc="" in_services=false in_ports=false in_healthcheck=false
+  local current_svc="" in_services=false in_ports=false in_expose=false in_healthcheck=false
+  local long_target="" long_published=""
 
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip trailing CR if CRLF
+    line="${line%$'\r'}"
+
     # Track services: section
     if [[ "$line" =~ ^services: ]]; then
       in_services=true
@@ -533,19 +740,44 @@ _scan_compose_ports() {
 
     # Exit services on new top-level key
     if [[ "$in_services" == "true" && "$line" =~ ^[a-zA-Z] && ! "$line" =~ ^services ]]; then
+      if [[ -n "$current_svc" ]]; then
+        if [[ -n "$long_published" ]]; then
+          _scan_add_port "$current_svc" "$long_published"
+        elif [[ -n "$long_target" ]]; then
+          _scan_add_port "$current_svc" "$long_target"
+        fi
+      fi
       in_services=false
       in_ports=false
+      in_expose=false
       in_healthcheck=false
+      long_target=""
+      long_published=""
       continue
     fi
 
     [[ "$in_services" != "true" ]] && continue
 
     # Service name (2-space indent, no further indent)
-    if [[ "$line" =~ ^[[:space:]][[:space:]][a-zA-Z_-]+: && ! "$line" =~ ^[[:space:]][[:space:]][[:space:]] ]]; then
+    if [[ "$line" =~ ^[[:space:]][[:space:]][a-zA-Z0-9_-]+: && ! "$line" =~ ^[[:space:]][[:space:]][[:space:]] ]]; then
+      if [[ -n "$current_svc" ]]; then
+        if [[ -n "$long_published" ]]; then
+          _scan_add_port "$current_svc" "$long_published"
+        elif [[ -n "$long_target" ]]; then
+          _scan_add_port "$current_svc" "$long_target"
+        fi
+      fi
       current_svc=$(printf '%s' "$line" | sed 's/^[[:space:]]*//' | sed 's/:.*//')
       in_ports=false
+      in_expose=false
       in_healthcheck=false
+      long_target=""
+      long_published=""
+      # Handle flow-style single-line service definitions: api: { build: ./api, ports: ["8080:8080"] }
+      local _after_colon="${line#*:}"
+      if [[ "$_after_colon" == *"{"* ]]; then
+        _scan_compose_inline_attrs "$dir" "$current_svc" "$_after_colon"
+      fi
       continue
     fi
 
@@ -553,7 +785,26 @@ _scan_compose_ports() {
 
     # Detect ports: key (4-space indent typically)
     if printf '%s' "$line" | grep -qE '^[[:space:]]+ports:'; then
-      in_ports=true
+      if [[ "$line" == *"["* ]]; then
+        _scan_compose_inline_attrs "$dir" "$current_svc" "$line"
+        in_ports=false
+      else
+        in_ports=true
+      fi
+      in_expose=false
+      in_healthcheck=false
+      continue
+    fi
+
+    # Detect expose: key
+    if printf '%s' "$line" | grep -qE '^[[:space:]]+expose:'; then
+      if [[ "$line" == *"["* ]]; then
+        _scan_compose_inline_attrs "$dir" "$current_svc" "$line"
+        in_expose=false
+      else
+        in_expose=true
+      fi
+      in_ports=false
       in_healthcheck=false
       continue
     fi
@@ -562,51 +813,223 @@ _scan_compose_ports() {
     if printf '%s' "$line" | grep -qE '^[[:space:]]+healthcheck:'; then
       in_healthcheck=true
       in_ports=false
+      in_expose=false
+      _scan_compose_health_url "$current_svc" "$line"
       continue
     fi
 
-    # Other keys at same level end ports/healthcheck
-    if printf '%s' "$line" | grep -qE '^[[:space:]]{4}[a-zA-Z_-]+:' && \
+    # Detect build: / context: path for Dockerfile discovery
+    if printf '%s' "$line" | grep -qE '^[[:space:]]+(build|context):[[:space:]]+[^[:space:]#]'; then
+      local _bd=""
+      _bd=$(printf '%s' "$line" | sed -E 's/^[[:space:]]+(build|context):[[:space:]]+//' | tr -d "\"'" | sed 's/[[:space:]]*#.*//')
+      _bd="${_bd#./}"
+      _bd="${_bd%/}"
+      if [[ -n "$_bd" && "$_bd" != "." && -f "${dir}/${_bd}/Dockerfile" ]]; then
+        _scan_add_path "$current_svc" "dockerfile" "${_bd}/Dockerfile"
+      fi
+    fi
+
+    # Other keys at 4-space indent end ports/expose/healthcheck
+    if printf '%s' "$line" | grep -qE '^[[:space:]]{4}[a-zA-Z0-9_-]+:' && \
        ! printf '%s' "$line" | grep -qE '^[[:space:]]{6}'; then
+      if [[ -n "$long_published" ]]; then
+        _scan_add_port "$current_svc" "$long_published"
+      elif [[ -n "$long_target" ]]; then
+        _scan_add_port "$current_svc" "$long_target"
+      fi
+      long_target=""
+      long_published=""
       in_ports=false
+      in_expose=false
       in_healthcheck=false
     fi
 
-    # Parse port mappings: - "3000:3000" or - 3000:3000
+    # Parse block-style ports: items
     if [[ "$in_ports" == "true" ]]; then
-      local port_match=""
-      port_match=$(printf '%s' "$line" | sed -n 's/.*- *["\x27]*\([0-9]*\):\([0-9]*\).*/\2/p')
-      if [[ -n "$port_match" ]]; then
-        _SCAN_PORTS[${#_SCAN_PORTS[@]}]="${current_svc}|${port_match}"
-      else
-        # Simple port: - "3000" or - 3000
-        port_match=$(printf '%s' "$line" | sed -n 's/.*- *["\x27]*\([0-9][0-9]*\)["\x27]*/\1/p')
+      if printf '%s' "$line" | grep -qE '^[[:space:]]*-[[:space:]]*target:[[:space:]]*[0-9]+'; then
+        if [[ -n "$long_published" ]]; then
+          _scan_add_port "$current_svc" "$long_published"
+        elif [[ -n "$long_target" ]]; then
+          _scan_add_port "$current_svc" "$long_target"
+        fi
+        long_published=""
+        long_target=$(printf '%s' "$line" | sed -nE 's/.*target:[[:space:]]*["'\'']?([0-9]+).*/\1/p')
+      elif printf '%s' "$line" | grep -qE '^[[:space:]]*published:[[:space:]]*["'\'']?[0-9]+'; then
+        long_published=$(printf '%s' "$line" | sed -nE 's/.*published:[[:space:]]*["'\'']?([0-9]+).*/\1/p')
+      elif printf '%s' "$line" | grep -qE '^[[:space:]]*target:[[:space:]]*[0-9]+'; then
+        long_target=$(printf '%s' "$line" | sed -nE 's/.*target:[[:space:]]*["'\'']?([0-9]+).*/\1/p')
+      elif printf '%s' "$line" | grep -qE '^[[:space:]]*-[[:space:]]+'; then
+        local _raw_port=""
+        _raw_port=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*-[[:space:]]+//' | sed 's/[[:space:]]*#.*//')
+        local port_match=""
+        port_match=$(_scan_parse_port_spec "$_raw_port")
         if [[ -n "$port_match" ]]; then
-          _SCAN_PORTS[${#_SCAN_PORTS[@]}]="${current_svc}|${port_match}"
+          _scan_add_port "$current_svc" "$port_match"
+        fi
+      fi
+    fi
+
+    # Parse block-style expose: items
+    if [[ "$in_expose" == "true" ]]; then
+      if printf '%s' "$line" | grep -qE '^[[:space:]]*-[[:space:]]+'; then
+        local _raw_exp=""
+        _raw_exp=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*-[[:space:]]+//' | sed 's/[[:space:]]*#.*//')
+        local exp_match=""
+        exp_match=$(_scan_parse_port_spec "$_raw_exp")
+        if [[ -n "$exp_match" ]]; then
+          _scan_add_port "$current_svc" "$exp_match"
         fi
       fi
     fi
 
     # Parse healthcheck test for HTTP endpoint
     if [[ "$in_healthcheck" == "true" ]]; then
-      # test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      # test: curl -f http://localhost:3000/health
-      local health_url=""
-      health_url=$(printf '%s' "$line" | grep -oE 'http://localhost:[0-9]+[^ "]*' | head -1 || true)
-      if [[ -n "$health_url" ]]; then
-        local h_port="" h_path=""
-        h_port=$(printf '%s' "$health_url" | sed -n 's|http://localhost:\([0-9]*\).*|\1|p')
-        h_path=$(printf '%s' "$health_url" | sed -n 's|http://localhost:[0-9]*\(/[^ "]*\)|\1|p')
-        [[ -z "$h_path" ]] && h_path="/"
-        # Only add if we don't already have health for this service
+      _scan_compose_health_url "$current_svc" "$line"
+    fi
+  done < "$compose_file"
+
+  if [[ -n "$current_svc" ]]; then
+    if [[ -n "$long_published" ]]; then
+      _scan_add_port "$current_svc" "$long_published"
+    elif [[ -n "$long_target" ]]; then
+      _scan_add_port "$current_svc" "$long_target"
+    fi
+  fi
+  return 0
+}
+
+# Parse a single k8s manifest file for containerPort and httpGet probes
+# If forced_svc is provided (e.g. from k8s/<svc>/ dir), uses that service name;
+# otherwise extracts metadata.name from Deployment/StatefulSet/DaemonSet documents.
+_scan_parse_k8s_yaml_file() {
+  local yaml_file="$1" forced_svc="${2:-}"
+  [[ ! -f "$yaml_file" ]] && return 0
+
+  local doc_kind="" doc_name="$forced_svc" in_metadata=false in_httpget=false
+  local doc_port="" http_path="" http_port=""
+
+  _flush_k8s_doc() {
+    local target_svc="$forced_svc"
+    if [[ -z "$target_svc" ]]; then
+      case "$doc_kind" in
+        Deployment|StatefulSet|DaemonSet) target_svc="$doc_name" ;;
+        *) return 0 ;;
+      esac
+    fi
+    [[ -z "$target_svc" ]] && return 0
+    _scan_add_service "$target_svc"
+    if [[ -n "$doc_port" ]]; then
+      _scan_add_port "$target_svc" "$doc_port"
+    fi
+    if [[ -n "$http_path" ]]; then
+      local _hp="${http_port:-$doc_port}"
+      if [[ -n "$_hp" && "$_hp" =~ ^[0-9]+$ ]]; then
         local _already=""
-        _already=$(scan_get_health "$current_svc")
+        _already=$(scan_get_health "$target_svc")
         if [[ -z "$_already" ]]; then
-          _SCAN_HEALTH[${#_SCAN_HEALTH[@]}]="${current_svc}|http|${h_path}|${h_port}"
+          _SCAN_HEALTH[${#_SCAN_HEALTH[@]}]="${target_svc}|http|${http_path}|${_hp}"
         fi
       fi
     fi
-  done < "$compose_file"
+    return 0
+  }
+
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^---[[:space:]]*$ ]]; then
+      _flush_k8s_doc
+      doc_kind=""
+      doc_name="$forced_svc"
+      in_metadata=false
+      in_httpget=false
+      doc_port=""
+      http_path=""
+      http_port=""
+      continue
+    fi
+
+    if [[ "$line" =~ ^kind:[[:space:]]* ]]; then
+      doc_kind=$(printf '%s' "$line" | sed 's/^kind:[[:space:]]*//' | tr -d "\"'" | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//')
+      in_metadata=false
+      continue
+    fi
+
+    if [[ "$line" =~ ^metadata:[[:space:]]*$ ]]; then
+      in_metadata=true
+      continue
+    fi
+
+    if [[ "$line" =~ ^[a-zA-Z] ]]; then
+      in_metadata=false
+    fi
+
+    if [[ "$in_metadata" == "true" && -z "$doc_name" ]] && \
+       printf '%s' "$line" | grep -qE '^[[:space:]]{2}name:[[:space:]]*'; then
+      doc_name=$(printf '%s' "$line" | sed 's/^[[:space:]]*name:[[:space:]]*//' | tr -d "\"'" | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//')
+      continue
+    fi
+
+    if printf '%s' "$line" | grep -qE 'containerPort:[[:space:]]*[0-9]+'; then
+      local _cp=""
+      _cp=$(printf '%s' "$line" | sed -nE 's/.*containerPort:[[:space:]]*([0-9]+).*/\1/p')
+      if [[ -z "$doc_port" && -n "$_cp" ]]; then
+        doc_port="$_cp"
+      fi
+    fi
+
+    if printf '%s' "$line" | grep -qE '^[[:space:]]+httpGet:'; then
+      in_httpget=true
+      continue
+    fi
+
+    if [[ "$in_httpget" == "true" ]]; then
+      if printf '%s' "$line" | grep -qE '^[[:space:]]+path:[[:space:]]*'; then
+        http_path=$(printf '%s' "$line" | sed 's/^[[:space:]]*path:[[:space:]]*//' | tr -d "\"'" | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//')
+      elif printf '%s' "$line" | grep -qE '^[[:space:]]+port:[[:space:]]*'; then
+        http_port=$(printf '%s' "$line" | sed 's/^[[:space:]]*port:[[:space:]]*//' | tr -d "\"'" | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//')
+      elif printf '%s' "$line" | grep -qE '^[[:space:]]*[a-zA-Z]+:' && ! printf '%s' "$line" | grep -qE '^[[:space:]]+(scheme|host|httpHeaders):'; then
+        in_httpget=false
+      fi
+    fi
+  done < "$yaml_file"
+
+  _flush_k8s_doc
+  return 0
+}
+
+# Scan static Kubernetes manifests for containerPort and httpGet probes
+_scan_k8s_manifest_ports() {
+  local dir="$1" k8s_dir="$2"
+  [[ -z "$k8s_dir" || ! -d "$k8s_dir" ]] && return 0
+
+  # 1. Per-service subdirectories recorded in _SCAN_PATHS
+  local i=0
+  while (( i < ${#_SCAN_PATHS[@]} )); do
+    local entry="${_SCAN_PATHS[$i]}"
+    i=$((i + 1))
+    local p_svc="${entry%%|*}"
+    local rest="${entry#*|}"
+    local p_type="${rest%%|*}"
+    local p_path="${rest#*|}"
+    [[ "$p_type" != "k8s_dir" ]] && continue
+
+    local _yf
+    for _yf in "${dir}/${p_path}"*.yaml "${dir}/${p_path}"*.yml; do
+      if [[ -f "$_yf" ]]; then
+        _scan_parse_k8s_yaml_file "$_yf" "$p_svc"
+      fi
+    done
+  done
+
+  # 2. Flat YAML files directly inside k8s_dir
+  local _fy
+  for _fy in "${k8s_dir}"/*.yaml "${k8s_dir}"/*.yml; do
+    if [[ -f "$_fy" ]]; then
+      _scan_parse_k8s_yaml_file "$_fy" ""
+    fi
+  done
+  return 0
 }
 
 # Detect monorepo service directories
@@ -833,24 +1256,30 @@ _scan_resolve_namespace() {
     local yaml_files=""
     # Collect k8s YAML files from common locations
     local _search_dirs="k8s kubernetes deploy infra"
-    local _sd
+    local _sd _ls_y=""
     for _sd in $_search_dirs; do
       if [[ -d "${project_dir}/${_sd}" ]]; then
-        yaml_files="${yaml_files} $(ls "${project_dir}/${_sd}"/*.yaml "${project_dir}/${_sd}"/*.yml 2>/dev/null || true)"
+        _ls_y=$(ls "${project_dir}/${_sd}"/*.yaml "${project_dir}/${_sd}"/*.yml 2>/dev/null || true)
+        [[ -n "$_ls_y" ]] && yaml_files="${yaml_files:+${yaml_files} }${_ls_y}"
         # Also check subdirs
         local _sub
         for _sub in "${project_dir}/${_sd}"/*/; do
-          [[ -d "$_sub" ]] && yaml_files="${yaml_files} $(ls "${_sub}"*.yaml "${_sub}"*.yml 2>/dev/null || true)"
+          if [[ -d "$_sub" ]]; then
+            _ls_y=$(ls "${_sub}"*.yaml "${_sub}"*.yml 2>/dev/null || true)
+            [[ -n "$_ls_y" ]] && yaml_files="${yaml_files:+${yaml_files} }${_ls_y}"
+          fi
         done
       fi
     done
     # Also check root-level YAML
-    yaml_files="${yaml_files} $(ls "${project_dir}"/*.yaml "${project_dir}"/*.yml 2>/dev/null || true)"
+    _ls_y=$(ls "${project_dir}"/*.yaml "${project_dir}"/*.yml 2>/dev/null || true)
+    [[ -n "$_ls_y" ]] && yaml_files="${yaml_files:+${yaml_files} }${_ls_y}"
 
     if [[ -n "$yaml_files" ]]; then
       # Match: namespace: value or namespace: "value" or namespace: 'value'
       # Skip template placeholders like {{ .Release.Namespace }}
-      yaml_ns=$(grep -h 'namespace:' $yaml_files 2>/dev/null \
+      # shellcheck disable=SC2086
+      yaml_ns=$(grep -h 'namespace:' $yaml_files </dev/null 2>/dev/null \
         | grep -v '{{' \
         | head -1 \
         | sed 's/.*namespace:[[:space:]]*//' \
@@ -1145,6 +1574,40 @@ scan_get_health() {
     fi
     i=$((i + 1))
   done
+  echo ""
+}
+
+# Infer health check for a service from real evidence, detected ports, or known infra defaults
+# Priority:
+#   1. Explicit health probe evidence (_SCAN_HEALTH: compose healthcheck / k8s probes)
+#   2. Detected port (_SCAN_PORTS: compose ports/expose, Dockerfile EXPOSE, k8s containerPort) -> tcp
+#   3. Known infra default port (redis 6379, postgres 5432, etc.) -> tcp
+#   4. Empty string (leave health check disabled)
+# Returns "type|endpoint|port" or ""
+# Usage: scan_infer_health "api"
+scan_infer_health() {
+  local svc="$1"
+  local explicit=""
+  explicit=$(scan_get_health "$svc")
+  if [[ -n "$explicit" ]]; then
+    echo "$explicit"
+    return 0
+  fi
+
+  local port=""
+  port=$(scan_get_port "$svc")
+  if [[ -n "$port" ]]; then
+    echo "tcp||${port}"
+    return 0
+  fi
+
+  local infra_port=""
+  infra_port=$(_scan_infra_default_port "$svc")
+  if [[ -n "$infra_port" ]]; then
+    echo "tcp||${infra_port}"
+    return 0
+  fi
+
   echo ""
 }
 
