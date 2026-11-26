@@ -217,10 +217,29 @@ auth_check_scope() {
   return 1
 }
 
+# True when muster was started directly by muster-agent (Fleet Cloud). The
+# agent execs muster without a shell, so it is our immediate parent. Not a
+# security boundary against local users: anyone who can run muster as this
+# user can already mint a token with `muster auth create`.
+_auth_parent_is_cloud_agent() {
+  local comm
+  comm=$(ps -o comm= -p "$PPID" 2>/dev/null) || return 1
+  comm="${comm##*/}"
+  comm="${comm%% *}"
+  [[ "$comm" == "muster-agent" ]]
+}
+
 # Convenience: validate token + check scope, emit JSON error on failure.
 # Usage: _json_auth_gate "read"
 _json_auth_gate() {
   local required_scope="$1"
+  # Read-only JSON for a Fleet Cloud agent: the relay authenticated the
+  # caller and the command arrived end-to-end encrypted, but agent exec
+  # requests can't carry MUSTER_TOKEN.
+  if [[ "$required_scope" == "read" && -z "${MUSTER_TOKEN:-}" ]] && _auth_parent_is_cloud_agent; then
+    AUTH_SCOPE="read"
+    return 0
+  fi
   if ! auth_validate_token; then
     return 1
   fi
