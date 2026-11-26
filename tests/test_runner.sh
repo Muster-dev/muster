@@ -3,6 +3,14 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Isolate every test from the real home directory: tests must never read
+# or write ~/.muster (skills, tokens, settings) on the developer's machine.
+_TEST_HOME=$(mktemp -d)
+trap 'rm -rf "$_TEST_HOME"' EXIT
+export HOME="$_TEST_HOME"
+export MUSTER_CLOUD_NO_KEYCHAIN=1 MUSTER_NO_BROWSER=1
+
 failures=0
 ran=0
 

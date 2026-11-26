@@ -51,19 +51,24 @@ if [[ -f "$MUSTER_ROOT/.muster.manifest" && "${MUSTER_NO_VERIFY}" != "true" ]]; 
   )
   _m_msg_idx=$(( RANDOM % ${#_m_msgs[@]} ))
   _m_loading_msg="${_m_msgs[$_m_msg_idx]}"
+  _m_anim_pid=""
+  # Only animate on an interactive terminal, and only on stderr, so piped
+  # output (muster --version | …, CI logs) stays clean.
+  if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
   (
     _lc=(166 172 178 208 214 220 226 220 214 208 178 172)
     _ls=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     _li=0
     _si=0
     while true; do
-      printf '\r\033[38;5;%dm  %s %s\033[0m' "${_lc[$_li]}" "${_ls[$_si]}" "$_m_loading_msg"
+      printf '\r\033[38;5;%dm  %s %s\033[0m' "${_lc[$_li]}" "${_ls[$_si]}" "$_m_loading_msg" >&2
       _li=$(( (_li + 1) % ${#_lc[@]} ))
       _si=$(( (_si + 1) % ${#_ls[@]} ))
       sleep 0.1
     done
   ) &
   _m_anim_pid=$!
+  fi
   _integrity_fail=false
 
   # Step 1: Verify manifest signature (inline openssl — no sourced code)
@@ -122,9 +127,11 @@ if [[ -f "$MUSTER_ROOT/.muster.manifest" && "${MUSTER_NO_VERIFY}" != "true" ]]; 
 
   # Step 4: Handle failure — warn + show tampered files + offer repair
   if [[ "$_integrity_fail" == "true" ]]; then
-    kill "$_m_anim_pid" 2>/dev/null; wait "$_m_anim_pid" 2>/dev/null
+    if [[ -n "$_m_anim_pid" ]]; then
+      kill "$_m_anim_pid" 2>/dev/null; wait "$_m_anim_pid" 2>/dev/null
+      printf '\r\033[K' >&2
+    fi
     _m_anim_pid=""
-    printf '\r\033[K'
     printf '\033[31m  ✗ App integrity check failed — files may have been tampered with\033[0m\n' >&2
     # Show tampered files
     if [[ -n "$_m_tampered_files" ]]; then
@@ -165,8 +172,8 @@ if [[ -f "$MUSTER_ROOT/.muster.manifest" && "${MUSTER_NO_VERIFY}" != "true" ]]; 
   # Clear loading animation
   if [[ -n "${_m_anim_pid:-}" ]]; then
     kill "$_m_anim_pid" 2>/dev/null; wait "$_m_anim_pid" 2>/dev/null
+    printf '\r\033[K' >&2
   fi
-  printf '\r\033[K'
   unset _integrity_fail _m_sig_file _m_pubkey _m_tmp_sig _m_manifest _m_lib _m_file _m_expected _m_actual _repair _m_msgs _m_msg_idx _m_loading_msg _m_anim_pid
 fi
 
