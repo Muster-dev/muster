@@ -12,32 +12,49 @@ source "$MUSTER_ROOT/lib/skills/manager.sh"
 source "$MUSTER_ROOT/lib/commands/history.sh"
 
 cmd_rollback() {
-  local _approve_hooks=false
+  local _approve_hooks=false _json_mode=false _rb_target=""
   [[ "${MUSTER_APPROVE_HOOKS:-}" == "1" || "${MUSTER_APPROVE_HOOKS:-}" == "true" ]] && _approve_hooks=true
-  while [[ "${1:-}" == --* ]]; do
+  while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo "Usage: muster rollback [--yes] [service]"
+        echo "Usage: muster rollback [--yes] [--json] [service]"
         echo ""
         echo "Rollback a service to its previous state. Without a service name, pick interactively."
         echo ""
         echo "Flags:"
         echo "  --yes    Approve changed/unapproved hooks without review (CI; same as"
         echo "           MUSTER_APPROVE_HOOKS=1)"
+        echo "  --json   Stream NDJSON events (start/log/done/health/summary), like"
+        echo "           deploy --json; needs a service name and MUSTER_TOKEN"
         echo ""
         echo "Exit codes: 0 rolled back, 1 rollback failed/aborted or hooks not approved"
         return 0
         ;;
       --yes) _approve_hooks=true; shift ;;
-      *)
+      --json) _json_mode=true; shift ;;
+      -*)
         err "Unknown flag: $1"
         echo "Run 'muster rollback --help' for usage."
         return 1
         ;;
+      *)
+        if [[ -n "$_rb_target" ]]; then
+          err "Rollback takes one service (got ${_rb_target} and $1)"
+          return 1
+        fi
+        _rb_target="$1"; shift ;;
     esac
   done
+  set -- ${_rb_target:+"$_rb_target"}
 
   load_config
+
+  if [[ "$_json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/commands/rollback_json.sh"
+    _rollback_json "${1:-}" "$_approve_hooks"
+    return $?
+  fi
+
   _load_env_file
 
   local target="${1:-}"
