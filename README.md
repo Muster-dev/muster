@@ -80,7 +80,9 @@ muster setup --help                                     # see all flags
 | `muster settings --global` | View/edit global settings (color, log retention, lock timeout, etc.) |
 | `muster uninstall` | Remove muster from project |
 | `muster verify` | Verify file integrity of muster installation |
-| `muster cloud login` | Sign in to Fleet Cloud via device flow (`logout`, `status` also available) |
+| `muster cloud login` | Sign in to Fleet Cloud via device flow (`--qr` for a QR code; `logout`, `status` also available) |
+| `muster cloud connect` | Pair this server with Fleet Cloud: installs muster-agent, shows a code + QR to approve, offers a service |
+| `muster ask [question]` | Ask the Muster Assistant why a deploy failed and what to do (Fleet Cloud; actions need your approval) |
 | `muster fleet` | Fleet manager — deploy to multiple machines |
 | `muster fleet deploy` | Deploy project to fleet machines |
 | `muster fleet status` | Check health across fleet |
@@ -314,6 +316,7 @@ Muster-wide preferences stored in `~/.muster/settings.json`:
 | `require_signing` | `off` | Require signed payloads in relay guard (`on`, `off`) |
 | `hook_security` | `on` | Per-machine hook approval & dangerous-command gate (`on`, `off`) |
 | `deploy_password_hash` | `""` | SHA-256 hash of optional deploy password (set via `deploy_password`) |
+| `assistant` | `on` | Muster Assistant (`muster ask`) on this machine (`on`, `off`) |
 | `cloud.*` | `{}` | Fleet Cloud connection settings (`cloud.relay`, `cloud.org_id`, `cloud.token_ref`, `cloud.token_id`, `cloud.name`; set via `muster cloud login`) |
 
 Edit interactively via the TUI, or from the command line:
@@ -476,8 +479,11 @@ When a deploy fails, muster doesn't just abort — it shows interactive recovery
 1. **Retry** — run the same deploy again (fresh log file)
 2. **Rollback** — run the service's rollback hook
 3. **Rollback & restart** — undo k8s image change + restart pods (k8s update mode only)
-4. **Skip and continue** — move on to the next service
-5. **Abort** — stop everything
+4. **Explain with AI** — ask the Muster Assistant what went wrong (when logged in to Fleet Cloud), then back to this menu
+5. **Skip and continue** — move on to the next service
+6. **Abort** — stop everything
+
+Non-interactive failures end with a `Get help: muster ask` hint. See [Muster Assistant](docs/assistant.md).
 
 On k8s services, muster auto-diagnoses failures before showing the menu — inspecting pod events, logs, and matching 11 known error patterns (ImagePullBackOff, ErrImagePull, ErrImageNeverPull, InvalidImageName, OOMKilled, CrashLoopBackOff, CreateContainerConfigError, RunContainerError, Unschedulable, missing secrets/PVCs, version mismatch). K8s deploy hooks also detect terminal errors early (within ~10s) instead of waiting for the full rollout timeout, and show rolling progress (`"2/3 pods ready"`).
 
@@ -550,6 +556,7 @@ The startup check uses an inline bootstrap trust chain — it verifies the integ
 | **Skills** | [Authoring Guide](docs/skills/skills.md) · [Marketplace](docs/skills/marketplace.md) · [Fleet Skills](docs/fleet/skills.md) |
 | **Security** | [Encryption](docs/security/encryption.md) · [Signing](docs/security/signing.md) · [Integrity](docs/security/integrity.md) |
 | **Agents** | [Agent Guide](docs/agent/agent.md) · [Installation](docs/agent/installation.md) |
+| **Assistant** | [muster ask & cloud connect](docs/assistant.md) · [Protocol](docs/assistant-and-pairing.md) |
 
 See [docs/docs-index.md](docs/docs-index.md) for the full index.
 

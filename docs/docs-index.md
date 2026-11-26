@@ -14,6 +14,11 @@
 
 - [Fleet](fleet/fleet.md) -- Multi-machine deployment, transports, strategies, groups
 
+## Assistant
+
+- [Muster Assistant](assistant.md) -- `muster ask`, tools, approvals, redaction, `--json` for muster-tui, `muster cloud connect`
+- [Protocol contract](assistant-and-pairing.md) -- Assistant API and machine pairing (shared with server/relay)
+
 ## Skills
 
 - [Creating Skills](skills/skills.md) -- Skill authoring: structure, hooks, config, fleet hooks, publishing
