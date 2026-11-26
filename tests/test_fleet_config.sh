@@ -15,6 +15,8 @@ source "$MUSTER_ROOT/lib/core/logger.sh"
 source "$MUSTER_ROOT/lib/core/utils.sh"
 
 TMPDIR=$(mktemp -d)
+export HOME="${TMPDIR}/home"
+mkdir -p "$HOME"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 FLEETS_BASE_DIR="${TMPDIR}/fleets"
@@ -117,5 +119,31 @@ _test_file_exists "staging fleet created" "${FLEETS_BASE_DIR}/staging/fleet.json
 _fleets=$(fleets_list 2>/dev/null)
 _test_contains "list fleets includes staging" "staging" "$_fleets"
 _test_contains "list fleets still includes production" "production" "$_fleets"
+
+# ────────────────────────────────────────
+echo ""
+echo "  Fleet config — --mode push|muster persistence"
+# ────────────────────────────────────────
+
+source "$MUSTER_ROOT/lib/core/fleet.sh"
+FLEETS_BASE_DIR="${TMPDIR}/fleets-mode"
+mkdir -p "$FLEETS_BASE_DIR"
+FLEET_CONFIG_FILE=""
+
+fleet_add_machine "push-box" "10.0.2.1" "deploy" "22" "" "/opt/app" "push" "ssh" "manual" >/dev/null 2>&1
+fleet_add_machine "muster-box" "10.0.2.2" "deploy" "22" "" "/opt/app" "muster" "ssh" "manual" >/dev/null 2>&1
+
+_fleet_load_machine "push-box"
+_test_eq "push mode persists without --sync" "push" "$_FM_MODE"
+_test_eq "push box hook_mode stays manual" "manual" "$_FM_HOOK_MODE"
+
+_fleet_load_machine "muster-box"
+_test_eq "muster mode persists" "muster" "$_FM_MODE"
+
+# Legacy project.json without explicit mode field still derives from hook_mode
+fleet_cfg_project_create "default" "default" "legacy-box" \
+  '{"name":"legacy-box","machine":{"host":"10.0.2.3","user":"deploy","port":22,"transport":"ssh"},"hook_mode":"manual"}' >/dev/null 2>&1
+_fleet_load_machine "legacy-box"
+_test_eq "legacy project.json without mode derives muster from manual" "muster" "$_FM_MODE"
 
 _test_summary

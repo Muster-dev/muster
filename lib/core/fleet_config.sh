@@ -220,7 +220,7 @@ fleet_cfg_project_dir() {
 
 # Vars set by fleet_cfg_project_load:
 _FP_NAME="" _FP_HOST="" _FP_USER="" _FP_PORT="" _FP_TRANSPORT=""
-_FP_IDENTITY="" _FP_REMOTE_PATH="" _FP_HOOK_MODE="" _FP_STACK=""
+_FP_IDENTITY="" _FP_REMOTE_PATH="" _FP_HOOK_MODE="" _FP_MODE="" _FP_STACK=""
 _FP_SERVICES="" _FP_DEPLOY_ORDER="" _FP_PATH=""
 _FP_FLEET="" _FP_GROUP="" _FP_PROJECT=""
 
@@ -236,9 +236,10 @@ fleet_cfg_project_load() {
   _FP_FLEET="$fleet"
   _FP_GROUP="$group"
   _FP_PROJECT="$project"
+  _FP_MODE=""
 
   local data
-  data=$(jq -r '"\(.name // "")\n\(.machine.host // "")\n\(.machine.user // "")\n\(.machine.port // 22)\n\(.machine.transport // "ssh")\n\(.machine.identity_file // "")\n\(.remote_path // "")\n\(.hook_mode // "manual")\n\(.stack // "")\n\(.path // "")"' "$cfg" 2>/dev/null)
+  data=$(jq -r '"\(.name // "")\n\(.machine.host // "")\n\(.machine.user // "")\n\(.machine.port // 22)\n\(.machine.transport // "ssh")\n\(.machine.identity_file // "")\n\(.remote_path // "")\n\(.hook_mode // "manual")\n\(.stack // "")\n\(.path // "")\n\(.mode // "")"' "$cfg" 2>/dev/null)
 
   local i=0
   while IFS= read -r _line; do
@@ -253,6 +254,7 @@ fleet_cfg_project_load() {
       7) _FP_HOOK_MODE="$_line" ;;
       8) _FP_STACK="$_line" ;;
       9) _FP_PATH="$_line" ;;
+      10) _FP_MODE="$_line" ;;
     esac
     i=$(( i + 1 ))
   done <<< "$data"
@@ -263,6 +265,7 @@ fleet_cfg_project_load() {
   [[ "$_FP_IDENTITY" == "null" ]] && _FP_IDENTITY=""
   [[ "$_FP_REMOTE_PATH" == "null" ]] && _FP_REMOTE_PATH=""
   [[ -z "$_FP_HOOK_MODE" || "$_FP_HOOK_MODE" == "null" ]] && _FP_HOOK_MODE="manual"
+  [[ "$_FP_MODE" == "null" ]] && _FP_MODE=""
   [[ "$_FP_STACK" == "null" ]] && _FP_STACK=""
   [[ "$_FP_PATH" == "null" ]] && _FP_PATH=""
 
@@ -526,7 +529,7 @@ fleet_migrate() {
       local _mname
       while IFS= read -r _mname; do
         [[ -z "$_mname" ]] && continue
-        local _mhost _muser _mport _midentity _mproject_dir _mtransport _mhook_mode
+        local _mhost _muser _mport _midentity _mproject_dir _mtransport _mhook_mode _mmode
         _mhost=$(jq -r --arg n "$_mname" '.machines[$n].host // ""' "$HOME/.muster/remotes.json" 2>/dev/null)
         _muser=$(jq -r --arg n "$_mname" '.machines[$n].user // ""' "$HOME/.muster/remotes.json" 2>/dev/null)
         _mport=$(jq -r --arg n "$_mname" '.machines[$n].port // 22' "$HOME/.muster/remotes.json" 2>/dev/null)
@@ -534,11 +537,13 @@ fleet_migrate() {
         _mproject_dir=$(jq -r --arg n "$_mname" '.machines[$n].project_dir // ""' "$HOME/.muster/remotes.json" 2>/dev/null)
         _mtransport=$(jq -r --arg n "$_mname" '.machines[$n].transport // "ssh"' "$HOME/.muster/remotes.json" 2>/dev/null)
         _mhook_mode=$(jq -r --arg n "$_mname" '.machines[$n].hook_mode // "manual"' "$HOME/.muster/remotes.json" 2>/dev/null)
+        _mmode=$(jq -r --arg n "$_mname" '.machines[$n].mode // ""' "$HOME/.muster/remotes.json" 2>/dev/null)
 
         [[ "$_midentity" == "null" ]] && _midentity=""
         [[ "$_mproject_dir" == "null" ]] && _mproject_dir=""
         [[ "$_mtransport" == "null" ]] && _mtransport="ssh"
         [[ "$_mhook_mode" == "null" ]] && _mhook_mode="manual"
+        [[ "$_mmode" == "null" ]] && _mmode=""
 
         # Check if this project already exists from groups migration
         local _proj_dir="${FLEETS_BASE_DIR}/default/default/${_mname}"
@@ -554,6 +559,11 @@ fleet_migrate() {
             jq --arg pd "$_mproject_dir" '.remote_path = $pd' \
               "${_proj_dir}/project.json" > "$_tmp" && mv "$_tmp" "${_proj_dir}/project.json"
           fi
+          if [[ -n "$_mmode" ]]; then
+            local _tmp="${_proj_dir}/project.json.tmp"
+            jq --arg md "$_mmode" '.mode = $md' \
+              "${_proj_dir}/project.json" > "$_tmp" && mv "$_tmp" "${_proj_dir}/project.json"
+          fi
         else
           mkdir -p "$_proj_dir"
           jq -n \
@@ -565,9 +575,11 @@ fleet_migrate() {
             --arg identity "$_midentity" \
             --arg remote_path "$_mproject_dir" \
             --arg hook_mode "$_mhook_mode" \
+            --arg mode "$_mmode" \
             '{name: $n, machine: ({host: $host, user: $user, port: $port, transport: $transport} +
               (if $identity != "" then {identity_file: $identity} else {} end)),
               hook_mode: $hook_mode} +
+              (if $mode != "" then {mode: $mode} else {} end) +
               (if $remote_path != "" then {remote_path: $remote_path} else {} end)' \
             > "${_proj_dir}/project.json"
 

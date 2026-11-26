@@ -233,13 +233,17 @@ _fleet_load_machine() {
     _FM_PROJECT_DIR="$_FP_REMOTE_PATH"
     _FM_TRANSPORT="$_FP_TRANSPORT"
     _FM_HOOK_MODE="$_FP_HOOK_MODE"
-    # Map hook_mode to old mode field
-    case "$_FP_HOOK_MODE" in
-      manual) _FM_MODE="muster" ;;
-      sync)   _FM_MODE="push" ;;
-      local)  _FM_MODE="push" ;;
-      *)      _FM_MODE="push" ;;
-    esac
+    # Use explicit mode when persisted; fall back to hook_mode for legacy project.json
+    if [[ -n "$_FP_MODE" ]]; then
+      _FM_MODE="$_FP_MODE"
+    else
+      case "$_FP_HOOK_MODE" in
+        manual) _FM_MODE="muster" ;;
+        sync)   _FM_MODE="push" ;;
+        local)  _FM_MODE="push" ;;
+        *)      _FM_MODE="push" ;;
+      esac
+    fi
     return 0
   fi
 
@@ -356,11 +360,12 @@ fleet_add_machine() {
     --argjson port "$port" \
     --arg identity "$identity" \
     --arg project_dir "$project_dir" \
+    --arg mode "$mode" \
     --arg transport "$transport" \
     --arg hook_mode "$hook_mode" \
     '{name: $n, machine: ({host: $host, user: $user, port: $port, transport: $transport} +
       (if $identity != "" then {identity_file: $identity} else {} end)),
-      hook_mode: $hook_mode} +
+      mode: $mode, hook_mode: $hook_mode} +
       (if $project_dir != "" then {remote_path: $project_dir} else {} end)')
 
   fleet_cfg_project_create "$_fleet" "default" "$name" "$_json"
