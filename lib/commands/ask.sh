@@ -557,13 +557,23 @@ _ask_latest_log() {
 
 _ask_tool_logs() {
   local svc="$1" lines="$2"
+  local latest out rc=0
   if _ask_supports logs_tail; then
-    _ask_muster 30 logs "$svc" --tail "$lines"
-    return $?
+    out=$(_ask_muster 30 logs "$svc" --tail "$lines") || rc=$?
+    if ((rc == 0)) && [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    # The live log source failed: add the newest deploy log, if any
+    latest=$(_ask_latest_log "$svc")
+    printf '%s\n' "$out"
+    [[ -n "$latest" ]] || return 1
+    printf '# muster logs exited %s; latest deploy log: %s\n' "$rc" "${latest#"${_ASK_PROJECT}"/}"
+    tail -n "$lines" "$latest"
+    return 0
   fi
   # FALLBACK (pre engine-api): no `muster logs --tail`; logs hooks stream
   # forever, so show the newest deploy log for the service instead.
-  local latest
   latest=$(_ask_latest_log "$svc")
   if [[ -z "$latest" ]]; then
     printf 'No logs found for %s (no deploy logs in .muster/logs).\n' "$svc"

@@ -52,6 +52,8 @@ git init -q .
 "$M" setup --services api,web --stack bare --health api=none --health web=none --name shop --force >/dev/null 2>&1
 printf '#!/usr/bin/env bash\necho "connecting with DB_PASSWORD=hunter2hunter2 to postgres://app:pgS3cret@db/app"\necho "token ghp_abcdefghijklmnopqrstuvwxyz0123456789"\nexit 1\n' > .muster/hooks/api/deploy.sh
 printf '#!/usr/bin/env bash\necho rolled > "%s"\necho "api rolled back"\n' "$MARK" > .muster/hooks/api/rollback.sh
+printf '#!/usr/bin/env bash\necho "live: retrying with DB_PASSWORD=hunter2hunter2"\n' > .muster/hooks/api/logs.sh
+rm -f .muster/hooks/web/logs.sh
 chmod +x .muster/hooks/api/*.sh
 printf 'APP_SIGNING_VALUE=zebra-banana-42\nPORT=3000\n' > .env
 printf '#!/usr/bin/env bash\necho "starting with zebra-banana-42"\nexit 1\n' > .muster/hooks/web/deploy.sh
@@ -104,7 +106,7 @@ _test_eq "bearer token sent" "Bearer mst_cli_testtoken123" "$(jq -r 'select(.pat
 r1=$(jq -c 'select(.body.tool_results) | .body.tool_results' "$LOG" | sed -n 1p)
 _test_eq "both read results in one turn" "tu_status,tu_logs" "$(printf '%s' "$r1" | jq -r 'map(.tool_use_id) | join(",")')"
 _test_contains "status result is muster status --json" '"services"' "$(printf '%s' "$r1" | jq -r '.[0].content')"
-_test_contains "logs result has the deploy log" "connecting with DB_PASSWORD" "$(printf '%s' "$r1" | jq -r '.[1].content')"
+_test_contains "logs result has the service's log output" "DB_PASSWORD=" "$(printf '%s' "$r1" | jq -r '.[1].content')"
 r2=$(jq -c 'select(.body.tool_results) | .body.tool_results' "$LOG" | sed -n 2p)
 _test_eq "declined action is_error" "true" "$(printf '%s' "$r2" | jq -r '.[0].is_error')"
 _test_eq "declined action content" "The user declined this action." "$(printf '%s' "$r2" | jq -r '.[0].content')"
