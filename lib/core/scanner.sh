@@ -329,6 +329,20 @@ scan_project() {
     done
   done
 
+  # Compose files list their services exactly (parsed above): don't grep them
+  # for hints too, or an image like nginx:alpine on a "web" service turns
+  # into a separate "nginx" service.
+  if [[ -n "$hint_files" && -n "$(scan_get_compose_file)" ]]; then
+    local _hf _kept=""
+    for _hf in $hint_files; do
+      case "$(basename "$_hf")" in
+        docker-compose*.yml|docker-compose*.yaml|compose*.yml|compose*.yaml) continue ;;
+      esac
+      _kept="${_kept:+${_kept} }${_hf}"
+    done
+    hint_files="$_kept"
+  fi
+
   if [[ -n "$hint_files" ]]; then
     _scan_hint "$hint_files" "redis" "redis"
     _scan_hint "$hint_files" "postgres|postgresql" "postgres"
