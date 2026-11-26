@@ -1,0 +1,5 @@
+Step 7/7 : CMD ["node", "server.js"]
+Successfully built 4f1c2a9b8e7d
+Successfully tagged api:latest
+Starting api container...
+docker: Error response from daemon: driver failed programming external connectivity on endpoint api (3c1f...): Bind for 0.0.0.0:8080 failed: port is already allocated.

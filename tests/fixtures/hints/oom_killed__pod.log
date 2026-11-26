@@ -1,0 +1,4 @@
+Waiting for rollout... 1/2 pods ready (40s)
+Last State:     Terminated
+  Reason:       OOMKilled
+  Exit Code:    137

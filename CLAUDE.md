@@ -9,7 +9,8 @@ muster setup       # interactive setup wizard (creates muster.json + hooks)
 muster init        # alias for muster setup
 muster setup --scan                  # non-interactive: auto-detect everything
 muster setup --services api,redis    # non-interactive: explicit services
-muster setup --force --scan          # overwrite existing muster.json
+muster setup --force --scan          # start over (edited hooks backed up first)
+muster setup --update --scan         # re-run: add new services, keep edits
 muster setup --help                  # show all setup flags
 muster setup --scan --dry-run --json # preview what setup would configure (writes nothing)
 muster             # dashboard (live health + action menu + installed skills)
@@ -21,6 +22,12 @@ muster deploy --dry-run        # preview deploy plan without executing
 muster deploy --dry-run api    # dry-run a single service
 muster deploy --json --stop-on-failure   # stop at first failure, rest reported not_run
 muster deploy --from web       # resume from web in deploy order
+muster deploy --no-preflight   # skip pre-deploy checks
+muster explain                 # explain the last failure (offline rules engine)
+muster explain api             # explain a service's newest log
+muster explain --log FILE      # explain any log (works outside a project)
+muster explain --json          # machine-readable (muster-tui)
+muster explain --fix [--yes]   # explain, then run the suggested fix
 muster dev         # deploy + watch health every 5s (Ctrl+C to cleanup)
 muster status      # health check all services
 muster logs <svc>  # stream logs for a service
@@ -34,7 +41,8 @@ muster history     # show deploy/rollback event log
 muster history --all           # show full history (not just recent)
 muster history api             # show history for one service
 muster doctor      # run project diagnostics (6 categories)
-muster doctor --fix            # auto-fix what it can (permissions, stale PIDs, old logs, .dockerignore)
+muster doctor --fix            # safe fixes auto (permissions, stale PIDs/locks, old logs, .dockerignore); others ask
+muster doctor --fix --yes      # run every available fix without asking
 muster cleanup     # clean stuck processes + old logs
 muster settings    # project settings + global muster settings
 muster settings --global                  # dump global settings as JSON
@@ -80,9 +88,9 @@ muster --minimal deploy api   # build context warnings as stderr comments
 muster/
 ├── bin/muster                     ← entry point (routes commands, startup integrity check)
 ├── bin/muster-mcp                 ← MCP stdio transport (uses shared scanner)
-├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant
+├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn
 ├── lib/tui/                       ← menu, checklist, spinner, progress, streambox, dashboard, order
-├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud
+├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain
 ├── lib/agent/muster-agent.sh     ← standalone fleet monitoring daemon (no lib dependencies)
 ├── lib/skills/manager.sh          ← skill lifecycle (reads name from skill.json)
 ├── templates/deploy.example.json  ← example config
@@ -90,6 +98,7 @@ muster/
 │   ├── {k8s,compose,docker}/infra/ ← infrastructure service variants (pull-only, no build)
 │   └── dev/                       ← local dev stack (PID-managed processes, docker compose infra)
 ├── docs/ENGINE-API.md             ← --json contract (every command/event shape; muster-tui relies on it)
+├── docs/troubleshooting.md        ← generated from the rule table (make docs)
 ├── docs/fleet/fleet.md            ← fleet deployment guide
 ├── docs/skills/skills.md          ← skill authoring guide
 ├── FLEET.md                       ← fleet & cloud overview
@@ -105,7 +114,9 @@ your-project/
 ├── .musterignore      ← (optional) patterns to exclude from scanning
 └── .muster/
     ├── hooks/<svc>/   ← deploy.sh, health.sh, rollback.sh, logs.sh, cleanup.sh
-    ├── logs/          ← deploy logs (gitignored)
+    ├── logs/          ← deploy logs (gitignored); .last_failure feeds explain/Next step
+    ├── .template_hashes ← checksums of generated hooks (edit detection on re-run)
+    ├── .menu_state    ← remembered picker choices
     └── pids/          ← PID files for dev stack (gitignored)
 ```
 
@@ -191,6 +202,28 @@ Deploy and rollback failures show interactive recovery menus instead of aborting
 
 **Interactive service selection:** `muster deploy` with >1 service in a TTY shows "All services" / "Select services" menu. "Select services" opens a checklist (`lib/tui/checklist.sh`). Non-interactive (scripts, CI) deploys all as before.
 
+## Rules Engine, Preflight & Explain
+
+`lib/core/hints.sh` is an offline, deterministic table of failure rules (`_hr id 'ERE' 'title' 'try'`). Rules are matched against the last 300 log lines, the exit code (124 → `deploy_timeout`; with no log clue, 126/127/137) and the environment. The first match is the "likely cause", so specific rules come before generic ones. An optional `_hint_enrich_<id>` function refines the text and can attach `HINT_FIX_CMD`/`HINT_FIX_LABEL`. Fix commands are built only from validated values, and they run only after confirmation (`hints_run_fix`). Built-in fixes are `_hints_fix_*` functions that edit muster.json. `ssh_host_key` never gets a fix.
+
+- Deploy/rollback failure: `hints_show_for_failure svc log rc` prints **Likely cause / Try** after `k8s_diagnose_failure` and records `.muster/logs/.last_failure`. The menu gets `Fix: <label>` when `HINT_FIX_CMD` is set. `--json` emits `{"event":"hint"}`.
+- Health failure: `hints_health svc` probes the check (wrong port via the service's PID file, refused, timeout, 5xx, 4xx).
+- `muster explain` (`lib/commands/explain.sh`) and `muster status` use the same engine.
+- Preflight (`lib/core/preflight.sh`, `_preflight [--no-prompt] dir svc...`) runs these checks: tools/daemon, kube context/namespace/prod-context, disk, ports (dev/bare), hooks, env refs, git, stale locks, SSH. Blocking problems get Fix it / Continue anyway / Abort in a TTY, and exit 1 without one. `--no-preflight` skips them. Clean results are cached `MUSTER_PREFLIGHT_TTL` (60s) in `.muster/.preflight_ok`.
+- Doctor reuses the preflight checks (Deploy Readiness) and groups its output as **Needs attention / Fine**. `--fix` applies safe fixes and asks before the rest.
+- Adding a rule: add `_hr …` in the right priority spot and a fixture `tests/fixtures/hints/<id>__<name>.log`, then run `make docs`. `tests/test_hints.sh` checks every rule has a docs section.
+
+## CLI Ergonomics
+
+- Did-you-mean (`lib/core/suggest.sh`) uses edit distance or a unique prefix. It covers commands (read from bin/muster's router, so new commands are picked up automatically), deploy/setup/explain flags, and service names.
+- Dashboard **Next step** (`lib/core/nextstep.sh`, `_next_step dir`) picks one suggestion: a recent unfixed failure (Explain), hooks needing approval, a stale lock (Doctor --fix), no deploys yet (Deploy), or an available update. Its action goes first in the menu, so Enter runs it.
+- `menu_select` reads optional `MENU_REMEMBER=<key>` (per-project `.muster/.menu_state`) and `MENU_NONTTY_HINT`. It shows an empty state for zero options and truncates labels to the terminal width.
+- Rollback from the picker and `muster cleanup` (`--yes` skips it) confirm first and say what will run.
+
+## Setup Transactions
+
+`lib/core/setup_txn.sh`: `_setup_txn_begin` creates `.muster-setup.XXXXXX` inside the project, and generation writes to `$_SETUP_TXN_CONFIG`/`$_SETUP_TXN_MUSTER`. `_setup_txn_commit` then merges everything into place. `_SETUP_TXN_MODE=update` merges muster.json (existing entries win) and keeps edited hooks. `fresh` backs edited hooks up. Ctrl+C before the commit removes the staging dir and exits 130. `MUSTER_TEST_SETUP_INTERRUPT=<checkpoint>` simulates that in tests. `_setup_dedupe_services` sanitizes keys and resolves collisions. `_setup_check_tools`, `_setup_verify_health` and `_setup_read_port` handle the "smart" prompts.
+
 ## Build Context Overlap Detection
 
 `lib/core/build_context.sh` detects when one service's Docker build context (usually `.`) contains another service's directory in a monorepo. This causes cache invalidation, bloated contexts, and potential secret leakage.
@@ -255,3 +288,4 @@ Every `--json` command prints only JSON on stdout (NDJSON for streams), human te
 - Colors via variables from `lib/core/colors.sh` (never hardcode escapes)
 - Array append: `arr[${#arr[@]}]=value` (not `arr+=()`)
 - Test with `bash -n file.sh` for syntax validation
+- Tests that touch docker/kubectl/lsof/ssh source `tests/mock_helpers.sh` (fake binaries on PATH); interactive flows use `tests/pty_drive.py` (`"expect=>send"` steps, `--minimal` numbered menus)

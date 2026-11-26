@@ -1,0 +1,2 @@
+#10 [build 5/7] RUN go build -o /app ./cmd/api
+#10 0.9 cmd/api/main.go:8:2: missing go.sum entry for module providing package github.com/go-chi/chi/v5 (imported by example.com/api/cmd/api); to add:

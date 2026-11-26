@@ -8,7 +8,8 @@
 
 - [Deploy](deploy/deploy.md) -- Deploy flow, service selection, dry-run, failure recovery, JSON mode
 - [Hooks](deploy/hooks.md) -- Hook types, environment variables, stack templates, security scanning
-- [Setup Wizard](deploy/setup-wizard.md) -- Interactive and non-interactive setup, scanning, K8s introspection
+- [Setup Wizard](deploy/setup-wizard.md) -- Interactive and non-interactive setup, scanning, K8s introspection, re-running safely
+- [Troubleshooting](troubleshooting.md) -- Every failure pattern muster recognizes, what it means, and the fix (`muster explain`)
 
 ## Fleet
 

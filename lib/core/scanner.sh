@@ -11,6 +11,7 @@ _SCAN_K8S_NAMES=()   # "stripped_name|original_deploy_name" entries
 _SCAN_K8S_NS=""      # resolved namespace
 _SCAN_K8S_PREFIX=""   # common deployment name prefix
 _SCAN_DEV_CMDS=()    # "service|start_cmd|default_port" entries for dev stack
+_SCAN_EXTRA_COMPOSE=()  # other compose files next to the main one
 _SCAN_PORTS=()       # "service|port" entries from Dockerfile EXPOSE / compose ports
 _SCAN_SECRETS=()     # secret variable names from .env files (names only, never values)
 _SCAN_GIT_REMOTE=""  # git remote URL (origin)
@@ -116,6 +117,7 @@ scan_project() {
   _SCAN_SECRETS=()
   _SCAN_GIT_REMOTE=""
   _SCAN_GIT_BRANCH=""
+  _SCAN_EXTRA_COMPOSE=()
 
   local has_k8s=false has_compose=false has_docker=false has_systemd=false
 
@@ -192,6 +194,16 @@ scan_project() {
           break 2
         fi
       done
+    done
+  fi
+
+  # Other compose files next to the chosen one (overrides, per-env files)
+  if [[ -n "$compose_file" ]]; then
+    local _cdir _cf
+    _cdir=$(dirname "$compose_file")
+    for _cf in "$_cdir"/docker-compose*.y*ml "$_cdir"/compose*.y*ml; do
+      [[ -f "$_cf" && "$_cf" != "$compose_file" ]] || continue
+      _SCAN_EXTRA_COMPOSE[${#_SCAN_EXTRA_COMPOSE[@]}]="${_cf#"${dir}"/}"
     done
   fi
 
@@ -602,6 +614,27 @@ _scan_parse_dockerfile_expose() {
       _scan_add_port "$svc" "$_p"
     done
   done < <(grep -i '^[[:space:]]*EXPOSE[[:space:]]' "$full_path" 2>/dev/null || true)
+
+  _scan_parse_dockerfile_healthcheck "$svc" "$full_path"
+}
+
+# Parse HEALTHCHECK ... CMD curl/wget http://localhost:PORT/PATH from a
+# Dockerfile into _SCAN_HEALTH (only when nothing better is known)
+_scan_parse_dockerfile_healthcheck() {
+  local svc="$1" full_path="$2"
+  [[ -z "$svc" || ! -f "$full_path" ]] && return 0
+  [[ -n "$(scan_get_health "$svc")" ]] && return 0
+  local hc url port path
+  # Join continuation lines, then take the HEALTHCHECK instruction
+  hc=$(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$full_path" 2>/dev/null | grep -i '^[[:space:]]*HEALTHCHECK' | grep -vi 'HEALTHCHECK[[:space:]]\{1,\}NONE' | head -1 || true)
+  [[ -z "$hc" ]] && return 0
+  url=$(printf '%s' "$hc" | grep -Eo 'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:[0-9]+)?(/[^ "'"'"']*)?' | head -1 || true)
+  [[ -z "$url" ]] && return 0
+  port=$(printf '%s' "$url" | sed -nE 's#^https?://[^:/]+:([0-9]+).*#\1#p')
+  path=$(printf '%s' "$url" | sed -nE 's#^https?://[^/]+(/.*)$#\1#p')
+  [[ -z "$port" ]] && port=$(scan_get_port "$svc")
+  [[ -z "$port" ]] && port=80
+  _SCAN_HEALTH[${#_SCAN_HEALTH[@]}]="${svc}|http|${path:-/}|${port}"
 }
 
 # Parse EXPOSE directives from Dockerfiles
@@ -1688,7 +1721,7 @@ _scan_detect_dev_cmds() {
 
     # Detect port from scripts
     local port_match=""
-    port_match=$(grep -oE '[-]-port[= ]+[0-9]+' "${dir}/package.json" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true)
+    port_match=$(grep -oE '([-]-port[= ]+|[[:space:]"]-p[= ]+|PORT=)[0-9]+' "${dir}/package.json" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true)
     [[ -n "$port_match" ]] && dev_port="$port_match"
 
     # Framework port defaults

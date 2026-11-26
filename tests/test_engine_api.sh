@@ -111,6 +111,7 @@ echo "  k8s diagnosis"
 cat > "$TMP/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  "config current-context"*) echo "test-ctx" ;;
   "describe deployment"*) echo "NewReplicaSet:   api-7d9c (1/1 replicas created)" ;;
   "get pods"*) echo "api-7d9c-xk2   0/1   ImagePullBackOff   0   1m" ;;
   "describe pod"*) printf 'Name: api-7d9c-xk2\nEvents:\n  Warning  Failed  kubelet  Failed to pull image "acme/api:4f2a"\n  Normal   BackOff  kubelet  Back-off pulling image (ImagePullBackOff)\n' ;;

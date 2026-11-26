@@ -1,0 +1,4 @@
+#9 [4/6] RUN npm ci --omit=dev
+#9 1.234 npm ERR! code EUSAGE
+#9 1.235 npm ERR! The `npm ci` command can only install with an existing package-lock.json or
+#9 1.235 npm ERR! npm-shrinkwrap.json with lockfileVersion >= 1.

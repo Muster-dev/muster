@@ -1,0 +1,5 @@
+ Container proj-redis-1  Running
+ Container proj-api-1  Recreate
+ Container proj-api-1  Recreated
+ Container proj-api-1  Starting
+ Container proj-api-1  Started

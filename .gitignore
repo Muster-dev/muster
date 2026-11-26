@@ -6,3 +6,4 @@
 .muster.manifest.sig
 
 
+!tests/fixtures/**/*.log

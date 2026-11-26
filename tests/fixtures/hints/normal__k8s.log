@@ -1,0 +1,6 @@
+Building and pushing localhost:5000/api:latest
+latest: digest: sha256:2f1e... size: 1784
+deployment.apps/api image updated
+Waiting for rollout... 1/2 pods ready (5s)
+Waiting for rollout... 2/2 pods ready (10s)
+deployment "api" successfully rolled out

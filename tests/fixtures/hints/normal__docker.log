@@ -1,0 +1,11 @@
+Building api...
+#1 [internal] load build definition from Dockerfile
+#5 [2/5] WORKDIR /app
+#7 [4/5] RUN npm ci --omit=dev
+#7 3.21 added 212 packages, and audited 213 packages in 3s
+#7 3.22 found 0 vulnerabilities
+#9 exporting to image
+#9 naming to docker.io/library/api:latest done
+Starting api container...
+a1b2c3d4e5f6
+api is up on port 8080

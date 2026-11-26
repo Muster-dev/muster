@@ -14,6 +14,8 @@ source "$MUSTER_ROOT/lib/core/just_runner.sh"
 source "$MUSTER_ROOT/lib/core/hook_security.sh"
 source "$MUSTER_ROOT/lib/skills/manager.sh"
 source "$MUSTER_ROOT/lib/commands/history.sh"
+source "$MUSTER_ROOT/lib/core/preflight.sh"
+source "$MUSTER_ROOT/lib/core/suggest.sh"
 
 # Run a deploy command with TUI stream box (interactive) or plain (non-interactive)
 # Usage: _deploy_run_hook "title" "log_file" command args...
@@ -258,65 +260,12 @@ _deploy_progress() {
   echo ""
 }
 
-# ── Preflight: check the tools selected services need before any hook runs ──
-# Detection: k8s via the service's "k8s" config key or kubectl in its hooks;
-# docker/compose by grepping the deploy hook (or justfile). Remote services
-# are skipped (their tools live on the remote host; ssh is checked elsewhere).
-# Args: project_dir service...
-# Returns: 0 ok, 1 a required tool is missing/unreachable (message printed)
+# ── Preflight: tools, daemons, cluster, disk, ports, hooks, env, git, locks
+# and SSH, checked before any hook runs (lib/core/preflight.sh).
+# Args: [--no-prompt] project_dir service...
+# Returns: 0 ok (or user chose to continue), 1 blocked/aborted
 _deploy_preflight() {
-  local project_dir="$1"; shift
-  local need_docker=false need_compose=false need_k8s=false
-  local svc
-  for svc in "$@"; do
-    remote_is_enabled "$svc" && continue
-    local hd="${project_dir}/.muster/hooks/${svc}"
-    local files=""
-    [[ -f "${hd}/deploy.sh" ]] && files="${hd}/deploy.sh"
-    [[ -f "${hd}/justfile" ]] && files="${files} ${hd}/justfile"
-    [[ -z "$files" ]] && continue
-    local k8s_cfg
-    k8s_cfg=$(config_get ".services.${svc}.k8s" 2>/dev/null)
-    # shellcheck disable=SC2086
-    if [[ -n "$k8s_cfg" && "$k8s_cfg" != "null" ]] || grep -q 'kubectl' $files 2>/dev/null; then
-      need_k8s=true
-    fi
-    # shellcheck disable=SC2086
-    if grep -Eq '(^|[^-[:alnum:]_])docker[[:space:]]+compose([^-[:alnum:]_]|$)' $files 2>/dev/null; then
-      need_docker=true; need_compose=true
-    elif grep -Eq '(^|[^-[:alnum:]_])docker([^-[:alnum:]_]|$)' $files 2>/dev/null; then
-      need_docker=true
-    fi
-  done
-
-  if [[ "$need_docker" == "true" ]]; then
-    if ! has_cmd docker; then
-      err "Docker isn't installed (no 'docker' on PATH). Install Docker Desktop or colima and retry."
-      return 1
-    fi
-    if [[ "$need_compose" == "true" ]] && ! docker compose version >/dev/null 2>&1; then
-      err "Docker Compose isn't available ('docker compose' failed). Install the Compose v2 plugin and retry."
-      return 1
-    fi
-    if ! _run_with_timeout 15 docker info >/dev/null 2>&1; then
-      err "Docker isn't running. Start Docker Desktop/colima and retry."
-      return 1
-    fi
-  fi
-
-  if [[ "$need_k8s" == "true" ]]; then
-    if ! has_cmd kubectl; then
-      err "kubectl isn't installed. Install it and retry."
-      return 1
-    fi
-    if ! _run_with_timeout 10 kubectl version --request-timeout=5s >/dev/null 2>&1; then
-      local ctx
-      ctx=$(kubectl config current-context 2>/dev/null)
-      err "Can't reach the Kubernetes cluster (context: ${ctx:-none}). Check 'kubectl config current-context' and retry."
-      return 1
-    fi
-  fi
-  return 0
+  _preflight "$@"
 }
 
 cmd_deploy() {
@@ -352,7 +301,7 @@ _deploy_main() {
   local dry_run=false
   local _json_mode=false
   local _force=false
-  local _approve_hooks=false
+  local _approve_hooks=false _no_preflight=false
   local _stop_on_failure=false _from_svc=""
   [[ "${MUSTER_APPROVE_HOOKS:-}" == "1" || "${MUSTER_APPROVE_HOOKS:-}" == "true" ]] && _approve_hooks=true
   _DR_STOP_ON_FAILURE=false
@@ -376,6 +325,7 @@ _deploy_main() {
         echo "  --stop-on-failure  Stop at the first failed service; the rest are"
         echo "                  reported as not_run (no recovery menu)"
         echo "  --from <service>   Start at this service in deploy order (resume)"
+        echo "  --no-preflight  Skip pre-deploy checks (tools, cluster, disk, ports, env)"
         echo "  --yes           Approve changed/unapproved hooks without review (for CI;"
         echo "                  same as MUSTER_APPROVE_HOOKS=1)"
         echo "  -h, --help      Show this help"
@@ -408,8 +358,10 @@ _deploy_main() {
         fi
         _from_svc="$2"; shift 2 ;;
       --from=*) _from_svc="${1#--from=}"; shift ;;
+      --no-preflight) _no_preflight=true; shift ;;
       -*)
         err "Unknown flag: $1"
+        _suggest_print "$1" --dry-run --force --json --yes --no-preflight --help || true
         echo "Run 'muster deploy --help' for usage."
         return 1
         ;;
@@ -438,6 +390,8 @@ _deploy_main() {
     for _te in "$@"; do
       if [[ "$_known_early" != *" ${_te} "* ]]; then
         err "Unknown service: ${_te}"
+        # shellcheck disable=SC2046
+        _suggest_print "$_te" $(config_services) || true
         printf '  %bServices in this project:%b %s\n' "$DIM" "$RESET" "$(config_services | tr '\n' ' ')"
         _unload_env_file
         return 1
@@ -542,6 +496,8 @@ _deploy_main() {
 
     # Interactive: let user choose all or specific services (skip in JSON mode)
     if [[ "$_json_mode" == "false" && -t 0 ]] && (( ${#all_services[@]} > 1 )); then
+      # shellcheck disable=SC2034  # read by menu_select
+      MENU_REMEMBER="deploy_scope"
       menu_select "Deploy which services?" "All services" "Select services" "Back"
       if [[ "$MENU_RESULT" == "Back" || "$MENU_RESULT" == "__back__" ]]; then
         _unload_env_file
@@ -681,10 +637,10 @@ _deploy_main() {
       _hook_trust_gate "$project_dir" "deploy" "$_gate_tty" "$_approve_hooks" "${services[@]}" || { _gate_ok=false; _gate_reason="hooks_not_approved"; }
     fi
     local _gate_msg=""
-    if [[ "$_gate_ok" == "true" ]]; then
+    if [[ "$_gate_ok" == "true" && "$_no_preflight" != "true" ]]; then
       if [[ "$_json_mode" == "true" ]]; then
         local _pf_out="" _pf_rc=0
-        _pf_out=$(_deploy_preflight "$project_dir" "${services[@]}" 2>&1) || _pf_rc=$?
+        _pf_out=$(_deploy_preflight --no-prompt "$project_dir" "${services[@]}" 2>&1) || _pf_rc=$?
         [[ -n "$_pf_out" ]] && printf '%s\n' "$_pf_out" >&2
         if (( _pf_rc != 0 )); then
           _gate_ok=false; _gate_reason="preflight_failed"
@@ -988,6 +944,10 @@ ${_k8s_env_lines}"
         else
           printf '{"event":"done","service":"%s","status":"failed","exit_code":%d}\n' "$svc" "$_deploy_rc"
         fi
+        if hints_match_file "$log_file" "$_deploy_rc" "$svc"; then
+          printf '{"event":"hint","service":"%s","hint":%s}\n' "$svc" "$(hints_json)"
+        fi
+        hints_record_failure "$svc" "deploy" "$_deploy_rc" "$log_file"
         _history_log_event "$svc" "deploy" "failed" ""
         # k8s: structured diagnosis (ImagePullBackOff, OOMKilled, …)
         k8s_diagnose_json "$svc" 2>/dev/null
@@ -1341,6 +1301,8 @@ ${_k8s_env_lines}"
               stop_spinner
               err "${name} health check failed"
               _svc_health="unhealthy"
+              if hints_health "$svc"; then hints_print "  "; fi
+              hints_record_failure "$svc" "health" "1" ""
               if [[ ! -t 0 ]]; then
                 # Non-interactive: log and continue
                 warn "Continuing despite health check failure (non-interactive)"
@@ -1440,6 +1402,7 @@ ${_k8s_env_lines}"
           echo ""
 
           k8s_diagnose_failure "$svc"
+          hints_show_for_failure "$svc" "$log_file" "$rc" "deploy"
 
           # Notify skills immediately so team knows action is needed
           export MUSTER_DEPLOY_STATUS="failed"
@@ -1460,6 +1423,7 @@ ${_k8s_env_lines}"
           # Build menu options (add "Rollback & restart" for k8s update deploys)
           local _fail_opts=()
           _fail_opts[0]="Retry"
+          [[ -n "$HINT_FIX_CMD" ]] && _fail_opts[${#_fail_opts[@]}]="Fix: ${HINT_FIX_LABEL}"
           source "$MUSTER_ROOT/lib/core/assistant.sh"
           _assistant_available && _fail_opts[${#_fail_opts[@]}]="Explain with AI"
           if [[ "${MUSTER_DEPLOY_MODE:-}" == "update" && -n "${MUSTER_K8S_DEPLOYMENT:-}" ]]; then
@@ -1479,6 +1443,9 @@ ${_k8s_env_lines}"
           case "$MENU_RESULT" in
             "Retry")
               ;; # loop continues
+            "Fix: "*)
+              hints_run_fix --yes
+              ;; # loop continues: retry after the fix
             "Rollback & restart")
               local _rb_ns="${MUSTER_K8S_NAMESPACE:-default}"
               local _rb_dep="${MUSTER_K8S_DEPLOYMENT}"
@@ -1531,7 +1498,7 @@ ${_k8s_env_lines}"
               run_skill_hooks "post-deploy" "$svc"
               break
               ;;
-            "Abort")
+            "Abort"|"__back__")
               _service_lock_release "$project_dir" "$svc"
               _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "$_svc_log" "true"
               _deploy_record_remaining "$current" "${services[@]}"

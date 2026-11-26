@@ -1,4 +1,4 @@
-.PHONY: test lint manifest manifest-sign manifest-verify release
+.PHONY: test lint docs manifest manifest-sign manifest-verify release
 
 test:
 	@bash tests/test_runner.sh
@@ -19,6 +19,9 @@ lint:
 	else \
 		echo "shellcheck not installed, skipping (brew install shellcheck)"; \
 	fi
+
+docs:
+	@bash docs/gen-troubleshooting.sh
 
 manifest:
 	@bash -c 'export MUSTER_ROOT=. && source lib/core/app_verify.sh && _app_manifest_generate'

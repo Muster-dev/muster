@@ -64,13 +64,29 @@ Previews the deploy plan without executing anything. For each service, shows:
 - Remote deploy target (if configured)
 - Git pull config (if configured)
 
+## Preflight
+
+Before any hook runs, `muster deploy` checks what the selected services need (`lib/core/preflight.sh`):
+
+- the tools the hooks use (docker, compose v1/v2, kubectl) and whether the Docker daemon is reachable
+- the kube context exists, the cluster answers, and the configured namespaces exist; you also get a warning when the context looks like production and the project doesn't
+- free disk space
+- ports for dev/bare services aren't held by another process (muster's own previous instance is fine)
+- deploy hooks exist and are executable
+- env vars that hooks or compose files reference without a default are set (`${VAR:?}` blocks; plain `$VAR` warns)
+- git: a dirty tree when `git_pull` is on, or being behind upstream (no fetch) when it's off
+- stale service locks, and SSH reachability for remote services
+
+A check that passes prints nothing. A problem prints one line that says what to do. When a problem would make the deploy fail (it's *blocking*), a TTY offers **Fix it / Continue anyway / Abort**. Fix it runs the suggested command, then re-checks. Without a TTY, muster prints the problems and exits 1. `--minimal` prints `# error:` / `# warning:` lines on stderr. A clean result is cached for `MUSTER_PREFLIGHT_TTL` seconds (default 60). Skip everything with `muster deploy --no-preflight`.
+
 ## Deploy Failure Recovery
 
-When a deploy hook exits non-zero, muster shows the last 5 log lines, runs K8s diagnostics (if applicable), fires `post-deploy` skill hooks with `MUSTER_DEPLOY_STATUS=failed`, then presents an interactive menu:
+When a deploy hook exits non-zero, muster shows the last 5 log lines, runs K8s diagnostics (if applicable), and explains the failure with the offline rules engine. The **Likely cause / Try** lines come from [troubleshooting](../troubleshooting.md). muster then fires `post-deploy` skill hooks with `MUSTER_DEPLOY_STATUS=failed` and presents an interactive menu:
 
 | Option | Behavior |
 |--------|----------|
 | Retry | Re-run the same service's deploy hook with a fresh log file |
+| Fix: \<action\> | (when the matched rule has a fix) Run the fix, e.g. stop the container holding the port or raise `deploy_timeout`, then retry |
 | Rollback & restart | (K8s update deploys only) `kubectl rollout undo` + `kubectl rollout restart` |
 | Rollback \<name\> | Execute the service's `rollback.sh` hook |
 | Skip and continue | Mark as skipped, continue to the next service |
@@ -78,7 +94,18 @@ When a deploy hook exits non-zero, muster shows the last 5 log lines, runs K8s d
 
 The entire deploy execution for each service is wrapped in a `while true` retry loop, so "Retry" seamlessly loops back.
 
-In non-interactive mode, deploy aborts immediately on failure (exit code 1).
+In non-interactive mode, deploy aborts immediately on failure (exit code 1); the Likely cause / Try lines are still printed. In `--json` mode a `{"event":"hint","service":…,"hint":{…}}` line follows the failed `done` event. Esc in the menu means Abort.
+
+Every failure (deploy, rollback, health check) is recorded in `.muster/logs/.last_failure`. You can come back to it later:
+
+```bash
+muster explain            # the last failure, in plain words
+muster explain api        # api's newest log
+muster explain --fix      # explain, then offer the fix
+muster explain --json     # for muster-tui and scripts
+```
+
+Failed health checks get the same treatment. muster probes the check and reports a wrong port (pointing at the port the service is actually listening on), nothing listening, a timeout, HTTP 5xx or HTTP 4xx.
 
 ### Stop on failure and resume
 

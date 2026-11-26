@@ -1,0 +1,4 @@
+error: Your local changes to the following files would be overwritten by merge:
+	config/settings.py
+Please commit your changes or stash them before you merge.
+Aborting
