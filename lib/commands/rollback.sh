@@ -165,7 +165,9 @@ cmd_rollback() {
     info "Rolling back ${name} remotely ($(remote_desc "$target"))"
   fi
 
-  local _rb_timeout="${MUSTER_DEPLOY_TIMEOUT:-120}"
+  local _rb_timeout
+  _rb_timeout=$(config_get ".services.${target}.deploy_timeout" 2>/dev/null)
+  [[ "$_rb_timeout" =~ ^[0-9]+$ ]] && (( _rb_timeout > 0 )) || _rb_timeout=120
   local _rb_final_rc=0
 
   while true; do

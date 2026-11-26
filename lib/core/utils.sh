@@ -78,6 +78,29 @@ _on_sigint() {
 }
 trap '_on_sigint' INT
 
+# PID of the hook/command currently running in the background (set by
+# stream_in_box); interrupt handlers kill its whole process tree.
+_MUSTER_ACTIVE_PID=""
+
+# Kill a process and all its descendants: TERM first, KILL stragglers.
+_kill_tree() {
+  local pid="$1" child
+  [[ -z "$pid" ]] && return 0
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    _kill_tree "$child"
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+}
+
+_kill_tree_hard() {
+  local pid="$1" child
+  [[ -z "$pid" ]] && return 0
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    _kill_tree_hard "$child"
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+
 # Check if a command exists
 has_cmd() {
   command -v "$1" &>/dev/null
@@ -351,14 +374,34 @@ _run_with_timeout() {
     return $?
   fi
 
-  # Try GNU timeout (available on Linux, Homebrew gtimeout on macOS)
+  # GNU timeout (Linux; gtimeout from Homebrew coreutils on macOS). It puts
+  # the command in its own process group, so a Ctrl+C / SIGTERM sent to
+  # muster's group (terminal, muster-tui cancel) would never reach the hook.
+  # Run it in the background and forward INT/TERM to its whole group.
+  local _to_bin=""
   if has_cmd timeout; then
-    timeout "$_timeout_secs" "$@"
-    return $?
+    _to_bin="timeout"
+  elif has_cmd gtimeout; then
+    _to_bin="gtimeout"
   fi
-  if has_cmd gtimeout; then
-    gtimeout "$_timeout_secs" "$@"
-    return $?
+  if [[ -n "$_to_bin" ]]; then
+    local _to_pid _to_rc _to_prev_int _to_prev_term
+    _to_prev_int=$(trap -p INT)
+    _to_prev_term=$(trap -p TERM)
+    "$_to_bin" "$_timeout_secs" "$@" &
+    _to_pid=$!
+    # shellcheck disable=SC2064
+    trap "kill -TERM -- -${_to_pid} 2>/dev/null; kill -TERM ${_to_pid} 2>/dev/null; _MUSTER_CANCELLED=1" INT TERM
+    wait "$_to_pid"
+    _to_rc=$?
+    # wait returns early when a trapped signal arrives; reap the child
+    while kill -0 "$_to_pid" 2>/dev/null; do
+      wait "$_to_pid"
+      _to_rc=$?
+    done
+    if [[ -n "$_to_prev_int" ]]; then eval "$_to_prev_int"; else trap - INT; fi
+    if [[ -n "$_to_prev_term" ]]; then eval "$_to_prev_term"; else trap - TERM; fi
+    return $_to_rc
   fi
 
   # Fallback: bash background process + watchdog (macOS bash 3.2 compatible)

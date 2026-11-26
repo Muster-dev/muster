@@ -167,8 +167,9 @@ stream_in_box() {
   local inner=$(( box_w - 2 ))
 
   # Bottom border
+  # Same interior width as the top edge and the content rows (box_w - 1)
   local bottom
-  printf -v bottom '%*s' "$box_w" ""
+  printf -v bottom '%*s' "$(( box_w - 1 ))" ""
   bottom="${bottom// /─}"
 
   # Title in top border
@@ -201,6 +202,7 @@ stream_in_box() {
   # Run command in background
   "$@" >> "$log_file" 2>&1 &
   local cmd_pid=$!
+  _MUSTER_ACTIVE_PID="$cmd_pid"
 
   # Live-refresh (box_lines + bottom border + hint = box_lines + 2)
   while kill -0 "$cmd_pid" 2>/dev/null; do
@@ -259,5 +261,7 @@ stream_in_box() {
   done
 
   wait "$cmd_pid"
-  return $?
+  local _sib_rc=$?
+  _MUSTER_ACTIVE_PID=""
+  return $_sib_rc
 }

@@ -319,6 +319,19 @@ cmd_deploy() {
   return $rc
 }
 
+# Per-service hook timeout in seconds: .services.<svc>.deploy_timeout,
+# else 120. Read from config for every service (not inherited from the
+# environment, where a previous k8s service's value could leak in).
+_deploy_timeout_for() {
+  local t
+  t=$(config_get ".services.${1}.deploy_timeout" 2>/dev/null)
+  if [[ "$t" =~ ^[0-9]+$ ]] && (( t > 0 )); then
+    printf '%s' "$t"
+  else
+    printf '120'
+  fi
+}
+
 _deploy_main() {
   local dry_run=false
   local _json_mode=false
@@ -435,6 +448,9 @@ _deploy_main() {
       return 1
     fi
     trap '_service_lock_release_all "'"$project_dir"'"; _deploy_lock_release "'"$project_dir"'"; _unload_env_file; cleanup_term' EXIT
+    # One Ctrl+C (or SIGTERM) cancels a running deploy: stop the hook and
+    # everything it started; the EXIT trap above releases the locks.
+    trap '_deploy_on_interrupt' INT TERM USR2
   fi
 
   local project
@@ -596,6 +612,8 @@ _deploy_main() {
       _service_lock_release_all "$project_dir" 2>/dev/null
       _deploy_lock_release "$project_dir"
       trap - EXIT
+      trap '_on_sigint' INT
+      trap - TERM USR2
     fi
     _unload_env_file
   }
@@ -679,6 +697,7 @@ _deploy_main() {
   export MUSTER_LOCK_SOURCE
 
   for svc in ${services[@]+"${services[@]}"}; do
+    _deploy_check_cancel
     (( current++ ))
 
     local name
@@ -806,9 +825,11 @@ _deploy_main() {
         continue
       fi
 
-      local _json_hook_timeout="${MUSTER_DEPLOY_TIMEOUT:-120}"
+      local _json_hook_timeout
+      _json_hook_timeout=$(_deploy_timeout_for "$svc")
       local _json_deploy_start_time
       _json_deploy_start_time=$(date +%s)
+      _MUSTER_CANCEL_SVC="$svc"
       {
         if remote_is_enabled "$svc"; then
           _remote_load_config "$svc"
@@ -832,6 +853,8 @@ ${_k8s_env_lines}"
         printf '{"event":"log","service":"%s","line":"%s"}\n' "$svc" "$_jline"
       done
       _deploy_rc=${PIPESTATUS[0]}
+      _deploy_check_cancel
+      _MUSTER_CANCEL_SVC=""
 
       _svc_log="$log_file"
       if (( _deploy_rc == 0 )); then
@@ -1115,7 +1138,8 @@ ${_k8s_env_lines}"
           fi
         fi
 
-        local _hook_timeout="${MUSTER_DEPLOY_TIMEOUT:-120}"
+        local _hook_timeout
+        _hook_timeout=$(_deploy_timeout_for "$svc")
         local _deploy_start_time
         _deploy_start_time=$(date +%s)
 
@@ -1130,6 +1154,7 @@ ${_k8s_env_lines}"
         _svc_log="$log_file"
 
         local rc=0
+        _MUSTER_CANCEL_SVC="$svc"
         if remote_is_enabled "$svc"; then
           # ── Remote deploy via SSH ──
           info "Deploying ${name} remotely ($(remote_desc "$svc"))"
@@ -1160,6 +1185,8 @@ ${_k8s_env_lines}"
         fi
         rc=$?
         unset _SIB_REDRAW_FN
+        _deploy_check_cancel
+        _MUSTER_CANCEL_SVC=""
 
         if (( rc == 0 )); then
           _deploy_progress "$current" "$total" "Deploying ${name}..." "done"
@@ -1475,6 +1502,40 @@ ${_k8s_env_lines}"
 
   _deploy_lock_release "$project_dir"
   trap - EXIT
+  trap '_on_sigint' INT
+  trap - TERM USR2
   _unload_env_file
   return $_final_rc
+}
+
+# Ctrl+C / SIGTERM during a deploy. Keep the handler tiny: under bash 3.2 a
+# handler that runs foreground commands while a background job is being
+# reaped can be abandoned halfway. So: flag it, kill the hook's process
+# tree, and let the main flow finish the cancel at its next checkpoint
+# (_deploy_check_cancel), which prints the message and exits 130.
+_MUSTER_CANCELLED=""
+_deploy_on_interrupt() {
+  _MUSTER_CANCELLED=1
+  trap '' INT TERM USR2
+  if [[ -n "${_MUSTER_ACTIVE_PID:-}" ]]; then
+    _kill_tree_hard "$_MUSTER_ACTIVE_PID"
+  fi
+}
+
+_deploy_check_cancel() {
+  [[ -z "${_MUSTER_CANCELLED:-}" ]] && return 0
+  # Record the service whose hook was running when the cancel landed
+  if [[ -n "${_MUSTER_CANCEL_SVC:-}" ]] && declare -f _history_log_event >/dev/null 2>&1; then
+    _history_log_event "$_MUSTER_CANCEL_SVC" "deploy" "cancelled" "" 2>/dev/null || true
+  fi
+  local _c
+  for _c in $(pgrep -P $$ 2>/dev/null); do
+    _kill_tree_hard "$_c"
+  done
+  if [[ "${_json_mode:-false}" == "true" ]]; then
+    printf '{"event":"cancelled","service":"%s","exit_code":130}\n' "${_MUSTER_CANCEL_SVC:-}"
+  else
+    printf '\n%b\n' "  ${YELLOW}!${RESET} Deploy cancelled"
+  fi
+  exit 130
 }
