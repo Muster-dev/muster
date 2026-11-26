@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Group deploy service picker matched selections by display name, so picking `api` in one project also selected every other project's `api`; selections are now mapped by item index
+- Group deploy service picker deployed *all* services of a project when none of its services were selected; such projects are now skipped (and the progress total reflects the filtered selection)
+- Group remote deploy broke when the deploy identity (e.g. git `user.name`) contained a single quote
+- ShellCheck warnings (`--severity=warning`) across `lib/` so `make lint` passes in CI
+
+### Changed
+- Docs: `muster doctor` described as 6 diagnostic categories (not "13 checks"); fixed stale doc paths in CLAUDE.md/llms.txt; hook template counts now include the `dev` stack
+
+## [0.5.60] - 2026-03-05
+
+### Added
+- Per-service deploy locks with team identity (`deploy_name` > git `user.name` > `whoami`); `--force` override; fleet-aware remote locks; dashboard shows `[locked by <name>]`
+- Global settings `deploy_name` and `service_lock_timeout`
+- First-run onboarding flow (splash → welcome → setup offer) and setup wizard step indicators
+- LED dot-matrix splash animation (`lib/tui/matrix.sh`)
+- Group deploy service picker: choose "All services" or select individual services per project (`checklist_grouped_select`)
+- Group remote deploys auto-detect the remote project directory when none is configured, and forward the host's deploy identity via `MUSTER_DEPLOY_USER`
+- New test files: `test_tui.sh`, `test_onboarding.sh`
+
+### Changed
+- Group projects are loaded from fleet-dir `project.json` configs
+- Hooks are invoked as `bash "$hook"` (deploy, rollback, status, logs, cleanup, dev)
+- Remote group/trust commands run with `MUSTER_NO_VERIFY=true`; sync-mode projects skip the remote trust gate
+- `muster deploy` refreshes the build-context overlap cache when stale instead of only reading it
+
+### Fixed
+- Deploy lock `terminal` field recorded "not a tty" in non-interactive sessions
+
 ## [0.5.59] - 2026-03-05
 
 ### Added
