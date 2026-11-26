@@ -378,8 +378,12 @@ _run_with_timeout() {
   # the command in its own process group, so a Ctrl+C / SIGTERM sent to
   # muster's group (terminal, muster-tui cancel) would never reach the hook.
   # Run it in the background and forward INT/TERM to its whole group.
+  # Shell functions (remote_exec_stdout, _just_remote_run, …) can't be exec'd
+  # by an external timeout binary: use the bash watchdog below for those.
   local _to_bin=""
-  if has_cmd timeout; then
+  if declare -F "$1" >/dev/null 2>&1; then
+    _to_bin=""
+  elif has_cmd timeout; then
     _to_bin="timeout"
   elif has_cmd gtimeout; then
     _to_bin="gtimeout"
