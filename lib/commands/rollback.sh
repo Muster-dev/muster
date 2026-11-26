@@ -6,6 +6,7 @@ source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/core/credentials.sh"
 source "$MUSTER_ROOT/lib/core/remote.sh"
 source "$MUSTER_ROOT/lib/core/k8s_diag.sh"
+source "$MUSTER_ROOT/lib/core/hints.sh"
 source "$MUSTER_ROOT/lib/core/just_runner.sh"
 source "$MUSTER_ROOT/lib/core/hook_security.sh"
 source "$MUSTER_ROOT/lib/skills/manager.sh"
@@ -218,6 +219,7 @@ ${_k8s_env_lines}"
       echo ""
 
       k8s_diagnose_failure "$target"
+      hints_show_for_failure "$target" "$log_file" "$rc" "rollback"
 
       if [[ ! -t 0 ]]; then
         # Non-interactive: no recovery menu — report and fail
@@ -228,11 +230,18 @@ ${_k8s_env_lines}"
         break
       fi
 
-      menu_select "Rollback failed. What do you want to do?" "Retry" "Force cleanup and retry" "Abort"
+      local _rb_opts=("Retry")
+      [[ -n "$HINT_FIX_CMD" ]] && _rb_opts[${#_rb_opts[@]}]="Fix: ${HINT_FIX_LABEL}"
+      _rb_opts[${#_rb_opts[@]}]="Force cleanup and retry"
+      _rb_opts[${#_rb_opts[@]}]="Abort"
+      menu_select "Rollback failed. What do you want to do?" "${_rb_opts[@]}"
 
       case "$MENU_RESULT" in
         "Retry")
           ;; # loop continues
+        "Fix: "*)
+          hints_run_fix --yes
+          ;; # loop continues: retry after the fix
         "Force cleanup and retry")
           local cleanup_hook="${project_dir}/.muster/hooks/${target}/cleanup.sh"
           local _has_cleanup=false
