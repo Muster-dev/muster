@@ -47,7 +47,7 @@ _key_info=$(openssl rsa -in "${FLEETS_BASE_DIR}/test-fleet/fleet.key" -text -noo
 _test_contains "key is RSA-4096" "4096" "$_key_info"
 
 # Verify permissions (should be 600)
-_perms=$(stat -f "%Lp" "${FLEETS_BASE_DIR}/test-fleet/fleet.key" 2>/dev/null || stat -c "%a" "${FLEETS_BASE_DIR}/test-fleet/fleet.key" 2>/dev/null)
+_perms=$(stat -c "%a" "${FLEETS_BASE_DIR}/test-fleet/fleet.key" 2>/dev/null || stat -f "%Lp" "${FLEETS_BASE_DIR}/test-fleet/fleet.key" 2>/dev/null)
 _test_eq "private key has 600 permissions" "600" "$_perms"
 
 # ────────────────────────────────────────

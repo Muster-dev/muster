@@ -49,7 +49,7 @@ _test_contains "shows the user code" "WXYZ-2345" "$out"
 _test_contains "confirms login" "Logged in to Fleet Cloud" "$out"
 _test_eq "org saved" "org_user_abc" "$(jq -r '.cloud.org_id' "$HOME/.muster/settings.json")"
 _test_eq "token not in settings.json" "0" "$(grep -c mst_cli_ "$HOME/.muster/settings.json" || true)"
-_test_eq "token stored 0600" "600" "$(stat -f '%Lp' "$HOME/.muster/tokens/cloud.json" 2>/dev/null || stat -c '%a' "$HOME/.muster/tokens/cloud.json")"
+_test_eq "token stored 0600" "600" "$(stat -c '%a' "$HOME/.muster/tokens/cloud.json" 2>/dev/null || stat -f '%Lp' "$HOME/.muster/tokens/cloud.json")"
 _test_contains "token stored" "mst_cli_secretvalue" "$(cat "$HOME/.muster/tokens/cloud.json")"
 
 out=$("$M" cloud status 2>&1) && rc=0 || rc=$?
