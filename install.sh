@@ -324,36 +324,22 @@ if [[ "$_interactive" = true ]]; then
 
       if [[ "$_tui_ok" = true ]]; then
         _tui_ver="$("${BIN_DIR}/muster-tui" --version 2>/dev/null || echo "unknown")"
+        _tui_ver="${_tui_ver#muster-tui }"
         printf '  %b✓%b muster-tui %b(%s)%b\n' "$_G" "$_R" "$_D" "$_tui_ver" "$_R"
         _summary_items[${#_summary_items[@]}]="muster-tui ${_tui_ver}"
 
         _write_manifest "muster-tui" "$_tui_ver" "${BIN_DIR}/muster-tui"
 
         # Auto-create auth token and connect
-        printf '  %bSetting up secure connection...%b\n' "$_D" "$_R"
-        source "${INSTALL_DIR}/repo/lib/core/auth.sh"
-
-        _has_tui_token=false
-        if [[ -f "$MUSTER_TOKENS_FILE" ]] && command -v jq >/dev/null 2>&1; then
-          _existing_tui=$(jq -r '.tokens[] | select(.name == "muster-tui") | .name' "$MUSTER_TOKENS_FILE" 2>/dev/null)
-          [[ -n "$_existing_tui" ]] && _has_tui_token=true
-        fi
-
-        if [[ "$_has_tui_token" = true ]]; then
-          printf '  %b✓%b Auth token already exists.\n' "$_G" "$_R"
+        # Pair muster-tui with the CLI. Use the installed CLI itself (the
+        # library can't be sourced standalone here). If a token can't be made
+        # now, the muster launcher pairs automatically on first run.
+        _tui_token=$(MUSTER_NO_VERIFY=true "${BIN_DIR}/muster" auth create muster-tui --scope admin 2>/dev/null \
+          | awk '/Token:/ {print $2; exit}') || _tui_token=""
+        if [[ -n "$_tui_token" ]] && "${BIN_DIR}/muster-tui" --set-token "$_tui_token" >/dev/null 2>&1; then
+          printf '  %b✓%b Connected to the muster CLI\n' "$_G" "$_R"
         else
-          _tui_token=""
-          if _tui_token=$(_auth_create_token_internal "muster-tui" "admin" 2>/dev/null) && [[ -n "$_tui_token" ]]; then
-            if "${BIN_DIR}/muster-tui" --set-token "$_tui_token" >/dev/null 2>&1; then
-              printf '  %b✓%b Auth token created and linked.\n' "$_G" "$_R"
-            else
-              printf '  %b!%b Token created but could not save to config.\n' "$_Y" "$_R"
-              printf '  %bConnect manually: muster-tui --set-token %s%b\n' "$_D" "$_tui_token" "$_R"
-            fi
-          else
-            printf '  %b!%b Could not auto-create token (jq may be missing).\n' "$_Y" "$_R"
-            printf '  %bRun: muster auth create muster-tui --scope admin%b\n' "$_D" "$_R"
-          fi
+          printf '  %bIt connects to the CLI the first time you run muster.%b\n' "$_D" "$_R"
         fi
       else
         printf '  %b!%b Could not download muster-tui binary.\n' "$_Y" "$_R"
