@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-26
+
+### Fixed
+- One Ctrl+C (or SIGTERM, e.g. cancelling in muster-tui) now cancels a running deploy: the hook and everything it started are stopped, locks released, history records "cancelled", exit code 130. Previously the hook kept running, the lock stayed, and the deploy could be recorded as "ok"
+- Per-service `deploy_timeout` is honored for every stack (it only applied to k8s services) in deploy and rollback
+- A muster.json that isn't valid JSON gets a clear parse error with line/column
+- The live log box's bottom border was one column too wide, leaving stray characters
+
 ## [0.6.1] - 2026-11-26
 
 ### Fixed
