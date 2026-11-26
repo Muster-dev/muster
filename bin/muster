@@ -212,6 +212,12 @@ _first_run_check() {
   [[ "$MUSTER_MINIMAL" == "true" ]] && return 1
   [[ ! -t 0 ]] && return 1
   [[ -f "$HOME/.muster/.first_run_done" ]] && return 1
+  # Already inside a configured project (e.g. a cloned repo): skip the
+  # welcome flow, mark it done, and go straight to the dashboard.
+  if find_config &>/dev/null; then
+    mkdir -p "$HOME/.muster" && touch "$HOME/.muster/.first_run_done"
+    return 1
+  fi
 
   # Matrix splash animation
   source "$MUSTER_ROOT/lib/tui/matrix.sh"
