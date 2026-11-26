@@ -422,8 +422,10 @@ _scan_hint() {
     i=$((i + 1))
   done
 
-  # Grep for pattern (-w = whole word matching to avoid false positives)
-  if grep -qwilE "$pattern" $files 2>/dev/null; then
+  # Grep for pattern (-w = whole word matching to avoid false positives).
+  # </dev/null: if $files is blank, grep would otherwise read (and block on) stdin
+  # shellcheck disable=SC2086
+  if grep -qwilE "$pattern" $files 2>/dev/null </dev/null; then
     _SCAN_SERVICES[${#_SCAN_SERVICES[@]}]="$name"
   fi
 }

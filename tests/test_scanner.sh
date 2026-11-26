@@ -112,4 +112,10 @@ _is_infra=0
 _is_infra_service "api" 2>/dev/null || _is_infra=$?
 _test "api is not infra" test "$_is_infra" -ne 0
 
+# _scan_hint with no hint files must not read stdin (used to hang on an open
+# pipe, or detect services from whatever was piped in)
+_SCAN_SERVICES=()
+_scan_hint " " "redis" "redis" <<< "redis"
+_test_eq "_scan_hint ignores stdin when no files" "0" "${#_SCAN_SERVICES[@]}"
+
 _test_summary
