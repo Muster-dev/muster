@@ -10,6 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group deploy service picker deployed *all* services of a project when none of its services were selected; such projects are now skipped (and the progress total reflects the filtered selection)
 - Group remote deploy broke when the deploy identity (e.g. git `user.name`) contained a single quote
 - ShellCheck warnings (`--severity=warning`) across `lib/` so `make lint` passes in CI
+- `make lint` ran ShellCheck over every file in one process, which was OOM-killed (and CI's ubuntu job cancelled); it now runs one file per invocation
 
 ### Changed
 - Docs: `muster doctor` described as 6 diagnostic categories (not "13 checks"); fixed stale doc paths in CLAUDE.md/llms.txt; hook template counts now include the `dev` stack
