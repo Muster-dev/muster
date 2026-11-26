@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-26
+
+### Fixed
+- Installer: pairing muster-tui always failed with a misleading "jq may be missing" warning; it now pairs through the installed CLI (or says it connects on first run), and the version line no longer repeats the name
+- `muster doctor` no longer warns about a missing `.env` (it's optional)
+- Tests check file modes with GNU `stat` first, so the Linux CI job passes
+
 ## [0.6.0] - 2026-11-26
 
 ### Added

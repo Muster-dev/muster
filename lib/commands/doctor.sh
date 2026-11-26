@@ -474,7 +474,7 @@ $(cat "$_hf" 2>/dev/null)"
       done < "$_env_file"
       _doc_pass ".env file found (${_env_count} vars)"
     else
-      _doc_warn ".env file not found"
+      _doc_pass "No .env file (optional)"
     fi
   }
 
