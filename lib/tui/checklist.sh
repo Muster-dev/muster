@@ -13,7 +13,8 @@ CHECKLIST_SELECTED_IDX=""
 # headers included) of the selected items — use it when labels can repeat
 checklist_grouped_select() {
   if [[ ! -t 0 ]]; then
-    printf '%b\n' "${RED}Error: interactive terminal required${RESET}" >&2
+    printf '%b\n' "${RED}Error: \"${1:-This prompt}\" needs an interactive terminal.${RESET}" >&2
+    printf '%s\n' "${MENU_NONTTY_HINT:-Run the command with flags instead (see its --help).}" >&2
     return 1
   fi
 
@@ -282,8 +283,8 @@ checklist_grouped_select() {
 
 checklist_select() {
   if [[ ! -t 0 ]]; then
-    printf '%b\n' "${RED}Error: interactive terminal required${RESET}" >&2
-    printf '%b\n' "Use flag-based setup instead: muster setup --help" >&2
+    printf '%b\n' "${RED}Error: \"${1:-This prompt}\" needs an interactive terminal.${RESET}" >&2
+    printf '%s\n' "${MENU_NONTTY_HINT:-Run the command with flags instead (see its --help).}" >&2
     return 1
   fi
 

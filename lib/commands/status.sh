@@ -154,6 +154,11 @@ cmd_status() {
         else
           stop_spinner
           printf '  %b●%b %s%s\n' "${RED}" "${RESET}" "$name" "$_remote_tag"
+          # Plain-words reason from the rules engine (wrong port, 5xx, ...)
+          declare -F hints_health >/dev/null 2>&1 || source "$MUSTER_ROOT/lib/core/hints.sh"
+          if hints_health "$svc"; then
+            printf '    %b%s%b\n    %bTry:%b %s\n' "${DIM}" "$HINT_TITLE" "${RESET}" "${BOLD}" "${RESET}" "$HINT_TRY"
+          fi
         fi
       fi
     else

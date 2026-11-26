@@ -6,13 +6,18 @@ source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/core/just_runner.sh"
 
 cmd_cleanup() {
+  local _yes=false
   case "${1:-}" in
     --help|-h)
-      echo "Usage: muster cleanup"
+      echo "Usage: muster cleanup [--yes]"
       echo ""
       echo "Clean up stuck processes and old log files."
+      echo ""
+      echo "Flags:"
+      echo "  --yes, -y   Don't ask for confirmation (asked only in a terminal)"
       return 0
       ;;
+    --yes|-y) _yes=true ;;
     --*)
       err "Unknown flag: $1"
       echo "Run 'muster cleanup --help' for usage."
@@ -37,6 +42,29 @@ cmd_cleanup() {
   echo ""
   printf '  %bCleanup%b\n' "${BOLD}" "${RESET}"
   echo ""
+
+  # Confirm in a terminal: show what will run first
+  if [[ -t 0 && "$_yes" != "true" ]]; then
+    local _with_hooks="" _s
+    while IFS= read -r _s; do
+      [[ -z "$_s" ]] && continue
+      [[ -x "${project_dir}/.muster/hooks/${_s}/cleanup.sh" || -f "${project_dir}/.muster/hooks/${_s}/justfile" ]] && _with_hooks="${_with_hooks}${_with_hooks:+, }${_s}"
+    done <<< "$services"
+    local _ret
+    _ret=$(global_config_get "log_retention_days" 2>/dev/null)
+    case "$_ret" in ''|*[!0-9]*) _ret=7 ;; esac
+    printf '  This will:\n'
+    [[ -n "$_with_hooks" ]] && printf '    - run cleanup hooks for: %s\n' "$_with_hooks"
+    printf '    - delete deploy logs older than %s days\n' "$_ret"
+    menu_select "Continue?" "Clean up" "Cancel"
+    if [[ "$MENU_RESULT" != "Clean up" ]]; then
+      info "Cleanup cancelled — nothing changed."
+      _deploy_lock_release "$project_dir"
+      trap - EXIT
+      return 0
+    fi
+    echo ""
+  fi
 
   # Run cleanup hooks if they exist
   local ran_any=false

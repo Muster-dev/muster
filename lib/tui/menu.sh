@@ -5,6 +5,47 @@
 
 MENU_RESULT=""
 
+# Optional per-call settings (reset after each menu_select):
+#   MENU_REMEMBER=key     remember the chosen label per project (.muster/.menu_state)
+#                         and preselect it next time
+#   MENU_NONTTY_HINT=txt  what to tell non-interactive callers (equivalent flag)
+MENU_REMEMBER=""
+MENU_NONTTY_HINT=""
+
+# Explain that a prompt needs a terminal, pointing at the equivalent flag
+_menu_need_tty() {
+  local title="$1"
+  printf '%b\n' "${RED}Error: \"${title}\" needs an interactive terminal.${RESET}" >&2
+  printf '%s\n' "${MENU_NONTTY_HINT:-Run the command with flags instead (see its --help), e.g. muster deploy <service>.}" >&2
+  MENU_NONTTY_HINT=""
+}
+
+# Per-project file that remembers picker choices
+_menu_state_file() {
+  [[ -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE:-}" ]] || return 1
+  local d
+  d="$(dirname "$CONFIG_FILE")/.muster"
+  [[ -d "$d" ]] || return 1
+  printf '%s/.menu_state' "$d"
+}
+
+# Remembered label for a key (echo)
+_menu_recall() {
+  local f
+  f=$(_menu_state_file) || return 0
+  [[ -f "$f" ]] || return 0
+  awk -F'\t' -v k="$1" '$1 == k {v=$2} END {if (v != "") print v}' "$f" 2>/dev/null
+}
+
+_menu_remember() {
+  local key="$1" val="$2" f
+  [[ -z "$key" || "$val" == __* ]] && return 0
+  f=$(_menu_state_file) || return 0
+  { [[ -f "$f" ]] && awk -F'\t' -v k="$key" '$1 != k' "$f"; printf '%s\t%s\n' "$key" "$val"; } > "${f}.tmp" 2>/dev/null \
+    && mv "${f}.tmp" "$f" 2>/dev/null
+  return 0
+}
+
 # Read a single keypress (handles arrow key escape sequences)
 _menu_read_key() {
   local key _rc=0
@@ -31,7 +72,7 @@ _menu_read_key() {
 # Descriptions appear below the options in a dim box
 menu_select_desc() {
   if [[ ! -t 0 ]]; then
-    printf '%b\n' "${RED}Error: interactive terminal required${RESET}" >&2
+    _menu_need_tty "$1"
     return 1
   fi
 
@@ -177,15 +218,39 @@ menu_select_desc() {
 
 menu_select() {
   if [[ ! -t 0 ]]; then
-    printf '%b\n' "${RED}Error: interactive terminal required${RESET}" >&2
-    printf '%b\n' "Use flag-based setup instead: muster setup --help" >&2
+    _menu_need_tty "$1"
+    MENU_REMEMBER=""
     return 1
   fi
 
   local title="$1"
   shift
-  local options=("$@")
+  local options=()
+  (( $# > 0 )) && options=("$@")
   local count=${#options[@]}
+
+  # Empty state instead of a blank menu
+  if (( count == 0 )); then
+    echo ""
+    printf '  %b%s%b\n' "${BOLD}" "$title" "${RESET}"
+    printf '  %bNothing to choose from here yet.%b\n' "${DIM}" "${RESET}"
+    MENU_RESULT="__back__"
+    MENU_REMEMBER=""
+    return 0
+  fi
+
+  # Remembered choice (per project) becomes the default
+  local _remember_key="$MENU_REMEMBER"
+  MENU_REMEMBER=""
+  local selected=0
+  if [[ -n "$_remember_key" ]]; then
+    local _prev _ri=0
+    _prev=$(_menu_recall "$_remember_key")
+    while [[ -n "$_prev" ]] && (( _ri < count )); do
+      if [[ "${options[$_ri]}" == "$_prev" ]]; then selected=$_ri; break; fi
+      _ri=$(( _ri + 1 ))
+    done
+  fi
 
   # ── Minimal mode: numbered choices ──
   if [[ "$MUSTER_MINIMAL" == "true" ]]; then
@@ -199,18 +264,19 @@ menu_select() {
     printf '  Choose [1-%d]: ' "$count"
     local _choice
     read -r _choice
-    _choice="${_choice:-1}"
+    _choice="${_choice:-$(( selected + 1 ))}"
+    case "$_choice" in q|Q) MENU_RESULT="__back__"; return 0 ;; esac
     # Validate
     if [[ "$_choice" =~ ^[0-9]+$ ]] && (( _choice >= 1 && _choice <= count )); then
       MENU_RESULT="${options[$(( _choice - 1 ))]}"
     else
-      MENU_RESULT="${options[0]}"
+      MENU_RESULT="${options[$selected]}"
     fi
+    _menu_remember "$_remember_key" "$MENU_RESULT"
     return 0
   fi
 
   # ── TUI mode: arrow-key selection ──
-  local selected=0
 
   # Calculate bar width for highlighted selection
   local _menu_w=$(( TERM_COLS - 4 ))
@@ -227,8 +293,12 @@ menu_select() {
 
   _menu_draw() {
     local i=0
+    # Keep each option on one line so redraws stay aligned on narrow terminals
+    local _maxl=$(( TERM_COLS - 6 ))
+    (( _maxl < 8 )) && _maxl=8
     while (( i < count )); do
       local label="${options[$i]}"
+      (( ${#label} > _maxl )) && label="${label:0:$(( _maxl - 3 ))}..."
       if (( i == selected )); then
         # Highlighted bar: mustard bg, black text, full width
         local text="  ▸ ${label}"
@@ -294,6 +364,7 @@ menu_select() {
         tput cnorm
         # shellcheck disable=SC2034
         MENU_RESULT="${options[$selected]}"
+        _menu_remember "$_remember_key" "$MENU_RESULT"
         return 0
         ;;
       *)

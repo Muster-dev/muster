@@ -6,6 +6,7 @@ source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/core/updater.sh"
 source "$MUSTER_ROOT/lib/core/build_context.sh"
 source "$MUSTER_ROOT/lib/core/just_runner.sh"
+source "$MUSTER_ROOT/lib/core/nextstep.sh"
 
 _HEALTH_CACHE_DIR="${HOME}/.muster/health_cache"
 
@@ -87,6 +88,9 @@ _dashboard_bar() {
   (( bar_w < 20 )) && bar_w=20
   local text="  ${left}"
   local text_len=${#text}
+  # Narrow terminal: drop the right-hand text rather than wrap
+  (( text_len + ${#right} + 1 > bar_w )) && right=""
+  (( text_len > bar_w )) && { text="${text:0:$(( bar_w - 1 ))}"; text_len=${#text}; }
   local right_len=${#right}
   local pad_len=$(( bar_w - text_len - right_len ))
   (( pad_len < 1 )) && pad_len=1
@@ -721,6 +725,10 @@ cmd_dashboard() {
   # Trap USR1 — interrupts read -t on Linux, triggering immediate refresh
   trap 'true' USR1
 
+  # "Next step" is recomputed every 20s or after any action
+  source "$MUSTER_ROOT/lib/core/hook_security.sh"
+  local _ns_at=0
+
   while true; do
     _dashboard_header
 
@@ -818,6 +826,20 @@ cmd_dashboard() {
     local actions=()
     local project_dir
     project_dir="$(dirname "$CONFIG_FILE")"
+
+    # Single context-aware "Next step" line; Enter runs it
+    if (( $(date +%s) - _ns_at > 20 )); then
+      _next_step "$project_dir"
+      _ns_at=$(date +%s)
+    fi
+    if [[ -n "$NEXT_STEP_TEXT" ]]; then
+      local _ns_color="$ACCENT"
+      [[ "$NEXT_STEP_KIND" == "failure" || "$NEXT_STEP_KIND" == "lock" ]] && _ns_color="$YELLOW"
+      local _ns_text="$NEXT_STEP_TEXT" _ns_max=$(( TERM_COLS - 10 ))
+      (( _ns_max < 10 )) && _ns_max=10
+      (( ${#_ns_text} > _ns_max )) && _ns_text="${_ns_text:0:$(( _ns_max - 3 ))}..."
+      printf '  %b→ Next:%b %s\n\n' "$_ns_color" "${RESET}" "$_ns_text"
+    fi
     local services
     services=$(config_services)
 
@@ -994,6 +1016,16 @@ cmd_dashboard() {
 
     _dashboard_rule
 
+    # Put the suggested next step first so Enter runs it
+    if [[ -n "$NEXT_STEP_ACTION" ]]; then
+      local _ordered=("$NEXT_STEP_ACTION") _a
+      for _a in "${actions[@]}"; do
+        [[ "$_a" == "$NEXT_STEP_ACTION" ]] && continue
+        _ordered[${#_ordered[@]}]="$_a"
+      done
+      actions=("${_ordered[@]}")
+    fi
+
     MENU_TIMEOUT=5
     menu_select "Actions" "${actions[@]}"
     # MENU_TIMEOUT is read by menu_select (lib/tui/menu.sh)
@@ -1005,9 +1037,27 @@ cmd_dashboard() {
       continue
     fi
 
+    # Any real action may change what the next step is
+    [[ "$MENU_RESULT" != "__timeout__" ]] && _ns_at=0
+
     case "$MENU_RESULT" in
       "__timeout__")
         continue
+        ;;
+      "Explain last failure")
+        source "$MUSTER_ROOT/lib/commands/explain.sh"
+        cmd_explain --last --fix
+        _dashboard_pause
+        ;;
+      "Approve hooks")
+        source "$MUSTER_ROOT/lib/commands/hooks.sh"
+        cmd_hooks approve
+        _dashboard_pause
+        ;;
+      "Doctor --fix")
+        source "$MUSTER_ROOT/lib/commands/doctor.sh"
+        cmd_doctor --fix
+        _dashboard_pause
         ;;
       "Cancel fleet deploy")
         local _cancel_file="${project_dir}/.muster/.fleet_deploying"

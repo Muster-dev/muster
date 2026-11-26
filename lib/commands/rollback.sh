@@ -84,6 +84,8 @@ cmd_rollback() {
     fi
 
     rollback_services[${#rollback_services[@]}]="Back"
+    # shellcheck disable=SC2034  # read by menu_select
+    MENU_REMEMBER="rollback_service"
     menu_select "Rollback which service?" "${rollback_services[@]}"
     if [[ "$MENU_RESULT" == "Back" || "$MENU_RESULT" == "__back__" ]]; then
       _deploy_lock_release "$project_dir"
@@ -92,6 +94,18 @@ cmd_rollback() {
       return 2
     fi
     target="$MENU_RESULT"
+    # Confirm: say exactly what will run before doing it
+    local _rb_where="locally"
+    remote_is_enabled "$target" && _rb_where="on $(remote_desc "$target")"
+    printf '\n  This runs %b.muster/hooks/%s/rollback.sh%b %s.\n' "${BOLD}" "$target" "${RESET}" "$_rb_where"
+    menu_select "Roll back ${target}?" "Roll back ${target}" "Cancel"
+    if [[ "$MENU_RESULT" != "Roll back ${target}" ]]; then
+      info "Rollback cancelled — nothing ran."
+      _deploy_lock_release "$project_dir"
+      trap - EXIT
+      _unload_env_file
+      return 2
+    fi
   fi
 
   local hook="${project_dir}/.muster/hooks/${target}/rollback.sh"

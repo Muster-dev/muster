@@ -465,6 +465,8 @@ _deploy_main() {
 
     # Interactive: let user choose all or specific services (skip in JSON mode)
     if [[ "$_json_mode" == "false" && -t 0 ]] && (( ${#all_services[@]} > 1 )); then
+      # shellcheck disable=SC2034  # read by menu_select
+      MENU_REMEMBER="deploy_scope"
       menu_select "Deploy which services?" "All services" "Select services" "Back"
       if [[ "$MENU_RESULT" == "Back" || "$MENU_RESULT" == "__back__" ]]; then
         _unload_env_file
