@@ -1178,7 +1178,7 @@ _group_cmd_deploy() {
   if [[ "$_has_cloud" == "true" ]]; then
     source "$MUSTER_ROOT/lib/core/cloud.sh"
     if ! _fleet_cloud_available; then
-      err "Cloud projects require muster-tunnel. Install: curl -sSL https://getmuster.dev/cloud | bash"
+      err "Cloud projects require muster-tunnel. Install: curl -fsSL https://getmuster.dev/fleet-cloud/install.sh | bash -s -- --tunnel"
       return 1
     fi
     _groups_cloud_config

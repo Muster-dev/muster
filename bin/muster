@@ -344,6 +344,11 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/group.sh"
     cmd_group "$@"
     ;;
+  cloud)
+    shift
+    source "$MUSTER_ROOT/lib/commands/cloud.sh"
+    cmd_cloud "$@"
+    ;;
   trust)
     shift
     source "$MUSTER_ROOT/lib/commands/trust.sh"
@@ -384,6 +389,7 @@ case "${1:-}" in
     echo "Fleet commands:"
     echo "  fleet       Deploy one project to multiple machines (SSH or cloud)"
     echo "  group       Orchestrate multiple projects as one deploy (local, SSH, or cloud)"
+    echo "  cloud       Fleet Cloud account: login, logout, status"
     echo "  trust       Manage fleet deploy trust (accept, reject, revoke)"
     echo "  deploy fleet <group>   Shortcut for 'muster group deploy <group>'"
     echo ""
