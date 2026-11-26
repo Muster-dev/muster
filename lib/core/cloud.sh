@@ -350,9 +350,17 @@ _cloud_status_json() {
 # "<healthy>/<total> healthy" from muster status --json output.
 _cloud_status_summary() {
   local json="$1" total healthy
-  total=$(printf '%s' "$json" | jq '[.services | to_entries[]] | length' 2>/dev/null)
+  local disabled
+  total=$(printf '%s' "$json" | jq '[.services | to_entries[] | select(.value.status != "disabled")] | length' 2>/dev/null)
   healthy=$(printf '%s' "$json" | jq '[.services | to_entries[] | select(.value.status == "healthy")] | length' 2>/dev/null)
-  printf '%s/%s healthy' "${healthy:-0}" "${total:-0}"
+  disabled=$(printf '%s' "$json" | jq '[.services | to_entries[] | select(.value.status == "disabled")] | length' 2>/dev/null)
+  if [[ "${total:-0}" == "0" && "${disabled:-0}" != "0" ]]; then
+    printf 'health checks off'
+  elif [[ "${disabled:-0}" != "0" ]]; then
+    printf '%s/%s healthy, %s unchecked' "${healthy:-0}" "${total:-0}" "$disabled"
+  else
+    printf '%s/%s healthy' "${healthy:-0}" "${total:-0}"
+  fi
 }
 
 # True when no service reports "unhealthy".

@@ -94,7 +94,7 @@ STUB_OUT='muster-tunnel: pinning key for agent edge-1
 export STUB_OUT
 json=$(_cloud_status_json edge-1 "")
 _test_eq "status json extracted past preamble" "p" "$(printf '%s' "$json" | jq -r .project)"
-_test_eq "summary counts healthy" "1/3 healthy" "$(_cloud_status_summary "$json")"
+_test_eq "summary counts healthy" "1/2 healthy, 1 unchecked" "$(_cloud_status_summary "$json")"
 _test "unhealthy detected" bash -c "source '$MUSTER_ROOT/lib/core/cloud.sh'; ! _cloud_status_all_healthy '$json'"
 STUB_OUT='{"error":"auth_required"}'
 _test "non-status output → failure" bash -c "! _cloud_status_json edge-1 ''"

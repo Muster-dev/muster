@@ -919,10 +919,13 @@ _fleet_cmd_add() {
     return 1
   fi
 
-  # Ensure fleet config exists
+  # Create the fleet config on first use instead of making people run init
   if ! fleet_load_config; then
-    err "No remotes.json found. Run 'muster fleet init' first."
-    return 1
+    _fleet_cmd_init >/dev/null 2>&1 || true
+    if ! fleet_load_config; then
+      err "Couldn't create the fleet config. Run 'muster fleet init' and try again."
+      return 1
+    fi
   fi
 
   fleet_add_machine "$name" "$host" "$user" "$port" "$key" "$path" "$mode" "$transport" "$hook_mode" || return 1
