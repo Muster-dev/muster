@@ -25,7 +25,7 @@ cmd_hooks() {
         echo "Commands:"
         echo "  verify [service]    Check hooks against integrity manifest"
         echo "  approve [service]   Re-sign hooks after intentional edits"
-        echo "  lock [service]      Set hooks read-only (chmod 555)"
+        echo "  lock [service]      Opt-in: set hooks read-only (chmod 555)"
         echo "  unlock [service]    Allow editing (chmod 755)"
         echo ""
         echo "Examples:"

@@ -150,6 +150,10 @@ _setup_copy_hooks() {
     [[ ! -f "$f" ]] && continue
     local basename
     basename=$(basename "$f")
+    # Hooks from older versions were locked read-only (555); make them
+    # writable again so regeneration doesn't fail with "Permission denied".
+    [[ -f "${hook_dir}/${basename}" && ! -w "${hook_dir}/${basename}" ]] && \
+      chmod u+w "${hook_dir}/${basename}" 2>/dev/null
     sed \
       -e "s|{{SERVICE_NAME}}|${esc_svc_name}|g" \
       -e "s|{{K8S_DEPLOY_NAME}}|${esc_k8s_deploy}|g" \
@@ -161,7 +165,9 @@ _setup_copy_hooks() {
       -e "s|{{K8S_DIR}}|${esc_k8s_path}|g" \
       -e "s|{{START_CMD}}|${esc_start_cmd}|g" \
       "$f" > "${hook_dir}/${basename}"
-    chmod 555 "${hook_dir}/${basename}"
+    # Owner-writable so users can edit their own hooks. Edits are caught by
+    # the per-machine approval check; `muster hooks lock` makes them read-only.
+    chmod 755 "${hook_dir}/${basename}"
   done
 }
 
