@@ -482,7 +482,10 @@ _preflight() {
       fi
       opts[${#opts[@]}]="Continue anyway"
       opts[${#opts[@]}]="Abort"
-      menu_select "${_PF_MSG[$i]}" "${opts[@]}"
+      # One problem: it's already printed just above, so don't repeat it as the title.
+      local _pf_title="${_PF_MSG[$i]}"
+      (( blocking == 1 )) && _pf_title="What do you want to do?"
+      menu_select "$_pf_title" "${opts[@]}"
       case "$MENU_RESULT" in
         "Continue anyway") ;;
         "Abort"|"__back__"|"")
