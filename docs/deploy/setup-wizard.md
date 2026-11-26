@@ -14,7 +14,28 @@ muster setup --help                   # show all flags
 
 ## Interactive Mode
 
-Running `muster setup` without flags launches a full-screen TUI wizard. Requires a TTY (errors if stdin is not interactive).
+Running `muster setup` without flags launches a full-screen TUI wizard. It needs a TTY; without one it errors and lists the equivalent flags. Every question has a default, so you can press Enter through the whole wizard. The detected health check type is preselected, ports are validated, and each health check is probed once. If nothing answers but the service is running on another port, setup offers that port.
+
+### Re-running setup
+
+On a project that already has `muster.json`, setup asks **Update (keep my changes) / Start over / Cancel**. The non-interactive equivalents are `--update` and `--force`.
+
+- **Update** adds newly detected services to `muster.json` (infra first in `deploy_order`) and doesn't touch the entries you already have. It refreshes hooks you never edited and keeps hooks you did edit. A hook counts as edited when it differs from what muster last generated; those checksums are in `.muster/.template_hashes`.
+- **Start over** regenerates everything. It backs up any hooks you edited to `.muster/backup-<timestamp>/` first.
+
+### Safe to interrupt
+
+Setup writes into a staging directory (`.muster-setup.XXXXXX`) and moves everything into place in one step at the end. Ctrl+C before that leaves no partial files: no half-written `muster.json` and no stray hooks.
+
+### Friendly edge cases
+
+- Service names are turned into config keys (`My API` becomes `my_api`). If two names collide, the second one is renamed (`my_api_2`). Either way you see a notice.
+- Missing tools come with an install command for your package manager (brew, apt-get, dnf, yum, apk, pacman), offered in a TTY.
+- If Docker is installed but not running, setup says so and continues.
+- If only `docker-compose` (v1) is installed, the generated hooks use it instead of `docker compose`.
+- When extra compose files sit next to the main one (`docker-compose.prod.yml`), setup explains how to layer them with `COMPOSE_FILE`.
+- An empty project gets template commands (`--scan`) or a short question flow (interactive) that always ends with at least one service.
+- Ports and health checks are also read from Dockerfile `EXPOSE`/`HEALTHCHECK`, compose `ports`/`healthcheck`, and `-p`/`--port`/`PORT=` in package.json scripts.
 
 ### Wizard Steps
 

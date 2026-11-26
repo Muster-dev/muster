@@ -59,12 +59,15 @@ muster setup --help                                     # see all flags
 |---------|-------------|
 | `muster` | Dashboard — live health/status view (auto-refreshes every 20s) with action menu + installed skills |
 | `muster setup` / `muster init` | Guided setup wizard (`init` is an alias for `setup`), or use flags for non-interactive (`--help`) |
-| `muster setup --force` | Overwrite existing muster.json |
+| `muster setup --update` | Re-run on an existing project: add new services, keep your changes and edited hooks |
+| `muster setup --force` | Start over (edited hooks are backed up first) |
 | `muster deploy` | Deploy all services (respects deploy order) |
 | `muster deploy api` | Deploy a specific service |
 | `muster deploy svc1 svc2` | Deploy multiple specific services in order |
 | `muster deploy --yes` | Approve unreviewed/changed hooks non-interactively (CI) |
 | `muster deploy --dry-run` | Preview deploy plan without executing |
+| `muster deploy --no-preflight` | Skip the pre-deploy checks (tools, cluster, disk, ports, env, git, SSH) |
+| `muster explain [svc]` | Explain the last failure in plain words: likely cause, what to try, one-key fix (`--log FILE`, `--json`, `--fix`) |
 | `muster status` | Check health of all services |
 | `muster logs` | Stream logs (interactive service picker) |
 | `muster rollback` | Rollback a service |
@@ -105,7 +108,18 @@ muster is an **orchestrator**, not a deployment tool. Your project provides hook
 
 You confirm what it found, set deploy order, configure health checks and credentials per service, and muster generates **real working hook scripts** from stack-specific templates — not empty stubs.
 
-If nothing is detected (empty project), it falls back to a conversational question flow.
+If nothing is detected (empty project), it falls back to a conversational question flow. Re-running setup offers **Update (keep my changes)**, which adds new services without clobbering hooks you edited. Setup is atomic: Ctrl+C never leaves partial files.
+
+### When things go wrong
+
+muster explains failures without any AI, using an offline rules engine:
+
+- **Before deploying**, preflight catches the usual suspects: Docker not running, the wrong kube context, a missing namespace, a full disk, a busy port, a non-executable hook, unset env vars, stale locks, an unreachable SSH host. Blocking problems offer *Fix it / Continue anyway / Abort*.
+- **When a deploy fails**, you get **Likely cause / Try** above the recovery menu, plus a **Fix: …** entry when there's a safe one-key fix (stop the container holding the port, raise `deploy_timeout`, move the database earlier in `deploy_order`, …).
+- **Later**, run `muster explain` (or `--json`), `muster doctor --fix`, or follow the dashboard's *Next step* line.
+- **Typos** get a suggestion: `muster deplyo` → *Did you mean: deploy?*
+
+Every rule is listed in [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ### Setup creates this in your project:
 
