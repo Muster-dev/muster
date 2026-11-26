@@ -216,7 +216,7 @@ groups_add_remote() {
       (if $identity != "" then {identity_file: $identity} else {} end)),
       hook_mode: $hook_mode} +
       (if $project_dir != "" then {remote_path: $project_dir} else {} end) +
-      (if $auth_method == "password" then {auth: {method: "password"} + (if $auth_mode != "" then {mode: $auth_mode} else {} end)} else {} end)')
+      (if $auth_method == "password" then {auth: ({method: "password"} + (if $auth_mode != "" then {mode: $auth_mode} else {} end))} else {} end)')
 
   fleet_cfg_project_create "$name" "default" "$_pdir_name" "$_json"
 
