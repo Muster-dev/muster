@@ -29,20 +29,20 @@ _diag_show() {
   printf '%b\n' "    ${DIM}${suggestion}${RESET}"
 }
 
-# Known error patterns: "id|grep -i regex|summary|hint" (checked in order;
+# Known error patterns: "id;grep -i regex;summary;hint" (checked in order;
 # the first two are alternatives — only one of them is reported)
 _K8S_DIAG_RULES=(
-  'ErrImageNeverPull|ErrImageNeverPull|Image not found locally and pull policy is Never|Push the image to the node or change imagePullPolicy'
-  'ImagePullBackOff|ImagePullBackOff\|ErrImagePull|Can'"'"'t pull container image|Check registry auth, image name, and tag'
-  'InvalidImageName|InvalidImageName|Invalid image name in deployment spec|Check the image field in your deployment YAML'
-  'OOMKilled|OOMKilled|Out of memory (OOMKilled)|Increase memory limits in deployment spec'
-  'CrashLoopBackOff|CrashLoopBackOff|Container keeps crashing (CrashLoopBackOff)|Check application logs and entrypoint config'
-  'CreateContainerConfigError|CreateContainerConfigError|Container config error (missing ConfigMap or Secret mount)|Check that all referenced ConfigMaps and Secrets exist'
-  'RunContainerError|RunContainerError|Container failed to start|Check entrypoint, command, and volume mounts in deployment spec'
-  'Unschedulable|Unschedulable|No node has enough capacity|Check node resources or scale up the cluster'
-  'SecretNotFound|secret.*not found|Missing Kubernetes secret|Create the required secret before deploying'
-  'PVCNotFound|persistentvolumeclaim.*not found|Missing PersistentVolumeClaim|Create the required PVC before deploying'
-  'VersionMismatch|incompatible.*engine version\|version.*mismatch|Version mismatch|Pin to a compatible version or check migration docs'
+  'ErrImageNeverPull;ErrImageNeverPull;Image not found locally and pull policy is Never;Push the image to the node or change imagePullPolicy'
+  'ImagePullBackOff;ImagePullBackOff\|ErrImagePull;Can'"'"'t pull container image;Check registry auth, image name, and tag'
+  'InvalidImageName;InvalidImageName;Invalid image name in deployment spec;Check the image field in your deployment YAML'
+  'OOMKilled;OOMKilled;Out of memory (OOMKilled);Increase memory limits in deployment spec'
+  'CrashLoopBackOff;CrashLoopBackOff;Container keeps crashing (CrashLoopBackOff);Check application logs and entrypoint config'
+  'CreateContainerConfigError;CreateContainerConfigError;Container config error (missing ConfigMap or Secret mount);Check that all referenced ConfigMaps and Secrets exist'
+  'RunContainerError;RunContainerError;Container failed to start;Check entrypoint, command, and volume mounts in deployment spec'
+  'Unschedulable;Unschedulable;No node has enough capacity;Check node resources or scale up the cluster'
+  'SecretNotFound;secret.*not found;Missing Kubernetes secret;Create the required secret before deploying'
+  'PVCNotFound;persistentvolumeclaim.*not found;Missing PersistentVolumeClaim;Create the required PVC before deploying'
+  'VersionMismatch;incompatible.*engine version\|version.*mismatch;Version mismatch;Pin to a compatible version or check migration docs'
 )
 
 # Results of the last _k8s_diag_collect
@@ -120,9 +120,9 @@ ${pod_prev_logs}"
   local i=0 rule id rx rest summary hint image_pull_matched=false
   while (( i < ${#_K8S_DIAG_RULES[@]} )); do
     rule="${_K8S_DIAG_RULES[$i]}"
-    id="${rule%%|*}"; rest="${rule#*|}"
-    rx="${rest%%|*}"; rest="${rest#*|}"
-    summary="${rest%%|*}"; hint="${rest#*|}"
+    id="${rule%%;*}"; rest="${rule#*;}"
+    rx="${rest%%;*}"; rest="${rest#*;}"
+    summary="${rest%%;*}"; hint="${rest#*;}"
     i=$(( i + 1 ))
     # ErrImageNeverPull and ImagePullBackOff are reported as one or the other
     if [[ "$id" == "ImagePullBackOff" && "$image_pull_matched" == "true" ]]; then
