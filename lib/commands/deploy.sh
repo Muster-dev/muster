@@ -77,10 +77,196 @@ _deploy_verify() {
   return 0
 }
 
+# ── Per-service results (for the end-of-deploy summary + exit code) ──
+_DR_SVC=()
+_DR_NAME=()
+_DR_RESULT=()   # deployed | failed | skipped | rolled back
+_DR_DUR=()      # seconds
+_DR_HEALTH=()   # healthy | unhealthy | disabled | -
+_DR_LOG=()      # deploy log path ("" if none)
+_DR_ERROR=()    # true when this entry should make the deploy exit non-zero
+
+# Args: svc name result duration health log is_error
+_deploy_record() {
+  local i=${#_DR_SVC[@]}
+  _DR_SVC[$i]="$1"
+  _DR_NAME[$i]="$2"
+  _DR_RESULT[$i]="$3"
+  _DR_DUR[$i]="$4"
+  _DR_HEALTH[$i]="$5"
+  _DR_LOG[$i]="$6"
+  _DR_ERROR[$i]="$7"
+}
+
+# Record every service after position $1 (0-based) as skipped — used when a
+# deploy stops early (non-interactive failure, Abort).
+# Args: next_index service...
+_deploy_record_remaining() {
+  local next="$1"; shift
+  local idx=0 svc
+  for svc in "$@"; do
+    if (( idx >= next )); then
+      local _rn
+      _rn=$(config_get ".services.${svc}.name" 2>/dev/null)
+      [[ -z "$_rn" || "$_rn" == "null" ]] && _rn="$svc"
+      _deploy_record "$svc" "$_rn" "skipped" 0 "-" "" "true"
+    fi
+    idx=$(( idx + 1 ))
+  done
+}
+
+# Format seconds as 41s / 2m05s
+_deploy_fmt_dur() {
+  local s="${1:-0}"
+  if (( s >= 60 )); then
+    printf '%dm%02ds' $(( s / 60 )) $(( s % 60 ))
+  else
+    printf '%ds' "$s"
+  fi
+}
+
+# Print the end-of-deploy summary (table or NDJSON) and return the exit code:
+#   0  every selected service deployed (and passed its health check)
+#   1  one or more services failed, were skipped because of an error,
+#      were rolled back, or failed their health check
+# Args: json(true|false) project_dir total_seconds
+_deploy_summary() {
+  local json="$1" project_dir="$2" total_s="$3"
+  local n=${#_DR_SVC[@]}
+  local deployed=0 failed=0 skipped=0 rolled=0 errors=0
+  local i=0
+  while (( i < n )); do
+    case "${_DR_RESULT[$i]}" in
+      deployed) deployed=$(( deployed + 1 )) ;;
+      failed) failed=$(( failed + 1 )) ;;
+      skipped) skipped=$(( skipped + 1 )) ;;
+      "rolled back") rolled=$(( rolled + 1 )) ;;
+    esac
+    [[ "${_DR_ERROR[$i]}" == "true" ]] && errors=$(( errors + 1 ))
+    i=$(( i + 1 ))
+  done
+  local rc=0
+  (( errors > 0 )) && rc=1
+
+  if [[ "$json" == "true" ]]; then
+    local items="" first=true
+    i=0
+    while (( i < n )); do
+      [[ "$first" == "true" ]] && first=false || items="${items},"
+      items="${items}{\"service\":\"${_DR_SVC[$i]}\",\"result\":\"${_DR_RESULT[$i]}\",\"duration\":${_DR_DUR[$i]},\"health\":\"${_DR_HEALTH[$i]}\",\"log_file\":\"${_DR_LOG[$i]}\"}"
+      i=$(( i + 1 ))
+    done
+    printf '{"event":"summary","total":%d,"deployed":%d,"failed":%d,"skipped":%d,"rolled_back":%d,"duration":%d,"exit_code":%d,"services":[%s]}\n' \
+      "$n" "$deployed" "$failed" "$skipped" "$rolled" "$total_s" "$rc" "$items"
+    return $rc
+  fi
+
+  (( n == 0 )) && return $rc
+
+  # Column widths from plain text (colors are applied outside the padding)
+  local w_name=7 w_res=6
+  i=0
+  while (( i < n )); do
+    (( ${#_DR_NAME[$i]} > w_name )) && w_name=${#_DR_NAME[$i]}
+    (( ${#_DR_RESULT[$i]} > w_res )) && w_res=${#_DR_RESULT[$i]}
+    i=$(( i + 1 ))
+  done
+
+  echo ""
+  printf '  %b%-*s  %-*s  %6s  %s%b\n' "${DIM}" "$w_name" "Service" "$w_res" "Result" "Time" "Health" "${RESET}"
+  i=0
+  while (( i < n )); do
+    local color="$GREEN" hcolor="$DIM"
+    case "${_DR_RESULT[$i]}" in
+      failed) color="$RED" ;;
+      skipped|"rolled back") color="$YELLOW" ;;
+    esac
+    case "${_DR_HEALTH[$i]}" in
+      healthy) hcolor="$GREEN" ;;
+      unhealthy) hcolor="$RED" ;;
+    esac
+    printf '  %-*s  %b%-*s%b  %6s  %b%s%b\n' \
+      "$w_name" "${_DR_NAME[$i]}" \
+      "$color" "$w_res" "${_DR_RESULT[$i]}" "$RESET" \
+      "$(_deploy_fmt_dur "${_DR_DUR[$i]}")" \
+      "$hcolor" "${_DR_HEALTH[$i]}" "$RESET"
+    i=$(( i + 1 ))
+  done
+  echo ""
+
+  # Final line: "3 deployed in 41s" / "2 deployed, 1 failed — see <log>"
+  local parts="${deployed} deployed"
+  (( failed > 0 )) && parts="${parts}, ${failed} failed"
+  (( rolled > 0 )) && parts="${parts}, ${rolled} rolled back"
+  (( skipped > 0 )) && parts="${parts}, ${skipped} skipped"
+
+  if (( rc == 0 )); then
+    ok "${parts} in $(_deploy_fmt_dur "$total_s")"
+  else
+    local logs=()
+    i=0
+    while (( i < n )); do
+      if [[ "${_DR_ERROR[$i]}" == "true" && -n "${_DR_LOG[$i]}" ]]; then
+        logs[${#logs[@]}]="${_DR_LOG[$i]#"${project_dir}/"}"
+      fi
+      i=$(( i + 1 ))
+    done
+    if (( ${#logs[@]} > 0 )); then
+      err "${parts} — see ${logs[0]}"
+      local li=1
+      while (( li < ${#logs[@]} )); do
+        printf '      see %s\n' "${logs[$li]}"
+        li=$(( li + 1 ))
+      done
+    else
+      err "${parts} in $(_deploy_fmt_dur "$total_s")"
+    fi
+  fi
+  return $rc
+}
+
+# Progress line before/after a service. With ANSI: the redrawing bar.
+# Without (piped / NO_COLOR): one plain "[n/total] name" line per service.
+# Args: current total label [done]
+_deploy_progress() {
+  if [[ "${MUSTER_ANSI:-true}" == "false" ]]; then
+    [[ "${4:-}" == "done" ]] && return 0
+    printf '  [%d/%d] %s\n' "$1" "$2" "$3"
+    return 0
+  fi
+  if [[ "${4:-}" == "done" ]]; then
+    progress_bar "$1" "$2" "$3"
+  else
+    progress_bar "$(( $1 - 1 ))" "$2" "$3"
+  fi
+  echo ""
+}
+
 cmd_deploy() {
+  _deploy_main "$@"
+  local rc=$?
+  # bin/muster's deploy route ignores our return status (it falls through to
+  # the return-to-dashboard check), so when we're the top-level command and
+  # nothing else runs after us (no TTY, or --json), exit with it directly.
+  if (( rc != 0 )) && [[ "${FUNCNAME[1]:-}" == "main" ]]; then
+    local _a _json=false
+    for _a in "$@"; do [[ "$_a" == "--json" ]] && _json=true; done
+    if [[ ! -t 0 || "$_json" == "true" ]]; then
+      exit "$rc"
+    fi
+  fi
+  return $rc
+}
+
+_deploy_main() {
   local dry_run=false
   local _json_mode=false
   local _force=false
+  local _approve_hooks=false
+  [[ "${MUSTER_APPROVE_HOOKS:-}" == "1" || "${MUSTER_APPROVE_HOOKS:-}" == "true" ]] && _approve_hooks=true
+  _DR_SVC=(); _DR_NAME=(); _DR_RESULT=(); _DR_DUR=(); _DR_HEALTH=(); _DR_LOG=(); _DR_ERROR=()
+  local _deploy_t0
+  _deploy_t0=$(date +%s)
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --help|-h)
@@ -92,7 +278,14 @@ cmd_deploy() {
         echo "  --dry-run       Preview deploy plan without executing"
         echo "  --force         Override deploy lock if one exists"
         echo "  --json          Output as NDJSON (one JSON object per line)"
+        echo "  --yes           Approve changed/unapproved hooks without review (for CI;"
+        echo "                  same as MUSTER_APPROVE_HOOKS=1)"
         echo "  -h, --help      Show this help"
+        echo ""
+        echo "Exit codes:"
+        echo "  0  every selected service deployed and passed its health check"
+        echo "  1  a service failed, was rolled back, failed its health check, was"
+        echo "     skipped because of an error, or hooks weren't approved"
         echo ""
         echo "Examples:"
         echo "  muster deploy              Interactive: pick all or select services"
@@ -105,6 +298,7 @@ cmd_deploy() {
       --dry-run) dry_run=true; shift ;;
       --force) _force=true; shift ;;
       --json) _json_mode=true; shift ;;
+      --yes) _approve_hooks=true; shift ;;
       *)
         err "Unknown flag: $1"
         echo "Run 'muster deploy --help' for usage."
@@ -304,6 +498,40 @@ cmd_deploy() {
   local total=${#services[@]}
   local current=0
 
+  # Release the deploy lock + env when returning early (also covered by the
+  # EXIT trap when muster exits, but the dashboard calls us in-process).
+  _deploy_end() {
+    if [[ "$dry_run" == "false" ]]; then
+      _service_lock_release_all "$project_dir" 2>/dev/null
+      _deploy_lock_release "$project_dir"
+      trap - EXIT
+    fi
+    _unload_env_file
+  }
+
+  # ── Hook approval gate (real deploys only) ──
+  if [[ "$dry_run" == "false" ]] && (( total > 0 )); then
+    local _gate_ok=true _gate_reason=""
+    if [[ "$_json_mode" == "true" ]]; then
+      _hook_trust_gate "$project_dir" "deploy" false "$_approve_hooks" "${services[@]}" >&2 || { _gate_ok=false; _gate_reason="hooks_not_approved"; }
+    else
+      local _gate_tty=false
+      [[ -t 0 ]] && _gate_tty=true
+      _hook_trust_gate "$project_dir" "deploy" "$_gate_tty" "$_approve_hooks" "${services[@]}" || { _gate_ok=false; _gate_reason="hooks_not_approved"; }
+    fi
+    if [[ "$_gate_ok" == "false" ]]; then
+      if [[ "$_json_mode" == "true" ]]; then
+        printf '{"event":"error","reason":"%s"}\n' "$_gate_reason"
+        _deploy_record_remaining 0 "${services[@]}"
+        _deploy_summary true "$project_dir" "$(( $(date +%s) - _deploy_t0 ))"
+      else
+        echo ""
+      fi
+      _deploy_end
+      return 1
+    fi
+  fi
+
   # Pre-authenticate SSH passwords for remote services (before deploy loop)
   # Check sshpass availability first
   local _needs_sshpass=false
@@ -352,11 +580,14 @@ cmd_deploy() {
   fi
   export MUSTER_LOCK_SOURCE
 
-  for svc in "${services[@]}"; do
+  for svc in ${services[@]+"${services[@]}"}; do
     (( current++ ))
 
     local name
     name=$(config_get ".services.${svc}.name")
+    [[ -z "$name" || "$name" == "null" ]] && name="$svc"
+    local _svc_t0 _svc_result="" _svc_health="-" _svc_log=""
+    _svc_t0=$(date +%s)
     local hook="${project_dir}/.muster/hooks/${svc}/deploy.sh"
     local _hook_dir="${project_dir}/.muster/hooks/${svc}"
     local _use_just=false
@@ -365,7 +596,15 @@ cmd_deploy() {
     fi
 
     if [[ "$_use_just" == "false" && ! -x "$hook" ]]; then
-      warn "No deploy hook for ${name}, skipping"
+      if [[ "$target" == "all" ]]; then
+        warn "No deploy hook for ${name}, skipping"
+        [[ "$dry_run" == "false" ]] && _deploy_record "$svc" "$name" "skipped" 0 "-" "" "false"
+      else
+        # Explicitly requested service with nothing to run is an error
+        err "No deploy hook for ${name} (.muster/hooks/${svc}/deploy.sh)"
+        [[ "$dry_run" == "false" ]] && _deploy_record "$svc" "$name" "failed" 0 "-" "" "true"
+      fi
+      [[ "$_json_mode" == "true" ]] && printf '{"event":"skipped","service":"%s","reason":"no_hook"}\n' "$svc"
       continue
     fi
 
@@ -389,8 +628,9 @@ cmd_deploy() {
       if [[ "$_force" == "true" ]]; then
         _service_lock_release "$project_dir" "$svc"
       fi
-      if ! _service_lock_acquire "$project_dir" "$svc"; then
+      if ! _service_lock_acquire "$project_dir" "$svc" >&2; then
         printf '{"event":"skipped","service":"%s","reason":"locked"}\n' "$svc"
+        _deploy_record "$svc" "$name" "skipped" 0 "-" "" "true"
         continue
       fi
 
@@ -457,6 +697,17 @@ cmd_deploy() {
         done <<< "$_cred_env_lines"
       fi
 
+      # Security gate (integrity re-check + dangerous command scan)
+      local _jhook_check="$hook"
+      [[ "$_use_just" == "true" ]] && _jhook_check="${_hook_dir}/justfile"
+      if ! _hook_security_check "$_jhook_check" "$project_dir" >&2; then
+        printf '{"event":"done","service":"%s","status":"blocked"}\n' "$svc"
+        _history_log_event "$svc" "deploy" "failed" ""
+        _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "" "true"
+        _service_lock_release "$project_dir" "$svc"
+        continue
+      fi
+
       local _json_hook_timeout="${MUSTER_DEPLOY_TIMEOUT:-120}"
       local _json_deploy_start_time
       _json_deploy_start_time=$(date +%s)
@@ -484,7 +735,10 @@ ${_k8s_env_lines}"
       done
       _deploy_rc=${PIPESTATUS[0]}
 
+      _svc_log="$log_file"
       if (( _deploy_rc == 0 )); then
+        _svc_result="deployed"
+        _svc_health="disabled"
         printf '{"event":"done","service":"%s","status":"success"}\n' "$svc"
         _deploy_verify "$log_file" "$svc" "$_json_deploy_start_time" "json"
         _history_log_event "$svc" "deploy" "ok" ""
@@ -520,12 +774,15 @@ ${_k8s_env_lines}"
             "$health_hook" &>/dev/null && _health_ok=true
           fi
           if [[ "$_health_ok" == "true" ]]; then
+            _svc_health="healthy"
             printf '{"event":"health","service":"%s","status":"healthy"}\n' "$svc"
           else
+            _svc_health="unhealthy"
             printf '{"event":"health","service":"%s","status":"unhealthy"}\n' "$svc"
           fi
         fi
       else
+        _svc_result="failed"
         if (( _deploy_rc == 124 )); then
           printf '{"event":"done","service":"%s","status":"timeout","timeout":%d}\n' "$svc" "$_json_hook_timeout"
         else
@@ -550,12 +807,14 @@ ${_k8s_env_lines}"
         done <<< "$_k8s_env_lines"
       fi
       _service_lock_release "$project_dir" "$svc"
+      local _jerr=false
+      [[ "$_svc_result" != "deployed" || "$_svc_health" == "unhealthy" ]] && _jerr=true
+      _deploy_record "$svc" "$name" "$_svc_result" "$(( $(date +%s) - _svc_t0 ))" "$_svc_health" "$_svc_log" "$_jerr"
       continue
 
     elif [[ "$dry_run" == "true" ]]; then
       # ── Dry-run: show plan without executing anything ──
-      progress_bar "$(( current - 1 ))" "$total" "Deploying ${name}..."
-      echo ""
+      _deploy_progress "$current" "$total" "$name"
       echo ""
       printf '  %b[DRY-RUN]%b %bDeploying %s%b (%s/%s)\n' "${ACCENT}" "${RESET}" "${BOLD}" "$name" "${RESET}" "$current" "$total"
       local _dryrun_file="$hook"
@@ -655,6 +914,7 @@ ${_k8s_env_lines}"
       fi
       if ! _service_lock_acquire "$project_dir" "$svc"; then
         warn "Skipping ${name} — service is locked"
+        _deploy_record "$svc" "$name" "skipped" 0 "-" "" "true"
         continue
       fi
 
@@ -696,16 +956,14 @@ ${_k8s_env_lines}"
         [[ "$_gp_branch" == "null" || -z "$_gp_branch" ]] && _gp_branch="main"
       fi
 
-      progress_bar "$(( current - 1 ))" "$total" "Deploying ${name}..."
-      echo ""
+      _deploy_progress "$current" "$total" "Deploying ${name}..."
 
       # Preamble callback for stream_in_box to redraw context after viewer
       _deploy_redraw_preamble() {
         echo ""
         printf '  %b%bDeploying%b %b%s%b\n' "${BOLD}" "${ACCENT_BRIGHT}" "${RESET}" "${WHITE}" "$project" "${RESET}"
         echo ""
-        progress_bar "$(( current - 1 ))" "$total" "Deploying ${name}..."
-        echo ""
+        _deploy_progress "$current" "$total" "Deploying ${name}..."
       }
       _SIB_REDRAW_FN="_deploy_redraw_preamble"
 
@@ -746,7 +1004,10 @@ ${_k8s_env_lines}"
                   warn "Skipping git pull, deploying with current code"
                   ;;
                 "Abort")
-                  _unload_env_file
+                  _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "" "true"
+                  _deploy_record_remaining "$current" "${services[@]}"
+                  _deploy_summary false "$project_dir" "$(( $(date +%s) - _deploy_t0 ))"
+                  _deploy_end
                   return 1
                   ;;
               esac
@@ -764,9 +1025,11 @@ ${_k8s_env_lines}"
         local _hook_check_path="$hook"
         [[ "$_use_just" == "true" ]] && _hook_check_path="${_hook_dir}/justfile"
         if ! _hook_security_check "$_hook_check_path" "$project_dir"; then
-          warn "Skipping ${name} — hook blocked by security check"
+          err "${name} not deployed — hook blocked by security check"
+          _svc_result="failed"
           break
         fi
+        _svc_log="$log_file"
 
         local rc=0
         if remote_is_enabled "$svc"; then
@@ -801,9 +1064,10 @@ ${_k8s_env_lines}"
         unset _SIB_REDRAW_FN
 
         if (( rc == 0 )); then
-          progress_bar "$current" "$total" "Deploying ${name}..."
-          echo ""
+          _deploy_progress "$current" "$total" "Deploying ${name}..." "done"
           ok "${name} deployed"
+          _svc_result="deployed"
+          _svc_health="disabled"
           _deploy_verify "$log_file" "$svc" "$_deploy_start_time"
 
           # Capture SHA after hook (hook may have done git pull)
@@ -866,9 +1130,11 @@ ${_k8s_env_lines}"
             if [[ "$_health_ok" == "true" ]]; then
               stop_spinner
               ok "${name} healthy"
+              _svc_health="healthy"
             else
               stop_spinner
               err "${name} health check failed"
+              _svc_health="unhealthy"
               if [[ ! -t 0 ]]; then
                 # Non-interactive: log and continue
                 warn "Continuing despite health check failure (non-interactive)"
@@ -900,13 +1166,18 @@ ${_k8s_env_lines}"
                       fi
                       ok "${name} rolled back"
                       _history_log_event "$svc" "rollback" "ok"
+                      _svc_result="rolled back"
                     else
                       err "No rollback hook for ${name}"
                     fi
                     ;;
                   "Abort")
                     err "Deploy aborted"
-                    _unload_env_file
+                    _service_lock_release "$project_dir" "$svc"
+                    _deploy_record "$svc" "$name" "$_svc_result" "$(( $(date +%s) - _svc_t0 ))" "$_svc_health" "$_svc_log" "true"
+                    _deploy_record_remaining "$current" "${services[@]}"
+                    _deploy_summary false "$project_dir" "$(( $(date +%s) - _deploy_t0 ))"
+                    _deploy_end
                     return 1
                     ;;
                 esac
@@ -968,9 +1239,14 @@ ${_k8s_env_lines}"
           export MUSTER_DEPLOY_STATUS="failed"
           run_skill_hooks "post-deploy" "$svc"
 
+          _svc_result="failed"
           if [[ ! -t 0 ]]; then
-            # Non-interactive: abort on deploy failure
-            _unload_env_file
+            # Non-interactive: stop here; remaining services are not attempted
+            _service_lock_release "$project_dir" "$svc"
+            _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "$_svc_log" "true"
+            _deploy_record_remaining "$current" "${services[@]}"
+            _deploy_summary false "$project_dir" "$(( $(date +%s) - _deploy_t0 ))"
+            _deploy_end
             return 1
           fi
 
@@ -1000,6 +1276,7 @@ ${_k8s_env_lines}"
               stop_spinner
               ok "${name} rolled back & restarted"
               _history_log_event "$svc" "rollback" "ok"
+              _svc_result="rolled back"
               break
               ;;
             "Rollback ${name}")
@@ -1028,6 +1305,7 @@ ${_k8s_env_lines}"
                 stop_spinner
                 ok "${name} rolled back"
                 _history_log_event "$svc" "rollback" "ok"
+                _svc_result="rolled back"
               else
                 err "No rollback hook for ${name}"
               fi
@@ -1040,12 +1318,20 @@ ${_k8s_env_lines}"
               break
               ;;
             "Abort")
-              _unload_env_file
+              _service_lock_release "$project_dir" "$svc"
+              _deploy_record "$svc" "$name" "failed" "$(( $(date +%s) - _svc_t0 ))" "-" "$_svc_log" "true"
+              _deploy_record_remaining "$current" "${services[@]}"
+              _deploy_summary false "$project_dir" "$(( $(date +%s) - _deploy_t0 ))"
+              _deploy_end
               return 1
               ;;
           esac
         fi
       done
+
+      local _serr=false
+      [[ "$_svc_result" != "deployed" || "$_svc_health" == "unhealthy" ]] && _serr=true
+      _deploy_record "$svc" "$name" "${_svc_result:-failed}" "$(( $(date +%s) - _svc_t0 ))" "$_svc_health" "$_svc_log" "$_serr"
 
       # Clean up exported env vars (local deploy only)
       if ! remote_is_enabled "$svc"; then
@@ -1069,21 +1355,28 @@ ${_k8s_env_lines}"
     fi
   done
 
+  local _final_rc=0
+  local _elapsed=$(( $(date +%s) - _deploy_t0 ))
   if [[ "$_json_mode" == "true" ]]; then
     printf '{"event":"complete","total":%d,"dry_run":%s}\n' "$total" "$dry_run"
-  else
-    progress_bar "$total" "$total" "Complete"
-    echo ""
-    echo ""
-    if [[ "$dry_run" == "true" ]]; then
-      info "[DRY-RUN] Deploy plan complete — no changes made"
-    else
-      ok "Deploy complete"
+    if [[ "$dry_run" == "false" ]]; then
+      _deploy_summary true "$project_dir" "$_elapsed" || _final_rc=1
     fi
+  elif [[ "$dry_run" == "true" ]]; then
+    if [[ "${MUSTER_ANSI:-true}" != "false" ]]; then
+      progress_bar "$total" "$total" "Complete"
+      echo ""
+      echo ""
+    fi
+    info "[DRY-RUN] Deploy plan complete — no changes made"
+    echo ""
+  else
+    _deploy_summary false "$project_dir" "$_elapsed" || _final_rc=1
     echo ""
   fi
 
   _deploy_lock_release "$project_dir"
   trap - EXIT
   _unload_env_file
+  return $_final_rc
 }

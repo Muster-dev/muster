@@ -424,10 +424,14 @@ _hook_manifest_verify() {
 }
 
 # Approve (re-sign) hooks for a service or all services
-# Args: project_dir [service]
+# Args: project_dir [service] [include_config]
+#   Approving all services (no service) also approves muster.json + .env;
+#   pass include_config=true to do that for a single service too.
 _hook_manifest_approve() {
   local project_dir="$1"
   local service="${2:-}"
+  local include_config="${3:-}"
+  [[ -z "$service" ]] && include_config=true
   local hooks_dir="${project_dir}/.muster/hooks"
   _hook_trust_resolve "$project_dir"
   local manifest_file="${_HOOK_TRUST_DIR}/hooks.manifest"
@@ -481,8 +485,8 @@ _hook_manifest_approve() {
     done
   done
 
-  # Approving all services also approves the current config + .env
-  if [[ -z "$service" ]]; then
+  # Approve the current config + .env too
+  if [[ "$include_config" == "true" ]]; then
     local _cfg
     _cfg=$(_hook_config_file "$project_dir")
     local _f _k
@@ -836,6 +840,17 @@ _hook_trust_pending() {
     [[ $? -eq 1 ]] && _HOOK_PENDING_FRESH=true
   fi
 
+  # With no approval at all, approving regenerates the whole manifest, so
+  # list every service's hooks, not just the selected ones.
+  if [[ "$_HOOK_PENDING_FRESH" == "true" ]]; then
+    local _d
+    set --
+    for _d in "${project_dir}/.muster/hooks"/*/; do
+      [[ -d "$_d" ]] || continue
+      set -- "$@" "$(basename "$_d")"
+    done
+  fi
+
   local svc f rc
   for svc in "$@"; do
     local svc_dir="${project_dir}/.muster/hooks/${svc}"
@@ -902,7 +917,30 @@ _hook_trust_show_diff() {
     fi
     i=$(( i + 1 ))
   done
-  echo ""
+}
+
+# Approve exactly what _hook_trust_pending found (selected services + config)
+# Args: project_dir service...
+_hook_trust_approve_pending() {
+  local project_dir="$1"; shift
+  if [[ "$_HOOK_PENDING_FRESH" == "true" ]]; then
+    _hook_manifest_generate "$project_dir"
+    return 0
+  fi
+  local cfg_pending=false i=0
+  while (( i < ${#_HOOK_PENDING[@]} )); do
+    case "${_HOOK_PENDING[$i]}" in
+      *"|_config/"*) cfg_pending=true ;;
+    esac
+    i=$(( i + 1 ))
+  done
+  local svc
+  for svc in "$@"; do
+    _hook_manifest_approve "$project_dir" "$svc" "$cfg_pending"
+    cfg_pending=false
+  done
+  [[ "$cfg_pending" == "true" ]] && _hook_manifest_approve "$project_dir" "__config_only__" true
+  return 0
 }
 
 # Gate hook execution on per-machine approval.
@@ -928,10 +966,10 @@ _hook_trust_gate() {
     i=0
     while (( i < count )); do
       entry="${_HOOK_PENDING[$i]}"; key="${entry#*|}"; key="${key%%|*}"
-      printf '    %s\n' "$key"
+      printf '    %s\n' "${key#_config/}"
       i=$(( i + 1 ))
     done
-    _hook_manifest_approve "$project_dir"
+    _hook_trust_approve_pending "$project_dir" "$@"
     return 0
   fi
 
@@ -941,15 +979,15 @@ _hook_trust_gate() {
     i=0
     while (( i < count )); do
       entry="${_HOOK_PENDING[$i]}"; key="${entry#*|}"; key="${key%%|*}"
-      printf '    %s\n' "$key"
+      printf '    %s\n' "${key#_config/}"
       i=$(( i + 1 ))
     done
   elif [[ "$interactive" != "true" && "$count" == "1" ]]; then
     entry="${_HOOK_PENDING[0]}"; status="${entry%%|*}"; key="${entry#*|}"; key="${key%%|*}"
     if [[ "$status" == "changed" ]]; then
-      err "${key} changed since it was approved on this machine. Review it, then run: muster hooks approve"
+      err "${key#_config/} changed since it was approved on this machine. Review it, then run: muster hooks approve"
     else
-      err "${key} hasn't been approved on this machine. Review it, then run: muster hooks approve"
+      err "${key#_config/} hasn't been approved on this machine. Review it, then run: muster hooks approve"
     fi
     printf '  %bIn CI, pass --yes or set MUSTER_APPROVE_HOOKS=1 to approve and continue.%b\n' "${DIM}" "${RESET}"
     return 1
@@ -958,9 +996,9 @@ _hook_trust_gate() {
     while (( i < count )); do
       entry="${_HOOK_PENDING[$i]}"; status="${entry%%|*}"; key="${entry#*|}"; key="${key%%|*}"
       if [[ "$status" == "changed" ]]; then
-        err "${key} changed since it was approved on this machine"
+        err "${key#_config/} changed since it was approved on this machine"
       else
-        err "${key} hasn't been approved on this machine"
+        err "${key#_config/} hasn't been approved on this machine"
       fi
       i=$(( i + 1 ))
     done
@@ -986,7 +1024,7 @@ _hook_trust_gate() {
         _hook_trust_show_diff "$project_dir"
         ;;
       "$approve_label")
-        _hook_manifest_approve "$project_dir"
+        _hook_trust_approve_pending "$project_dir" "$@"
         ok "Hooks approved on this machine"
         echo ""
         return 0

@@ -12,19 +12,30 @@ source "$MUSTER_ROOT/lib/skills/manager.sh"
 source "$MUSTER_ROOT/lib/commands/history.sh"
 
 cmd_rollback() {
-  case "${1:-}" in
-    --help|-h)
-      echo "Usage: muster rollback [service]"
-      echo ""
-      echo "Rollback a service to its previous state. Without a service name, pick interactively."
-      return 0
-      ;;
-    --*)
-      err "Unknown flag: $1"
-      echo "Run 'muster rollback --help' for usage."
-      return 1
-      ;;
-  esac
+  local _approve_hooks=false
+  [[ "${MUSTER_APPROVE_HOOKS:-}" == "1" || "${MUSTER_APPROVE_HOOKS:-}" == "true" ]] && _approve_hooks=true
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --help|-h)
+        echo "Usage: muster rollback [--yes] [service]"
+        echo ""
+        echo "Rollback a service to its previous state. Without a service name, pick interactively."
+        echo ""
+        echo "Flags:"
+        echo "  --yes    Approve changed/unapproved hooks without review (CI; same as"
+        echo "           MUSTER_APPROVE_HOOKS=1)"
+        echo ""
+        echo "Exit codes: 0 rolled back, 1 rollback failed/aborted or hooks not approved"
+        return 0
+        ;;
+      --yes) _approve_hooks=true; shift ;;
+      *)
+        err "Unknown flag: $1"
+        echo "Run 'muster rollback --help' for usage."
+        return 1
+        ;;
+    esac
+  done
 
   load_config
   _load_env_file
@@ -41,6 +52,13 @@ cmd_rollback() {
   trap '_deploy_lock_release "'"$project_dir"'"; _unload_env_file; cleanup_term' EXIT
 
   # If no target, let user pick from services that have rollback hooks
+  if [[ -z "$target" && ! -t 0 ]]; then
+    err "No service given. Usage: muster rollback <service>"
+    _deploy_lock_release "$project_dir"
+    trap - EXIT
+    _unload_env_file
+    return 1
+  fi
   if [[ -z "$target" ]]; then
     local rollback_services=()
     local services
@@ -58,12 +76,17 @@ cmd_rollback() {
 
     if [[ ${#rollback_services[@]} -eq 0 ]]; then
       err "No services have rollback hooks configured"
+      _deploy_lock_release "$project_dir"
+      trap - EXIT
+      _unload_env_file
       return 1
     fi
 
     rollback_services[${#rollback_services[@]}]="Back"
     menu_select "Rollback which service?" "${rollback_services[@]}"
     if [[ "$MENU_RESULT" == "Back" || "$MENU_RESULT" == "__back__" ]]; then
+      _deploy_lock_release "$project_dir"
+      trap - EXIT
       _unload_env_file
       return 2
     fi
@@ -79,6 +102,19 @@ cmd_rollback() {
 
   if [[ "$_use_just" == "false" && ! -x "$hook" ]]; then
     err "No rollback hook for ${target}"
+    _deploy_lock_release "$project_dir"
+    trap - EXIT
+    _unload_env_file
+    return 1
+  fi
+
+  # Per-machine hook approval (prompt in a TTY, fail or --yes otherwise)
+  local _rb_tty=false
+  [[ -t 0 ]] && _rb_tty=true
+  if ! _hook_trust_gate "$project_dir" "roll back" "$_rb_tty" "$_approve_hooks" "$target"; then
+    _deploy_lock_release "$project_dir"
+    trap - EXIT
+    _unload_env_file
     return 1
   fi
 
@@ -116,6 +152,7 @@ cmd_rollback() {
   [[ "$_use_just" == "true" ]] && _rb_check_path="${_rb_hook_dir}/justfile"
   if ! _hook_security_check "$_rb_check_path" "$project_dir"; then
     _deploy_lock_release "$project_dir"
+    trap - EXIT
     _unload_env_file
     return 1
   fi
@@ -129,6 +166,7 @@ cmd_rollback() {
   fi
 
   local _rb_timeout="${MUSTER_DEPLOY_TIMEOUT:-120}"
+  local _rb_final_rc=0
 
   while true; do
     local log_file
@@ -179,6 +217,15 @@ ${_k8s_env_lines}"
 
       k8s_diagnose_failure "$target"
 
+      if [[ ! -t 0 ]]; then
+        # Non-interactive: no recovery menu — report and fail
+        printf '  %bLog: %s%b\n' "${DIM}" "$log_file" "${RESET}"
+        export MUSTER_DEPLOY_STATUS="failed"
+        run_skill_hooks "post-rollback" "$target"
+        _rb_final_rc=1
+        break
+      fi
+
       menu_select "Rollback failed. What do you want to do?" "Retry" "Force cleanup and retry" "Abort"
 
       case "$MENU_RESULT" in
@@ -213,9 +260,10 @@ ${_k8s_env_lines}"
             warn "No cleanup hook for ${name}, retrying rollback anyway"
           fi
           ;; # loop continues with rollback retry
-        "Abort")
+        *)
           export MUSTER_DEPLOY_STATUS="failed"
           run_skill_hooks "post-rollback" "$target"
+          _rb_final_rc=1
           break
           ;;
       esac
@@ -242,4 +290,5 @@ ${_k8s_env_lines}"
   _deploy_lock_release "$project_dir"
   trap - EXIT
   _unload_env_file
+  return $_rb_final_rc
 }
