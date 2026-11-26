@@ -9,6 +9,75 @@ source "$MUSTER_ROOT/lib/core/just_runner.sh"
 
 _HEALTH_CACHE_DIR="${HOME}/.muster/health_cache"
 
+# ── Plain-text status for `muster --minimal` ──
+# Classifies each service the same way `muster status` does: health disabled
+# in config (or no health hook) → disabled; otherwise run the health check
+# now (timeout: default_health_timeout, 10s) → healthy / unhealthy. The
+# result is also written to the health cache, which is shared across
+# projects, so a stale entry from another project can't leak in.
+# Requires load_config. Prints:
+#   muster: <project>
+#     <Name>: healthy|unhealthy|disabled
+#   muster: N services (H healthy, U unhealthy, D disabled)
+_dashboard_minimal_status() {
+  local project_dir
+  project_dir="$(dirname "$CONFIG_FILE")"
+  echo "muster: $(config_get '.project')"
+
+  local timeout
+  timeout=$(global_config_get "default_health_timeout" 2>/dev/null || true)
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=10
+
+  source "$MUSTER_ROOT/lib/core/hook_security.sh"
+  mkdir -p "$_HEALTH_CACHE_DIR"
+  local total=0 healthy=0 unhealthy=0 disabled=0
+  local svc
+  while IFS= read -r svc; do
+    [[ -z "$svc" ]] && continue
+    total=$(( total + 1 ))
+    local name
+    name=$(config_get ".services.${svc}.name")
+    [[ -z "$name" || "$name" == "null" ]] && name="$svc"
+    local hook_dir="${project_dir}/.muster/hooks/${svc}"
+    local enabled state
+    enabled=$(config_get ".services.${svc}.health.enabled")
+
+    if [[ "$enabled" == "false" ]]; then
+      state="disabled"
+    elif [[ -f "${hook_dir}/health.sh" ]] && ! _hook_security_check "${hook_dir}/health.sh" "$project_dir" "silent"; then
+      state="blocked"   # same as `muster status`: blocked hooks aren't run
+    elif _just_available "$hook_dir" && _just_has_recipe "$hook_dir" "health"; then
+      if _run_with_timeout "$timeout" just --justfile "${hook_dir}/justfile" health &>/dev/null; then
+        state="healthy"
+      else
+        state="unhealthy"
+      fi
+    elif [[ -x "${hook_dir}/health.sh" ]]; then
+      if _run_with_timeout "$timeout" bash "${hook_dir}/health.sh" &>/dev/null; then
+        state="healthy"
+      else
+        state="unhealthy"
+      fi
+    else
+      state="disabled"
+    fi
+
+    case "$state" in
+      healthy) healthy=$(( healthy + 1 )) ;;
+      unhealthy) unhealthy=$(( unhealthy + 1 )) ;;
+      disabled) disabled=$(( disabled + 1 )) ;;
+    esac
+    [[ "$state" != "blocked" ]] && printf '%s' "$state" > "${_HEALTH_CACHE_DIR}/${svc}" 2>/dev/null
+    if [[ "$state" == "blocked" ]]; then
+      echo "  ${name}: unknown (health hook blocked by security check)"
+    else
+      echo "  ${name}: ${state}"
+    fi
+  done < <(config_services)
+
+  echo "muster: ${total} services (${healthy} healthy, ${unhealthy} unhealthy, ${disabled} disabled)"
+}
+
 # ── Shared header bar ──
 # Renders a mustard-background branded header bar
 # Usage: _dashboard_bar "left text" "right text"
