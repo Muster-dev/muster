@@ -156,6 +156,12 @@ _fleet_setup_detect_remote() {
   _DETECT_PATHS=()
   _DETECT_SERVICES=""
 
+  # The detection script needs a shell on the target: SSH only
+  _fleet_load_machine "$machine" 2>/dev/null || true
+  if [[ "${_FM_TRANSPORT:-ssh}" == "cloud" ]]; then
+    return 0
+  fi
+
   local _detect_output
   _detect_output=$(fleet_exec "$machine" '
     # Check tools

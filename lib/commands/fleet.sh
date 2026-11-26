@@ -937,18 +937,28 @@ _fleet_cmd_add() {
       printf '%b\n' "  ${DIM}Install: curl -sSL https://getmuster.dev/cloud | bash${RESET}"
     fi
 
-    # Check if remotes.json has a cloud section
-    local _relay
-    _relay=$(fleet_get '.cloud.relay // ""')
-    if [[ -z "$_relay" || "$_relay" == "null" ]]; then
+    # Relay + token come from remotes.json .cloud or `muster cloud login`
+    _fleet_cloud_config
+    if [[ -z "$FLEET_CLOUD_RELAY" || -z "$FLEET_CLOUD_TOKEN" ]]; then
       echo ""
-      warn "No cloud config in remotes.json"
-      printf '%b\n' "  ${DIM}Add a \"cloud\" section with relay URL and org_id to remotes.json${RESET}"
+      warn "Not logged in to Fleet Cloud"
+      printf '%b\n' "  ${DIM}Run: muster cloud login${RESET}"
+    elif _fleet_cloud_available; then
+      echo ""
+      start_spinner "Pinging cloud agent ${host}..."
+      if fleet_check "$name"; then
+        stop_spinner
+        ok "Cloud agent ${host} is connected"
+      else
+        stop_spinner
+        warn "Cloud agent ${host} is not reachable yet"
+        printf '%b\n' "  ${DIM}Check muster-agent on that machine, then: muster fleet test ${name}${RESET}"
+      fi
     fi
 
     echo ""
     info "Cloud machine added. Deploy via: muster fleet deploy ${name}"
-    printf '%b\n' "  ${DIM}Ensure muster-agent is running on the remote and connected to the relay.${RESET}"
+    printf '%b\n' "  ${DIM}Agent name: ${host}. Hooks must be approved on that machine (muster hooks approve).${RESET}"
   else
     # SSH transport: test connectivity
     echo ""
@@ -1309,11 +1319,24 @@ _fleet_cmd_test() {
     local status_icon status_color tag=""
 
     if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
-      # Cloud transport test
+      # Cloud transport test: relay ping, then (muster mode) a real
+      # allowlisted command to prove muster answers on the agent
       if fleet_check "$machine"; then
         status_icon="●"; status_color="$GREEN"
         tag=" cloud ok"
-        pass=$(( pass + 1 ))
+        if [[ "$_FM_MODE" == "muster" ]]; then
+          source "$MUSTER_ROOT/lib/core/cloud.sh"
+          if _cloud_status_json "$(_fleet_cloud_agent "$machine")" "$_FM_PROJECT_DIR" >/dev/null; then
+            tag=" cloud ok, muster ok"
+            pass=$(( pass + 1 ))
+          else
+            status_icon="●"; status_color="$RED"
+            tag=" cloud ok, muster fail"
+            fail=$(( fail + 1 ))
+          fi
+        else
+          pass=$(( pass + 1 ))
+        fi
       else
         source "$MUSTER_ROOT/lib/core/cloud.sh"
         if ! _fleet_cloud_available; then
@@ -1537,12 +1560,25 @@ _fleet_cmd_status() {
 
     local host_str="${_FM_USER}@${_FM_HOST}"
     [[ "$_FM_PORT" != "22" ]] && host_str="${host_str}:${_FM_PORT}"
+    [[ "$_FM_TRANSPORT" == "cloud" ]] && host_str="cloud:${_FM_HOST}"
 
     local status_icon status_color tag=""
 
     # Check connectivity
     if fleet_check "$machine"; then
-      if [[ "$_FM_MODE" == "muster" ]]; then
+      if [[ "$_FM_TRANSPORT" == "cloud" && "$_FM_MODE" == "muster" ]]; then
+        # Cloud: no muster auth token needed (relay authenticates)
+        source "$MUSTER_ROOT/lib/core/cloud.sh"
+        local _cloud_json=""
+        if _cloud_json=$(_cloud_status_json "$(_fleet_cloud_agent "$machine")" "$_FM_PROJECT_DIR"); then
+          status_icon="●"; status_color="$GREEN"
+          _cloud_status_all_healthy "$_cloud_json" || status_color="$YELLOW"
+          tag=" $(_cloud_status_summary "$_cloud_json")"
+        else
+          status_icon="●"; status_color="$YELLOW"
+          tag=" reachable, no status"
+        fi
+      elif [[ "$_FM_MODE" == "muster" ]]; then
         local token
         token=$(fleet_token_get "$machine")
         if [[ -n "$token" ]]; then
@@ -1897,13 +1933,19 @@ _fleet_cmd_rollback() {
   # Source skill manager for fleet skill hooks
   source "$MUSTER_ROOT/lib/skills/manager.sh"
 
-  local target="" parallel=false
+  local target="" parallel=false _rb_services=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --parallel) parallel=true; shift ;;
+      --service|-s)
+        [[ -z "${2:-}" ]] && { err "--service needs a service name"; return 1; }
+        _rb_services[${#_rb_services[@]}]="$2"; shift 2 ;;
       --help|-h)
-        echo "Usage: muster fleet rollback [target] [--parallel]"
+        echo "Usage: muster fleet rollback [target] [--service <svc>]... [--parallel]"
+        echo ""
+        echo "  --service, -s <svc>   Roll back only this service (repeatable)."
+        echo "                        Default: every service in deploy order."
         return 0
         ;;
       --*)
@@ -1981,7 +2023,13 @@ _fleet_cmd_rollback() {
 
     local rc=0
 
-    if [[ "$_FM_MODE" == "muster" ]]; then
+    if [[ "$_FM_MODE" == "muster" && "$_FM_TRANSPORT" == "cloud" ]]; then
+      # Cloud: `muster rollback <svc>` per service on the agent (plain argv)
+      mkdir -p "$log_dir"
+      _fleet_cloud_rollback_cmd "$machine" "${_rb_services[@]+"${_rb_services[@]}"}" >> "$log_file" 2>&1
+      rc=$?
+      (( rc != 0 )) && tail -3 "$log_file" | while IFS= read -r _l; do printf '%b\n' "  ${DIM}${_l}${RESET}"; done
+    elif [[ "$_FM_MODE" == "muster" ]]; then
       local token
       token=$(fleet_token_get "$machine")
       if [[ -z "$token" ]]; then
@@ -1999,6 +2047,9 @@ _fleet_cmd_rollback() {
       # Push mode: run rollback hooks
       while IFS= read -r svc; do
         [[ -z "$svc" ]] && continue
+        if (( ${#_rb_services[@]} > 0 )); then
+          case " ${_rb_services[*]} " in *" ${svc} "*) ;; *) continue ;; esac
+        fi
         local hook="${project_dir}/.muster/hooks/${svc}/rollback.sh"
         [[ ! -x "$hook" ]] && continue
 

@@ -76,6 +76,12 @@ fleet_auto_pair() {
   local machine="$1"
   _fleet_load_machine "$machine"
 
+  # Cloud machines need no muster auth token: the relay authenticates both
+  # ends and commands are end-to-end encrypted.
+  if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+    return 0
+  fi
+
   if ! fleet_exec "$machine" "command -v muster" &>/dev/null; then
     warn "Remote does not have muster installed"
     _fleet_pair_instructions "$machine"
@@ -127,6 +133,8 @@ _fleet_pair_instructions() {
 
 fleet_verify_pair() {
   local machine="$1"
+  _fleet_load_machine "$machine"
+  [[ "$_FM_TRANSPORT" == "cloud" ]] && return 0
   local token
   token=$(fleet_token_get "$machine")
   [[ -z "$token" ]] && return 1
@@ -440,8 +448,10 @@ fleet_exec() {
       ssh $_FLEET_SSH_OPTS "${_FM_USER}@${_FM_HOST}" "$cmd"
       ;;
     cloud)
+      # Only plain `muster …` argv can run on a cloud agent; anything that
+      # needs a shell is refused here (see _cloud_exec_plain).
       source "$MUSTER_ROOT/lib/core/cloud.sh"
-      _fleet_cloud_exec "$machine" "$cmd"
+      _cloud_exec_plain "$(_fleet_cloud_agent "$machine")" "$cmd" "$_FM_PROJECT_DIR"
       ;;
     *)
       err "Unknown transport: ${_FM_TRANSPORT} (machine: ${machine})"
@@ -494,7 +504,11 @@ MUSTER_HOOK_SIG=${_hook_sig}"
         fi
       fi
       source "$MUSTER_ROOT/lib/core/cloud.sh"
-      _fleet_cloud_push "$machine" "$hook_file" "$_cloud_env"
+      local _cloud_cwd="$_FM_PROJECT_DIR" _cloud_agent
+      _cloud_agent=$(_fleet_cloud_agent "$machine")
+      # Push only works for agents joined with --mode push
+      _cloud_run_explained "$machine" \
+        _fleet_cloud_push "$_cloud_agent" "$hook_file" "$_cloud_env" "$_cloud_cwd"
       ;;
     *)
       err "Unknown transport: ${_FM_TRANSPORT} (machine: ${machine})"
@@ -514,7 +528,7 @@ fleet_check() {
       ;;
     cloud)
       source "$MUSTER_ROOT/lib/core/cloud.sh"
-      _fleet_cloud_check "$machine"
+      _fleet_cloud_check "$(_fleet_cloud_agent "$machine")"
       ;;
     *)
       return 1
@@ -525,11 +539,31 @@ fleet_check() {
 fleet_desc() {
   local machine="$1"
   _fleet_load_machine "$machine"
+  if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+    printf 'cloud:%s' "$_FM_HOST"
+    return 0
+  fi
   printf '%s@%s:%s' "$_FM_USER" "$_FM_HOST" "$_FM_PORT"
+}
+
+# Refuse an SSH-only feature for a cloud-transport machine.
+# Args: machine feature_description
+fleet_require_ssh() {
+  local machine="$1" what="$2"
+  _fleet_load_machine "$machine"
+  if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+    err "${what} needs SSH; ${machine} uses the cloud transport"
+    printf '%b\n' "  ${DIM}Cloud agents only run allowlisted muster commands (deploy, status, rollback, logs).${RESET}"
+    return 1
+  fi
+  return 0
 }
 
 _fleet_check_nonroot() {
   local machine="$1"
+  _fleet_load_machine "$machine"
+  # SSH-only: the cloud agent runs as whatever user started muster-agent
+  [[ "$_FM_TRANSPORT" == "cloud" ]] && return 0
   local remote_uid
   remote_uid=$(fleet_exec "$machine" "id -u" 2>/dev/null)
   remote_uid=$(printf '%s' "$remote_uid" | tr -d '[:space:]')

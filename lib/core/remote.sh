@@ -112,12 +112,16 @@ remote_exec_stdout() {
   [[ "$_REMOTE_AUTH_METHOD" == "password" ]] && _remote_load_ssh_password "$svc"
 
   if [[ "$_REMOTE_CLOUD" == "true" ]]; then
+    # Per-service cloud remotes pipe the hook to the agent (push_hook), which
+    # only works for agents joined with `--mode push`. Agents in muster mode
+    # refuse it; _cloud_run_explained turns that into a clear message.
     source "$MUSTER_ROOT/lib/core/cloud.sh"
     # Cloud config should be pre-populated by caller or from global settings
     if [[ -z "${FLEET_CLOUD_RELAY:-}" ]]; then
       _groups_cloud_config 2>/dev/null || _fleet_cloud_config
     fi
-    _fleet_cloud_push "$_REMOTE_HOST" "$hook_file" "$cred_env_lines"
+    _cloud_run_explained "$_REMOTE_HOST" \
+      _fleet_cloud_push "$_REMOTE_HOST" "$hook_file" "$cred_env_lines" "$_REMOTE_PROJECT_DIR"
     return $?
   fi
 

@@ -683,9 +683,11 @@ $(cat "$_hf" 2>/dev/null)"
           _fleet_total=$(( _fleet_total + 1 ))
           if fleet_check "$_fm" 2>/dev/null; then
             _fleet_ok=$(( _fleet_ok + 1 ))
-            # Non-root check
-            local _uid
-            _uid=$(fleet_exec "$_fm" "id -u" 2>/dev/null | tr -d '[:space:]')
+            # Non-root check (SSH only; cloud agents can't run `id`)
+            local _uid=""
+            _fleet_load_machine "$_fm" 2>/dev/null || true
+            [[ "${_FM_TRANSPORT:-ssh}" != "cloud" ]] && \
+              _uid=$(fleet_exec "$_fm" "id -u" 2>/dev/null | tr -d '[:space:]')
             if [[ "$_uid" == "0" ]]; then
               _fleet_root=$(( _fleet_root + 1 ))
               _doc_warn "Fleet: ${_fm} running as root"
@@ -719,7 +721,12 @@ $(cat "$_hf" 2>/dev/null)"
           [[ "$_ai" != "true" ]] && continue
           _agent_total=$(( _agent_total + 1 ))
 
-          # Check PID
+          # Check PID (SSH only)
+          _fleet_load_machine "$_am" 2>/dev/null || true
+          if [[ "${_FM_TRANSPORT:-ssh}" == "cloud" ]]; then
+            _agent_total=$(( _agent_total - 1 ))
+            continue
+          fi
           local _apid
           _apid=$(fleet_exec "$_am" "cat ~/.muster/agent/agent.pid 2>/dev/null && kill -0 \$(cat ~/.muster/agent/agent.pid 2>/dev/null) 2>/dev/null && echo ok" 2>/dev/null)
           if [[ "$_apid" != *"ok"* ]]; then

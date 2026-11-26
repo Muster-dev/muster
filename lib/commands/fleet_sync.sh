@@ -82,6 +82,7 @@ _fleet_sync_one() {
   local machine="$1" dry_run="${2:-false}" service_filter="${3:-}"
 
   _fleet_load_machine "$machine"
+  fleet_require_ssh "$machine" "Hook sync" || return 1
 
   # Find local hooks dir — fleet dirs first, then project dir
   local hooks_dir=""
@@ -328,6 +329,7 @@ _fleet_cmd_setup_user() {
   }
 
   _fleet_load_machine "$machine"
+  fleet_require_ssh "$machine" "setup-user" || return 1
 
   [[ -z "$project_dir" ]] && project_dir="${_FM_PROJECT_DIR:-/opt/app}"
 

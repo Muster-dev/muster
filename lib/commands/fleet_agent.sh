@@ -69,6 +69,7 @@ _fleet_cmd_install_agent() {
   fi
 
   _fleet_load_machine "$machine"
+  fleet_require_ssh "$machine" "The monitoring agent installer" || return 1
   if [[ -z "$_FM_HOST" ]]; then
     err "Machine '${machine}' not found"
     return 1
@@ -555,7 +556,9 @@ _fleet_cmd_agent_status() {
     fi
 
     # ── Fallback: pull directly via SSH ──
-    if [[ "$_used_cache" == "false" ]]; then
+    if [[ "$_used_cache" == "false" && "$_FM_TRANSPORT" == "cloud" ]]; then
+      printf '  %bNo agent report yet (cloud machines have no SSH fallback)%b\n\n' "${DIM}" "${RESET}"
+    elif [[ "$_used_cache" == "false" ]]; then
       # Check agent process
       local _as_pid
       _as_pid=$(fleet_exec "$_as_m" 'pid=$(cat ~/.muster/agent/agent.pid 2>/dev/null); [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo running || echo stopped' 2>/dev/null)
@@ -632,6 +635,7 @@ _fleet_cmd_remove_agent() {
   fi
 
   _fleet_load_machine "$machine"
+  fleet_require_ssh "$machine" "Removing the monitoring agent" || return 1
   if [[ -z "$_FM_HOST" ]]; then
     err "Machine '${machine}' not found"
     return 1

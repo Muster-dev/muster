@@ -319,7 +319,8 @@ _fleet_deploy_sequential() {
         fi
 
         menu_select "Fleet deploy failed on ${machine}. What do you want to do?" \
-          "Retry" "Skip and continue" "Abort"
+          "Retry" "Skip and continue" "Abort" \
+          || MENU_RESULT="Abort" # no TTY: never loop on Retry
 
         case "$MENU_RESULT" in
           "Retry")
@@ -362,6 +363,13 @@ _fleet_deploy_auto_sync() {
     return 0
   fi
 
+  # Hook sync copies files over SSH. Cloud agents deploy from their own
+  # project dir (muster mode) or receive each hook with the deploy (push mode).
+  if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+    printf '%b\n' "  ${DIM}skipping hook sync for ${machine} (SSH only; cloud agents use their own hooks or push mode)${RESET}"
+    return 0
+  fi
+
   # Source fleet_sync.sh for _fleet_sync_one
   source "$MUSTER_ROOT/lib/commands/fleet_sync.sh"
 
@@ -374,6 +382,50 @@ _fleet_deploy_auto_sync() {
   fi
 }
 
+# Cloud transport, muster mode: `muster deploy` on the agent as a plain argv.
+# No muster auth token, trust check, remote env or lock files: the relay
+# authenticates the caller and the agent can't receive env vars. Hooks must
+# be approved on the agent's machine (`muster hooks approve` there).
+# Output goes to stdout. Args: machine [service...]
+_fleet_cloud_deploy_cmd() {
+  local machine="$1"
+  shift
+  _fleet_load_machine "$machine"
+  source "$MUSTER_ROOT/lib/core/cloud.sh"
+  local _agent
+  _agent=$(_fleet_cloud_agent "$machine")
+  _cloud_run_explained "$machine" _cloud_muster "$_agent" "$_FM_PROJECT_DIR" deploy "$@"
+}
+
+# Cloud transport, muster mode: `muster rollback <svc>` for each service.
+# Services default to the local project's deploy order (fleet = one project
+# on many machines). Output goes to stdout. Args: machine [service...]
+_fleet_cloud_rollback_cmd() {
+  local machine="$1"
+  shift
+  _fleet_load_machine "$machine"
+  source "$MUSTER_ROOT/lib/core/cloud.sh"
+  local _agent _svcs=() _s
+  _agent=$(_fleet_cloud_agent "$machine")
+  if (( $# > 0 )); then
+    for _s in "$@"; do _svcs[${#_svcs[@]}]="$_s"; done
+  else
+    while IFS= read -r _s; do
+      [[ -z "$_s" ]] && continue
+      [[ "$(config_get ".services.${_s}.skip_deploy")" == "true" ]] && continue
+      _svcs[${#_svcs[@]}]="$_s"
+    done < <(config_get '.deploy_order[]' 2>/dev/null || config_services)
+  fi
+  if (( ${#_svcs[@]} == 0 )); then
+    printf 'No services to roll back on %s\n' "$machine"
+    return 1
+  fi
+  for _s in "${_svcs[@]}"; do
+    _cloud_run_explained "$machine" _cloud_muster "$_agent" "$_FM_PROJECT_DIR" rollback "$_s" || return 1
+  done
+  return 0
+}
+
 # Deploy to a muster-mode machine
 _fleet_deploy_muster() {
   local machine="$1" log_file="$2"
@@ -381,6 +433,12 @@ _fleet_deploy_muster() {
 
   # Auto-sync hooks before deploy if needed
   _fleet_deploy_auto_sync "$machine" || return 1
+
+  if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+    info "Deploying on ${machine} via cloud agent ${_FM_HOST}"
+    stream_in_box "${machine}" "$log_file" _fleet_cloud_deploy_cmd "$machine"
+    return $?
+  fi
 
   local token
   token=$(fleet_token_get "$machine")
@@ -452,6 +510,9 @@ _fleet_deploy_push() {
   local _source_label="${USER:-unknown}@${_source_host}"
   local _remote_cd=""
   [[ -n "$_FM_PROJECT_DIR" ]] && _remote_cd="cd ${_FM_PROJECT_DIR} && "
+  # Remote lock files need a shell on the target: SSH only
+  local _use_locks=true
+  [[ "$_FM_TRANSPORT" == "cloud" ]] && _use_locks=false
 
   # Get services to deploy
   local services=()
@@ -487,14 +548,14 @@ ${_k8s_env}"
     # Acquire per-service lock on remote
     local _lock_json
     _lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_source_host}\"}"
-    fleet_exec "$machine" "${_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_lock_json}' > .muster/locks/${svc}.lock" 2>/dev/null || true
+    [[ "$_use_locks" == "true" ]] && { fleet_exec "$machine" "${_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_lock_json}' > .muster/locks/${svc}.lock" 2>/dev/null || true; }
 
     info "  ${svc} → ${machine}"
     fleet_push_hook "$machine" "$hook" "$env_lines" >> "$log_file" 2>&1
     local hook_rc=$?
 
     # Release per-service lock on remote
-    fleet_exec "$machine" "${_remote_cd}rm -f .muster/locks/${svc}.lock" 2>/dev/null || true
+    [[ "$_use_locks" == "true" ]] && { fleet_exec "$machine" "${_remote_cd}rm -f .muster/locks/${svc}.lock" 2>/dev/null || true; }
 
     if (( hook_rc != 0 )); then
       err "  ${svc} failed on ${machine}"
@@ -504,7 +565,7 @@ ${_k8s_env}"
   done
 
   # On failure, clean up any remaining locks from this push session
-  if (( svc_rc != 0 )); then
+  if (( svc_rc != 0 )) && [[ "$_use_locks" == "true" ]]; then
     fleet_exec "$machine" "${_remote_cd}rm -f .muster/locks/*.lock" 2>/dev/null || true
   fi
 
@@ -513,6 +574,27 @@ ${_k8s_env}"
 
 # ── Deploy: rolling ──
 # Deploy to one machine, verify health, then continue to next
+
+_fleet_sync_hooks_before_deploy() {
+  _fleet_deploy_auto_sync "$1"
+}
+
+# Deploy one machine (muster or push mode) with its own log file
+_fleet_deploy_one() {
+  local machine="$1"
+  _fleet_load_machine "$machine"
+  local project_dir
+  project_dir="$(dirname "$CONFIG_FILE")"
+  local log_dir="${project_dir}/.muster/logs"
+  mkdir -p "$log_dir"
+  local log_file
+  log_file="${log_dir}/fleet-${machine}-$(date +%Y%m%d-%H%M%S).log"
+  if [[ "$_FM_MODE" == "muster" ]]; then
+    _fleet_deploy_muster "$machine" "$log_file"
+  else
+    _fleet_deploy_push "$machine" "$log_file"
+  fi
+}
 
 _fleet_deploy_rolling() {
   local total=$#
@@ -551,7 +633,8 @@ _fleet_deploy_rolling() {
       # Rolling: stop on first failure
       echo ""
       menu_select "Deploy failed on ${machine}. What to do?" \
-        "Retry" "Skip and continue" "Abort"
+        "Retry" "Skip and continue" "Abort" \
+        || MENU_RESULT="Abort" # no TTY: never loop on Retry
       case "$MENU_RESULT" in
         "Retry")
           current=$((current - 1))
@@ -578,7 +661,14 @@ _fleet_deploy_rolling() {
 
       local _health_ok=false
       # Simple health check: run muster status on remote or check connectivity
-      if [[ "${_FM_MODE}" == "muster" ]]; then
+      if [[ "$_FM_TRANSPORT" == "cloud" && "${_FM_MODE}" == "muster" ]]; then
+        source "$MUSTER_ROOT/lib/core/cloud.sh"
+        local _cj=""
+        if _cj=$(_cloud_status_json "$(_fleet_cloud_agent "$machine")" "$_FM_PROJECT_DIR") \
+          && _cloud_status_all_healthy "$_cj"; then
+          _health_ok=true
+        fi
+      elif [[ "${_FM_MODE}" == "muster" ]]; then
         local _token=""
         _token=$(fleet_token_get "$machine" 2>/dev/null || true)
         local _h_cmd="muster status --minimal 2>/dev/null; echo \$?"
@@ -599,11 +689,16 @@ _fleet_deploy_rolling() {
         printf '%b\n' "${RED}unhealthy${RESET}"
         echo ""
         menu_select "Health check failed on ${machine}. Continue rolling?" \
-          "Continue anyway" "Rollback ${machine}" "Abort"
+          "Continue anyway" "Rollback ${machine}" "Abort" \
+          || MENU_RESULT="Abort" # no TTY: never loop on Retry
         case "$MENU_RESULT" in
           "Continue anyway") ;;
           *"Rollback"*)
-            fleet_exec "$machine" "muster rollback 2>/dev/null || true" 2>/dev/null || true
+            if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+              _fleet_cloud_rollback_cmd "$machine" >/dev/null 2>&1 || true
+            else
+              fleet_exec "$machine" "muster rollback 2>/dev/null || true" 2>/dev/null || true
+            fi
             printf '%b\n' "  ${DIM}Rolled back ${machine}${RESET}"
             ;;
           *)
@@ -685,7 +780,10 @@ _fleet_deploy_parallel() {
           exit 1
         fi
 
-        if [[ "$_FM_MODE" == "muster" ]]; then
+        if [[ "$_FM_MODE" == "muster" && "$_FM_TRANSPORT" == "cloud" ]]; then
+          _fleet_cloud_deploy_cmd "$machine" >> "$log_file" 2>&1
+          _rc=$?
+        elif [[ "$_FM_MODE" == "muster" ]]; then
           local _token
           _token=$(fleet_token_get "$machine")
           if [[ -z "$_token" ]]; then
@@ -706,6 +804,8 @@ _fleet_deploy_parallel() {
           _p_src_host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unknown")
           local _p_remote_cd=""
           [[ -n "$_FM_PROJECT_DIR" ]] && _p_remote_cd="cd ${_FM_PROJECT_DIR} && "
+          local _p_locks=true
+          [[ "$_FM_TRANSPORT" == "cloud" ]] && _p_locks=false
 
           while IFS= read -r _svc; do
             [[ -z "$_svc" ]] && continue
@@ -730,16 +830,16 @@ ${_ke}"
             # Acquire per-service lock on remote
             local _p_lock_json
             _p_lock_json="{\"user\":\"${USER:-unknown}\",\"pid\":$$,\"started\":\"$(date '+%Y-%m-%d %H:%M:%S')\",\"terminal\":\"fleet-push\",\"source\":\"fleet:${machine}\",\"host\":\"${_p_src_host}\"}"
-            fleet_exec "$machine" "${_p_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_p_lock_json}' > .muster/locks/${_svc}.lock" 2>/dev/null || true
+            [[ "$_p_locks" == "true" ]] && { fleet_exec "$machine" "${_p_remote_cd}mkdir -p .muster/locks && printf '%s\n' '${_p_lock_json}' > .muster/locks/${_svc}.lock" 2>/dev/null || true; }
 
             fleet_push_hook "$machine" "$_hook" "$_env" >> "$log_file" 2>&1
             local _push_rc=$?
 
             # Release per-service lock on remote
-            fleet_exec "$machine" "${_p_remote_cd}rm -f .muster/locks/${_svc}.lock" 2>/dev/null || true
+            [[ "$_p_locks" == "true" ]] && { fleet_exec "$machine" "${_p_remote_cd}rm -f .muster/locks/${_svc}.lock" 2>/dev/null || true; }
 
             if (( _push_rc != 0 )); then
-              fleet_exec "$machine" "${_p_remote_cd}rm -f .muster/locks/*.lock" 2>/dev/null || true
+              [[ "$_p_locks" == "true" ]] && { fleet_exec "$machine" "${_p_remote_cd}rm -f .muster/locks/*.lock" 2>/dev/null || true; }
               _rc=1
               break
             fi
