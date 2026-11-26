@@ -66,7 +66,7 @@ muster setup --help                                     # see all flags
 | `muster status` | Check health of all services |
 | `muster logs` | Stream logs (interactive service picker) |
 | `muster rollback` | Rollback a service |
-| `muster doctor` | Run project diagnostics (13 checks) |
+| `muster doctor` | Run project diagnostics (6 categories) |
 | `muster doctor --fix` | Auto-fix what it can (permissions, stale PIDs, old logs, .dockerignore) |
 | `muster cleanup` | Clean up stuck processes and old logs |
 | `muster settings` | Project settings + global muster preferences |
@@ -450,7 +450,7 @@ muster doctor --fix        # auto-fix what it can
 muster --minimal doctor    # plain text output (PASS/WARN/FAIL lines)
 ```
 
-13 checks: deploy.json validity, hook existence and permissions, health check status, tool availability, stale PID files, .env presence, old logs, k8s cluster reachability, fleet connectivity, **build context overlap detection**, and more.
+Checks across 6 categories (platform & tools, configuration, stack readiness, connectivity, health & runtime, storage & maintenance): deploy.json validity, hook existence and permissions, health check status, tool availability, stale PID files, .env presence, old logs, k8s cluster reachability, fleet connectivity, **build context overlap detection**, and more.
 
 ### Build Context Overlap Detection
 

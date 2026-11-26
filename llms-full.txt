@@ -392,18 +392,20 @@ Supports `--dry-run` flag and remote SSH execution.
 
 ## Hook Templates
 
-`templates/hooks/` contains 35 template files: 20 application templates (4 stacks × 5 hooks) + 15 infrastructure templates (3 stacks × 5 hooks in `{k8s,compose,docker}/infra/`):
+`templates/hooks/` contains 45 hook templates: 25 application templates (5 stacks × 5 hooks) + 20 infrastructure templates (4 stacks × 5 hooks in `{k8s,compose,docker,dev}/infra/`), plus a `just/justfile` template:
 
 **Application templates** (build + deploy):
 - **k8s/** — `docker build`, `docker push`, `kubectl apply`, `kubectl set image`, `kubectl rollout status/undo`, `kubectl logs`, `kubectl delete` failed pods
 - **compose/** — `docker compose build`, `docker compose up -d`, `docker compose down`, `docker compose logs -f`, `docker compose rm`
 - **docker/** — `docker build`, `docker run -d`, `docker stop/rm`, `docker logs -f`, `docker image prune`
 - **bare/** — `git pull`, build command, `systemctl restart`, `journalctl -f`, `journalctl --vacuum-time`
+- **dev/** — local dev processes started in the background and tracked via PID files in `.muster/pids/`
 
 **Infrastructure templates** (pull-only, no build — for redis, postgres, etc.):
 - **k8s/infra/** — `kubectl set image` with pre-built `{{SERVICE_IMAGE}}`, no docker build/push
 - **compose/infra/** — `docker compose pull` instead of build
 - **docker/infra/** — `docker pull {{SERVICE_IMAGE}}` instead of build
+- **dev/infra/** — infra services run via `docker compose` alongside the dev stack
 
 Setup auto-selects infrastructure templates for known services (redis, postgres, mysql, mongo, rabbitmq, kafka, elasticsearch, nginx, memcached, etc.).
 

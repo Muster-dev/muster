@@ -22,7 +22,7 @@ muster rollback <svc>  # rollback a service (interactive picker if no arg)
 muster history     # show deploy/rollback event log
 muster history --all           # show full history (not just recent)
 muster history api             # show history for one service
-muster doctor      # run project diagnostics (13 checks)
+muster doctor      # run project diagnostics (6 categories)
 muster doctor --fix            # auto-fix what it can (permissions, stale PIDs, old logs, .dockerignore)
 muster cleanup     # clean stuck processes + old logs
 muster settings    # project settings + global muster settings
@@ -71,8 +71,8 @@ muster/
 ├── templates/hooks/               ← stack-specific hook templates (k8s, compose, docker, bare, dev)
 │   ├── {k8s,compose,docker}/infra/ ← infrastructure service variants (pull-only, no build)
 │   └── dev/                       ← local dev stack (PID-managed processes, docker compose infra)
-├── docs/fleet.md                  ← fleet deployment guide
-├── docs/skills.md                 ← skill authoring guide
+├── docs/fleet/fleet.md            ← fleet deployment guide
+├── docs/skills/skills.md          ← skill authoring guide
 ├── FLEET.md                       ← fleet & cloud overview
 └── install.sh                     ← installer (fetches from releases, generates integrity manifest)
 ```
@@ -157,7 +157,7 @@ Deploy and rollback failures show interactive recovery menus instead of aborting
 |-------|----------|
 | Dashboard (every refresh) | Run detection if cache stale, show warning banner + Doctor `!` badge |
 | Deploy (before first build) | Read cache, show yellow warning line |
-| Doctor (check #13) | Run fresh detection, show detailed diagnostics, `--fix` adds to .dockerignore |
+| Doctor (Storage & Maintenance) | Run fresh detection, show detailed diagnostics, `--fix` adds to .dockerignore |
 | Setup (after hook generation) | Run detection, show fix suggestions |
 | `--minimal` mode | Output `# warning:` comments to stderr |
 

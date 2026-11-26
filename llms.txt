@@ -52,11 +52,10 @@ Muster is a CLI tool (`bin/muster`) that gives any project a polished deploy exp
 ## Config & Templates
 
 - [templates/deploy.example.json](templates/deploy.example.json): Example deploy.json with all fields documented.
-- [templates/hooks/](templates/hooks/): Stack-specific hook templates. 4 stacks × 5 hooks = 20 app templates + 15 infra templates (in `{k8s,compose,docker}/infra/`). Placeholders: `{{SERVICE_NAME}}`, `{{NAMESPACE}}`, `{{PORT}}`, `{{COMPOSE_FILE}}`, `{{DOCKERFILE}}`, `{{K8S_DIR}}`, `{{SERVICE_IMAGE}}`.
-- [docs/skills.md](docs/skills.md): How to create skills. Structure: `skill.json` manifest + `run.sh` entry point. Env vars: `MUSTER_PROJECT_DIR`, `MUSTER_CONFIG_FILE`, `MUSTER_SERVICE`, `MUSTER_HOOK`.
+- [templates/hooks/](templates/hooks/): Stack-specific hook templates. 5 stacks (k8s, compose, docker, bare, dev) × 5 hooks = 25 app templates + 20 infra templates (in `{k8s,compose,docker,dev}/infra/`). Placeholders: `{{SERVICE_NAME}}`, `{{NAMESPACE}}`, `{{PORT}}`, `{{COMPOSE_FILE}}`, `{{DOCKERFILE}}`, `{{K8S_DIR}}`, `{{SERVICE_IMAGE}}`.
+- [docs/skills/skills.md](docs/skills/skills.md): How to create skills. Structure: `skill.json` manifest + `run.sh` entry point. Env vars: `MUSTER_PROJECT_DIR`, `MUSTER_CONFIG_FILE`, `MUSTER_SERVICE`, `MUSTER_HOOK`.
 
 ## Optional
 
-- [docs/plans/2026-02-26-muster-design.md](docs/plans/2026-02-26-muster-design.md): Original design document with architecture decisions.
 - [install.sh](install.sh): Curl-pipe installer. Clones to `~/.muster/repo`, symlinks to `~/.local/bin/muster`. Runs post-install smoke test to verify the binary works. Offers to add `~/.local/bin` to PATH (interactive TTY only).
 - [README.md](README.md): User-facing docs with install instructions, command reference, project structure, config format.
