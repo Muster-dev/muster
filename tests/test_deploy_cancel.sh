@@ -9,7 +9,7 @@ command -v jq >/dev/null 2>&1 || { echo "  (skipped: needs jq)"; exit 0; }
 
 TMP=$(mktemp -d)
 MARK="muster_cancel_test_$$"
-trap 'pkill -f "$MARK" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+trap 'pkill -f "^${MARK} " 2>/dev/null || true; rm -rf "$TMP"' EXIT
 export HOME="$TMP/home" MUSTER_NO_VERIFY=true NO_COLOR=1 MUSTER_APPROVE_HOOKS=1
 mkdir -p "$HOME" "$TMP/p"
 cd "$TMP/p"
@@ -36,13 +36,16 @@ for mode in plain json; do
   "$M" "${args[@]}" > "$TMP/out.$mode" 2>&1 &
   pid=$!
   set +m
-  for _ in $(seq 1 50); do pgrep -f "$MARK" >/dev/null && break; sleep 0.1; done
-  _test "hook child started" bash -c "pgrep -f '$MARK' >/dev/null"
+  # Anchor on argv[0]: an unanchored pattern also matches any shell whose
+  # command line merely contains the marker (e.g. the checker itself, on Linux)
+  for _ in $(seq 1 100); do pgrep -f "^${MARK} " >/dev/null && break; sleep 0.1; done
+  _test "hook child started" bash -c "pgrep -f '^${MARK} ' >/dev/null"
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid"
   rc=0; wait "$pid" || rc=$?
   sleep 1
   _test_eq "exits 130" "130" "$rc"
-  _test "no orphaned hook process" bash -c "! pgrep -f '$MARK' >/dev/null"
+  if pgrep -f "^${MARK} " >/dev/null; then orphan=yes; else orphan=no; fi
+  _test_eq "no orphaned hook process" "no" "$orphan"
   _test "deploy lock released" test ! -f .muster/deploy.lock
   if [[ "$mode" == "json" ]]; then
     _test_contains "emits a cancelled event" '"event":"cancelled"' "$(cat "$TMP/out.$mode")"
