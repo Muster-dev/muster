@@ -91,6 +91,7 @@ cmd_cloud() {
     login) _cloud_login "$@" ;;
     logout) _cloud_logout "$@" ;;
     status | whoami) _cloud_status "$@" ;;
+    connect) _cloud_connect "$@" ;;
     -h | --help | help) _cloud_help ;;
     *)
       err "Unknown cloud command: ${sub}"
@@ -106,9 +107,15 @@ _cloud_help() {
   echo "Connect this machine to your Fleet Cloud account."
   echo ""
   echo "Commands:"
-  echo "  login [--relay <url>]   Sign in through the browser (device code)"
+  echo "  login [--relay <url>] [--qr]"
+  echo "                          Sign in through the browser (device code);"
+  echo "                          --qr also prints a QR code (needs qrencode)"
   echo "  logout                  Forget the stored token on this machine"
   echo "  status [--json]         Show account, relay and connection status"
+  echo "  connect                 Pair this server with Fleet Cloud (installs"
+  echo "                          muster-agent, shows a code + QR to approve)"
+  echo "                          Flags: --name <n> --project <dir> --relay <url>"
+  echo "                                 --service | --no-service  --yes"
   echo ""
   echo "Environment:"
   echo "  MUSTER_CLOUD_RELAY      Relay URL (default: https://relay.getmuster.dev)"
@@ -116,9 +123,13 @@ _cloud_help() {
 }
 
 _cloud_login() {
-  local relay=""
+  local relay="" qr=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --qr)
+        qr=true
+        shift
+        ;;
       --relay)
         relay="${2:-}"
         shift 2
@@ -187,6 +198,7 @@ _cloud_login() {
   else
     printf '  Open %b%s%b and enter the code.\n' "$WHITE" "$verify_complete" "$RESET"
   fi
+  [[ "$qr" == "true" ]] && _cloud_print_qr "$verify_complete"
   printf '  %bWaiting for approval… (Ctrl+C to cancel)%b\n' "$DIM" "$RESET"
 
   local waited=0 err_code token org_id name token_id relay_url
@@ -336,4 +348,232 @@ _cloud_status() {
   fi
   echo ""
   [[ -n "$token" && -n "$org" ]]
+}
+
+# Print a QR code of a URL when qrencode is installed and stdout is a
+# terminal. Never a hard dependency: silently does nothing otherwise.
+_cloud_print_qr() {
+  local url="$1"
+  [[ -t 1 || -n "${MUSTER_FORCE_QR:-}" ]] || return 0
+  has_cmd qrencode || return 0
+  echo ""
+  qrencode -t ansiutf8 -m 2 "$url" 2>/dev/null | sed 's/^/  /' || true
+  echo ""
+}
+
+# ── muster cloud connect: pair this machine as a Fleet Cloud server ──
+
+MUSTER_AGENT_INSTALL_URL="${MUSTER_AGENT_INSTALL_URL:-https://getmuster.dev/fleet-cloud/install.sh}"
+
+# Path of the muster-agent binary, or nothing
+_cloud_agent_bin() {
+  if command -v muster-agent >/dev/null 2>&1; then
+    command -v muster-agent
+  elif [[ -x "$HOME/.muster/bin/muster-agent" ]]; then
+    printf '%s' "$HOME/.muster/bin/muster-agent"
+  fi
+}
+
+_cloud_confirm() {
+  local prompt="$1" default="$2" ans=""
+  if [[ "$default" == "y" ]]; then
+    printf '  %s [Y/n] ' "$prompt"
+  else
+    printf '  %s [y/N] ' "$prompt"
+  fi
+  IFS= read -r ans || ans=""
+  [[ -z "$ans" ]] && ans="$default"
+  case "$ans" in
+    y | Y | yes | YES | Yes) return 0 ;;
+  esac
+  return 1
+}
+
+_cloud_connect() {
+  local name="" project="" relay="" service="" yes=false update=false user_service=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="${2:-}"; shift 2 ;;
+      --name=*) name="${1#--name=}"; shift ;;
+      --project) project="${2:-}"; shift 2 ;;
+      --project=*) project="${1#--project=}"; shift ;;
+      --relay) relay="${2:-}"; shift 2 ;;
+      --relay=*) relay="${1#--relay=}"; shift ;;
+      --service) service="yes"; shift ;;
+      --no-service) service="no"; shift ;;
+      --user-service) service="yes"; user_service=true; shift ;;
+      --update) update=true; shift ;;
+      -y | --yes) yes=true; shift ;;
+      -h | --help)
+        echo "Usage: muster cloud connect [flags]"
+        echo ""
+        echo "Pair this machine with your Fleet Cloud org. Installs muster-agent if"
+        echo "needed, prints a short code and QR to approve at cloud.getmuster.dev/pair,"
+        echo "then offers to run the agent as a background service."
+        echo ""
+        echo "Flags:"
+        echo "  --name <name>      Machine name shown in Fleet Cloud (default: hostname)"
+        echo "  --project <dir>    Project directory the agent deploys (default: current"
+        echo "                     directory when it has a muster.json)"
+        echo "  --relay <url>      Relay URL (self-hosted relays)"
+        echo "  --service          Install the system service (systemd/launchd; uses sudo)"
+        echo "  --user-service     Install a per-user service instead (no sudo)"
+        echo "  --no-service       Don't install a service"
+        echo "  --update           Reinstall muster-agent even if it is installed"
+        echo "  --yes, -y          Don't ask before installing muster-agent"
+        return 0
+        ;;
+      *)
+        err "Unknown flag: $1"
+        echo "Run 'muster cloud connect --help' for usage."
+        return 1
+        ;;
+    esac
+  done
+
+  local tty=false
+  [[ -t 0 && -t 1 ]] && tty=true
+
+  # 1. muster-agent
+  local agent
+  agent=$(_cloud_agent_bin)
+  # Agents before v0.4.0 have no `pair` command ("unknown command: pair")
+  local probe=""
+  [[ -n "$agent" && "$update" != "true" ]] && probe=$("$agent" pair --help 2>&1 </dev/null)
+  if [[ "$probe" == *"nknown command"* ]]; then
+    info "This muster-agent is too old to pair with a code (needs v0.4.0 or newer)."
+    update=true
+  fi
+  if [[ -z "$agent" || "$update" == "true" ]]; then
+    if [[ -z "$agent" ]]; then
+      info "muster-agent is not installed on this machine."
+    fi
+    if [[ "$yes" != "true" ]]; then
+      if [[ "$tty" == "true" ]]; then
+        _cloud_confirm "Install the latest muster-agent now (from ${MUSTER_AGENT_INSTALL_URL})?" y || {
+          info "Cancelled. Install it yourself with:"
+          printf '    curl -fsSL %s | bash -s -- --agent\n' "$MUSTER_AGENT_INSTALL_URL"
+          return 1
+        }
+      else
+        err "muster-agent is required. Re-run with --yes to install it, or install it with:"
+        printf '    curl -fsSL %s | bash -s -- --agent --yes\n' "$MUSTER_AGENT_INSTALL_URL"
+        return 1
+      fi
+    fi
+    if ! has_cmd curl; then
+      err "curl is required to install muster-agent"
+      return 1
+    fi
+    info "Installing muster-agent..."
+    local ilog rc=0
+    ilog=$(curl -fsSL "$MUSTER_AGENT_INSTALL_URL" 2>&1 | bash -s -- --agent --yes 2>&1) || rc=$?
+    agent=$(_cloud_agent_bin)
+    if ((rc != 0)) || [[ -z "$agent" ]]; then
+      err "Installing muster-agent failed"
+      printf '%s\n' "$ilog" | tail -5 | while IFS= read -r l; do printf '    %b%s%b\n' "$DIM" "$l" "$RESET"; done
+      return 1
+    fi
+    ok "muster-agent installed (${agent})"
+  fi
+
+  # 2. Project directory
+  if [[ -z "$project" ]]; then
+    if [[ -f "$PWD/muster.json" || -f "$PWD/deploy.json" ]]; then
+      project="$PWD"
+    elif [[ "$tty" == "true" ]]; then
+      printf '  Project directory on this machine %b(Enter to skip)%b: ' "$DIM" "$RESET"
+      IFS= read -r project || project=""
+    fi
+  fi
+  if [[ -n "$project" ]]; then
+    project="${project/#\~/$HOME}"
+    if [[ ! -d "$project" ]]; then
+      err "Project directory not found: ${project}"
+      return 1
+    fi
+    project="$(cd "$project" && pwd)"
+    if [[ ! -f "$project/muster.json" && ! -f "$project/deploy.json" ]]; then
+      warn "No muster.json in ${project} (run muster setup there before deploying)"
+    fi
+  fi
+
+  # 3. Pair (the agent prints the code + QR and waits for approval)
+  local pair_args=()
+  [[ -n "$name" ]] && pair_args[${#pair_args[@]}]="--name" && pair_args[${#pair_args[@]}]="$name"
+  [[ -n "$project" ]] && pair_args[${#pair_args[@]}]="--project" && pair_args[${#pair_args[@]}]="$project"
+  [[ -n "$relay" ]] && pair_args[${#pair_args[@]}]="--relay" && pair_args[${#pair_args[@]}]="$relay"
+  echo ""
+  local prc=0
+  "$agent" pair "${pair_args[@]+"${pair_args[@]}"}" || prc=$?
+  if ((prc == 130)); then
+    echo ""
+    info "Cancelled."
+    return 130
+  fi
+  if ((prc != 0)); then
+    echo ""
+    err "Pairing did not complete (muster-agent exit code ${prc})"
+    printf '  %bRun muster cloud connect again to get a new code.%b\n' "$DIM" "$RESET"
+    return 1
+  fi
+  echo ""
+  ok "Paired with Fleet Cloud"
+
+  # 4. Background service
+  if [[ -z "$service" ]]; then
+    if [[ "$tty" == "true" ]]; then
+      if _cloud_confirm "Run muster-agent as a background service (starts at boot)?" y; then
+        service="yes"
+      else
+        service="no"
+      fi
+    else
+      service="no"
+    fi
+  fi
+  local service_ok=false
+  if [[ "$service" == "yes" ]]; then
+    local src=0
+    if [[ "$user_service" == "true" ]]; then
+      "$agent" install-service --user || src=$?
+    elif [[ "$(id -u 2>/dev/null)" == "0" ]]; then
+      "$agent" install-service || src=$?
+    elif has_cmd sudo; then
+      info "Installing the system service (needs sudo)"
+      sudo "$agent" install-service || src=$?
+    else
+      "$agent" install-service --user || src=$?
+    fi
+    if ((src == 0)); then
+      service_ok=true
+      ok "muster-agent service installed"
+    else
+      warn "Service install failed. Try: muster-agent install-service --user"
+    fi
+  else
+    printf '  %bStart the agent with: muster-agent run   (or muster-agent install-service)%b\n' "$DIM" "$RESET"
+  fi
+
+  # 5. Verify the agent connects (only meaningful when it is running)
+  if [[ "$service_ok" == "true" ]]; then
+    local waited=0 vrc=1
+    while ((waited < ${MUSTER_CONNECT_WAIT:-15})); do
+      vrc=0
+      "$agent" status --connected >/dev/null 2>&1 || vrc=$?
+      ((vrc == 0 || vrc == 2)) && break
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if ((vrc == 0)); then
+      ok "Agent connected to Fleet Cloud"
+    elif ((vrc == 2)); then
+      info "Couldn't check the connection with this muster-agent version (muster-agent status)."
+    else
+      warn "The agent hasn't connected yet. Check: muster-agent status"
+    fi
+  fi
+  echo ""
+  printf '  %bThis machine now shows up under Machines at cloud.getmuster.dev.%b\n' "$DIM" "$RESET"
+  echo ""
 }
