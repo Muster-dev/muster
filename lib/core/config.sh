@@ -108,6 +108,15 @@ _config_validate() {
   local _v_errors=0
   local _v_val
 
+  # ── Valid JSON at all? (otherwise every field check below misfires) ──
+  local _v_parse
+  if ! _v_parse=$(jq empty "$CONFIG_FILE" 2>&1); then
+    _v_parse="${_v_parse#jq: }"
+    printf '%b\n' "  ${RED}x${RESET} $(basename "$CONFIG_FILE") isn't valid JSON: ${_v_parse}" >&2
+    printf '%b\n' "  ${DIM}Fix it in an editor, or recreate it with: muster setup --force${RESET}" >&2
+    return 1
+  fi
+
   # ── Required fields ──
 
   _v_val=$(jq -r '.project // empty' "$CONFIG_FILE" 2>/dev/null)
