@@ -4,10 +4,13 @@
 # Falls back to numbered input when MUSTER_MINIMAL=true
 
 CHECKLIST_RESULT=""
+CHECKLIST_SELECTED_IDX=""
 
 # Grouped checklist — items prefixed with "---:" are non-selectable group headers
 # Example: checklist_grouped_select "title" "---:Server A" "svc1" "svc2" "---:Server B" "svc3"
 # CHECKLIST_RESULT returns newline-separated selected items (without headers)
+# CHECKLIST_SELECTED_IDX returns space-separated indices (into the item list,
+# headers included) of the selected items — use it when labels can repeat
 checklist_grouped_select() {
   if [[ ! -t 0 ]]; then
     printf '%b\n' "${RED}Error: interactive terminal required${RESET}" >&2
@@ -79,9 +82,11 @@ checklist_grouped_select() {
     fi
 
     CHECKLIST_RESULT=""
+    CHECKLIST_SELECTED_IDX=""
     i=0
     while (( i < count )); do
       if (( is_header[i] == 0 && checked[i] == 1 )); then
+        CHECKLIST_SELECTED_IDX="${CHECKLIST_SELECTED_IDX:+$CHECKLIST_SELECTED_IDX }$i"
         if [[ -n "$CHECKLIST_RESULT" ]]; then
           CHECKLIST_RESULT="${CHECKLIST_RESULT}"$'\n'"${items[$i]}"
         else
@@ -250,9 +255,11 @@ checklist_grouped_select() {
         tput cnorm
 
         CHECKLIST_RESULT=""
+        CHECKLIST_SELECTED_IDX=""
         i=0
         while (( i < count )); do
           if (( is_header[i] == 0 && checked[i] == 1 )); then
+            CHECKLIST_SELECTED_IDX="${CHECKLIST_SELECTED_IDX:+$CHECKLIST_SELECTED_IDX }$i"
             if [[ -n "$CHECKLIST_RESULT" ]]; then
               CHECKLIST_RESULT="${CHECKLIST_RESULT}"$'\n'"${items[$i]}"
             else

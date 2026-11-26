@@ -1057,8 +1057,10 @@ _group_cmd_deploy() {
   # Pre-calculate total deploy steps (services across all projects)
   local _total_steps=0
   local _steps_done=0
+  local _proj_steps=()
   local _pi=0
   while (( _pi < total )); do
+    _proj_steps[$_pi]=1
     if _group_project_is_local "$group_name" "$_pi"; then
       local _pp="$_FP_PATH"
       local _pc=""
@@ -1068,13 +1070,10 @@ _group_cmd_deploy() {
         local _ns
         _ns=$(jq '[.services | to_entries[] | select((.value.skip_deploy // false) | tostring != "true")] | length' "$_pc" 2>/dev/null)
         [[ -z "$_ns" || "$_ns" == "null" ]] && _ns=0
-        (( _ns > 0 )) && _total_steps=$(( _total_steps + _ns )) || _total_steps=$(( _total_steps + 1 ))
-      else
-        _total_steps=$(( _total_steps + 1 ))
+        (( _ns > 0 )) && _proj_steps[$_pi]=$_ns
       fi
-    else
-      _total_steps=$(( _total_steps + 1 ))
     fi
+    _total_steps=$(( _total_steps + _proj_steps[_pi] ))
     _pi=$(( _pi + 1 ))
   done
 
@@ -1298,42 +1297,28 @@ _group_cmd_deploy() {
             return 0
           fi
 
-          # Build per-project service filter from selections
+          _group_build_svc_filter "$total" "$CHECKLIST_SELECTED_IDX" "${_picker_items[@]}"
+
+          # Recompute progress total for the filtered selection
+          _total_steps=0
           _pi=0
           while (( _pi < total )); do
-            _group_svc_filter[$_pi]=""
-            _pi=$(( _pi + 1 ))
-          done
-
-          # Map selected display names back to service keys and project indices
-          local _sel_i=0 _map_i=0
-          local _si=0
-          while (( _si < ${#_picker_items[@]} )); do
-            if [[ "${_picker_items[$_si]}" == "---:"* ]]; then
-              _si=$(( _si + 1 ))
-              continue
-            fi
-            # Check if this item was selected
-            local _item_name="${_picker_items[$_si]}"
-            local _was_selected=false
-            local _check_line
-            while IFS= read -r _check_line; do
-              [[ "$_check_line" == "$_item_name" ]] && { _was_selected=true; break; }
-            done <<< "$CHECKLIST_RESULT"
-
-            if [[ "$_was_selected" == "true" ]]; then
-              local _proj_idx="${_picker_project_map[$_map_i]}"
-              local _svc_key="${_picker_svc_map[$_map_i]}"
-              if [[ "$_svc_key" != "__all__" ]]; then
-                if [[ -n "${_group_svc_filter[$_proj_idx]}" ]]; then
-                  _group_svc_filter[$_proj_idx]="${_group_svc_filter[$_proj_idx]} ${_svc_key}"
+            case "${_group_svc_filter[$_pi]}" in
+              "") _total_steps=$(( _total_steps + _proj_steps[_pi] )) ;;
+              __none__) ;;
+              *)
+                if _group_project_is_local "$group_name" "$_pi"; then
+                  local _fw_count=0 _fw
+                  for _fw in ${_group_svc_filter[$_pi]}; do
+                    _fw_count=$(( _fw_count + 1 ))
+                  done
+                  _total_steps=$(( _total_steps + _fw_count ))
                 else
-                  _group_svc_filter[$_proj_idx]="$_svc_key"
+                  _total_steps=$(( _total_steps + 1 ))
                 fi
-              fi
-            fi
-            _map_i=$(( _map_i + 1 ))
-            _si=$(( _si + 1 ))
+                ;;
+            esac
+            _pi=$(( _pi + 1 ))
           done
           echo ""
           ;;
@@ -1366,6 +1351,13 @@ _group_cmd_deploy() {
     _pname=$(groups_project_name "$group_name" "$i")
     _pdesc=$(groups_project_desc "$group_name" "$i")
     [[ "${_pdesc:0:1}" == "/" ]] && _pdesc="${_pdesc/#$HOME/~}"
+
+    # Service picker deselected every service in this project — skip it
+    if [[ "${_group_svc_filter[$i]:-}" == "__none__" ]]; then
+      skipped=$(( skipped + 1 ))
+      i=$(( i + 1 ))
+      continue
+    fi
 
     local log_file
     log_file="${log_dir}/group-${group_name}-${_pname}-$(date +%Y%m%d-%H%M%S).log"
@@ -2029,6 +2021,47 @@ _group_cmd_deploy() {
   _group_deploy_summary "$succeeded" "$skipped" "$failed" "$total"
 }
 
+# ── Service picker → per-project filter ──
+# Usage: _group_build_svc_filter <total_projects> <selected_idx> <picker_items...>
+# Reads the caller's _picker_project_map / _picker_svc_map (one entry per
+# non-header picker item) and writes the caller's _group_svc_filter:
+#   ""          deploy all services of the project
+#   "a b"       deploy only these service keys
+#   "__none__"  nothing selected — skip the project
+# Matching is by item index, not label: two projects can both have "api".
+_group_build_svc_filter() {
+  local _total="$1" _sel_idx="$2"
+  shift 2
+  local _pi=0
+  while (( _pi < _total )); do
+    _group_svc_filter[$_pi]="__none__"
+    _pi=$(( _pi + 1 ))
+  done
+
+  local _si=0 _map_i=0 _item
+  for _item in "$@"; do
+    if [[ "$_item" == "---:"* ]]; then
+      _si=$(( _si + 1 ))
+      continue
+    fi
+    case " $_sel_idx " in
+      *" $_si "*)
+        local _proj_idx="${_picker_project_map[$_map_i]}"
+        local _svc_key="${_picker_svc_map[$_map_i]}"
+        if [[ "$_svc_key" == "__all__" ]]; then
+          _group_svc_filter[$_proj_idx]=""
+        elif [[ "${_group_svc_filter[$_proj_idx]}" == "__none__" ]]; then
+          _group_svc_filter[$_proj_idx]="$_svc_key"
+        else
+          _group_svc_filter[$_proj_idx]="${_group_svc_filter[$_proj_idx]} ${_svc_key}"
+        fi
+        ;;
+    esac
+    _map_i=$(( _map_i + 1 ))
+    _si=$(( _si + 1 ))
+  done
+}
+
 _group_deploy_remote() {
   local group_name="$1" index="$2" log_file="$3"
   _groups_load_remote "$group_name" "$index"
@@ -2103,8 +2136,10 @@ _group_deploy_remote() {
 export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
 REMOTECMD
   )"
-  local _deploy_user
+  local _deploy_user _sq="'"
   _deploy_user=$(_deploy_identity)
+  # Escape single quotes — identity comes from git user.name (e.g. O'Brien)
+  _deploy_user="${_deploy_user//${_sq}/${_sq}\\${_sq}${_sq}}"
   cmd="${cmd}; export MUSTER_NO_VERIFY=true"
   cmd="${cmd}; export MUSTER_DEPLOY_USER='${_deploy_user}'"
   cmd="${cmd}; export MUSTER_DEPLOY_SOURCE='${_source_label}'"
