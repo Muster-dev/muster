@@ -5,7 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-26
+
 ### Added
+- `muster ask`: the Muster Assistant (Fleet Cloud). Reads status, logs, history, doctor and hooks, explains what broke, and proposes actions that only run after you approve them. Everything is redacted on your machine before it's sent (`lib/core/redact.sh`); per-project opt-in in `.muster/assistant.json`; global kill switch `muster settings --global assistant off`; `--json` mode for muster-tui. The deploy failure menu offers "Explain with AI" when you're signed in.
+- `muster cloud connect`: pair a server with Fleet Cloud using a code and QR (installs or updates muster-agent, runs `muster-agent pair`, offers to install it as a service). `muster cloud login --qr` prints a QR of the login URL when `qrencode` is installed.
+- Offline failure explanations: 42 rules (`lib/core/hints.sh`) turn log lines, exit codes and environment into "Likely cause / Try", with a one-key "Fix: …" entry in the recovery menu when a safe fix exists. `muster explain [service|--last|--log FILE] [--json] [--fix]`. Reference: `docs/troubleshooting.md`.
+- Preflight before every deploy: tools, Docker daemon, kube context/namespace, disk, ports, hook permissions, env vars, git state, stale locks, SSH reachability. Fix it / Continue anyway / Abort on a TTY; skip with `--no-preflight`.
+- `muster setup --update` re-runs on an existing project, adding new services while keeping your muster.json changes and edited hooks; setup writes atomically (Ctrl+C leaves nothing half-written); health checks are probed before saving.
+- "Did you mean…" for mistyped commands, flags and services; a "Next step" line on the dashboard; pickers remember your last choice; `muster doctor` groups output into "Needs attention" and "Fine" and `--fix` covers every fixable rule.
 - Engine API for frontends and scripts, documented in `docs/ENGINE-API.md`:
   - `muster setup --scan --dry-run [--json]`: preview what setup would configure (stack, services, health, hook templates, deploy order, warnings) without writing anything
   - `muster hooks status [--json]`: per-file approval state (approved / changed / new / missing), plus muster.json and .env
@@ -17,6 +25,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - k8s failures in `--json` mode emit a `diagnosis` event (pattern, pod, pod status, hint, events, log tail)
   - richer `status --json` (stack, health target, last deploy, lock holder, k8s replicas, checked_at); `doctor --json` marks checks `fixable`; `history --json` includes `source`
   - `fleet list --json` / `fleet status --json` return one consistent shape for remotes.json and fleet dirs; `cloud status --json`
+
+### Changed
+- **Breaking for JSON consumers:** `fleet list --json` returns `machines` and `groups` as arrays of objects, and `fleet status --json` returns `{"status":[…]}` instead of a bare array. muster-tui needs an update to read the new shape.
 
 ### Fixed
 - JSON output escapes tabs and control characters (log lines with tabs or ANSI colors produced invalid JSON)
