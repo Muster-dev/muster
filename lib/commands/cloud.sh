@@ -264,11 +264,22 @@ _cloud_login() {
 
   echo ""
   ok "Logged in to Fleet Cloud"
-  printf '  %bOrg:%b    %s\n' "$DIM" "$RESET" "$org_id"
-  printf '  %bRelay:%b  %s\n' "$DIM" "$RESET" "$relay_url"
+  printf '  %bAccount:%b  %s\n' "$DIM" "$RESET" "$(_cloud_org_label "$org_id")"
   echo ""
-  printf '  %bNext: connect a machine at %s, then%b\n' "$DIM" "${verify_uri%/device}" "$RESET"
-  printf '  %b      muster fleet add <name> --transport cloud%b\n' "$DIM" "$RESET"
+  printf '  %bNext%b\n' "$BOLD" "$RESET"
+  printf '    %bmuster cloud connect%b   on a server, to add it to your fleet\n' "$ACCENT" "$RESET"
+  printf '    %bmuster ask%b             ask the assistant why a deploy failed\n' "$ACCENT" "$RESET"
+  printf '    %b%s%b\n' "$DIM" "${verify_uri%/device}" "$RESET"
+}
+
+# Clerk personal accounts have org IDs like org_user_…; say so instead of
+# showing the raw ID.
+_cloud_org_label() {
+  case "$1" in
+    org_user_*) printf 'Personal account' ;;
+    "") printf '(unknown)' ;;
+    *) printf 'Team (%s)' "$1" ;;
+  esac
 }
 
 _cloud_logout() {
@@ -326,7 +337,7 @@ _cloud_status() {
   echo ""
   if [[ -n "$token" && -n "$org" ]]; then
     printf '  %b●%b Logged in  %b%s%b\n' "$GREEN" "$RESET" "$DIM" "${name:-}" "$RESET"
-    printf '  %bOrg:%b     %s\n' "$DIM" "$RESET" "$org"
+    printf '  %bAccount:%b %s\n' "$DIM" "$RESET" "$(_cloud_org_label "$org")"
   else
     printf '  %b○%b Not logged in  %b(run muster cloud login)%b\n' "$DIM" "$RESET" "$DIM" "$RESET"
   fi
