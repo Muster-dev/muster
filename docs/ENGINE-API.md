@@ -298,8 +298,8 @@ Emitted by `deploy --json` (and rollback) after a failed `done` when a rule in
 `lib/core/hints.sh` matches. `fix` is `null` when there's no safe fix;
 `internal: true` means a built-in muster.json edit. Never run `fix.command`
 yourself: ask the user, then run `muster explain <service> --fix --yes`, which
-re-derives and validates the command. The same object is what
-`muster explain --json` returns.
+re-derives and validates the command. `muster explain --json` returns the same
+object under `hint`, next to `service`, `action`, `exit_code`, `log` and `matched`.
 
 ### diagnosis
 
