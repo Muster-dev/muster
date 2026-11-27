@@ -168,7 +168,7 @@ _setup_remote_agent() {
   fi
 
   echo ""
-  printf '%b\n' "  ${BOLD}Join token${RESET} ${DIM}(from cloud.getmuster.dev → Connect a machine)${RESET}"
+  printf '%b\n' "  ${BOLD}Join token${RESET} ${DIM}(from cloud.getmuster.dev → Connect a server)${RESET}"
   printf '  %b>%b ' "$ACCENT" "$RESET"
   read -r _join_token
   if [[ -z "$_join_token" ]]; then

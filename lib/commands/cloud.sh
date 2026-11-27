@@ -159,7 +159,14 @@ _cloud_login() {
   local base host client_name body resp
   base=$(_cloud_http_base "$relay")
   host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "this machine")
-  client_name="muster-cli on ${host}"
+  # "(macOS)" lets the dashboard show which kind of computer signed in.
+  local os_label
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) os_label="macOS" ;;
+    Linux) os_label="Linux" ;;
+    *) os_label="" ;;
+  esac
+  client_name="muster-cli on ${host}${os_label:+ (${os_label})}"
 
   body="{\"client_name\":\"$(_cloud_json_escape "$client_name")\"}"
   _cloud_post "${base}/api/v1/device/code" "$body" || true
@@ -294,7 +301,7 @@ _cloud_logout() {
   done
   if [[ -n "$had" ]]; then
     ok "Logged out. The token was removed from this machine."
-    printf '  %bTo revoke it everywhere, remove it under Access at cloud.getmuster.dev.%b\n' "$DIM" "$RESET"
+    printf '  %bTo sign it out everywhere, use Access at cloud.getmuster.dev.%b\n' "$DIM" "$RESET"
   else
     info "Not logged in."
   fi
@@ -418,7 +425,7 @@ _cloud_connect() {
       -h | --help)
         echo "Usage: muster cloud connect [flags]"
         echo ""
-        echo "Pair this machine with your Fleet Cloud org. Installs muster-agent if"
+        echo "Pair this server with your Fleet Cloud account. Installs muster-agent if"
         echo "needed, prints a short code and QR to approve at cloud.getmuster.dev/pair,"
         echo "then offers to run the agent as a background service."
         echo ""
@@ -585,6 +592,6 @@ _cloud_connect() {
     fi
   fi
   echo ""
-  printf '  %bThis machine now shows up under Machines at cloud.getmuster.dev.%b\n' "$DIM" "$RESET"
+  printf '  %bThis server now shows up under Servers at cloud.getmuster.dev.%b\n' "$DIM" "$RESET"
   echo ""
 }
