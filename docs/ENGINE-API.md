@@ -245,6 +245,7 @@ NDJSON, in order:
 | `done` | `service`, `status` (`success`/`failed`/`timeout`/`blocked`), `exit_code`, `timeout` |
 | `verify_warning` | `service`, `message` |
 | `diagnosis` | after a failed k8s `done`, see below |
+| `hint` | after a failed `done` when the offline rules engine matches, see below |
 | `health` | `service`, `status` (`checking`/`healthy`/`unhealthy`) |
 | `stopped` | `reason: "failure"`, `after`, `remaining` (`--stop-on-failure`) |
 | `cancelled` | `service`, `exit_code: 130` |
@@ -282,6 +283,23 @@ Flags:
   `deploy_phases`), e.g. to resume after a fix. Combine with service names
   to resume inside a selection.
 - `--yes` / `MUSTER_APPROVE_HOOKS=1`: approve pending hooks first.
+
+### hint
+
+```json
+{"event":"hint","service":"api","hint":{"id":"port_in_use",
+ "title":"Port 8080 is already in use by Python (PID 77066).",
+ "try":"Stop it (kill 77066) if it's a leftover, or change the port this service uses.",
+ "fix":{"label":"Stop Python (PID 77066) on port 8080","command":"kill 77066","internal":false},
+ "docs":"https://getmuster.dev/docs/troubleshooting#port-in-use","line":"…matched log line…"}}
+```
+
+Emitted by `deploy --json` (and rollback) after a failed `done` when a rule in
+`lib/core/hints.sh` matches. `fix` is `null` when there's no safe fix;
+`internal: true` means a built-in muster.json edit. Never run `fix.command`
+yourself: ask the user, then run `muster explain <service> --fix --yes`, which
+re-derives and validates the command. The same object is what
+`muster explain --json` returns.
 
 ### diagnosis
 
