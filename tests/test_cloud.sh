@@ -54,7 +54,7 @@ _test_contains "token stored" "mst_cli_secretvalue" "$(cat "$HOME/.muster/tokens
 
 out=$("$M" cloud status 2>&1) && rc=0 || rc=$?
 _test_eq "status exits 0 when logged in" "0" "$rc"
-_test_contains "status shows org" "org_user_abc" "$out"
+_test_contains "status shows org" "Personal account" "$out"
 _test_contains "status shows reachable relay" "reachable" "$out"
 
 echo "  Logout"
