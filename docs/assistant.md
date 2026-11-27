@@ -126,6 +126,7 @@ Every stdout line is a JSON object.
   - `{"type":"tool_running","tool_use_id","name","kind","summary"}`
   - `{"type":"approval_needed","tool_use_id","name","summary","input","diff"?}` (`diff` is included for hook edits)
   - `{"type":"tool_result","tool_use_id","name","is_error","content"}`: the redacted content as sent to the server
+  - `{"type":"retrying","attempt"}`: a dropped connection, rate limit or busy server; the same turn is resent (up to 2 times). Text streamed before the retry may repeat.
   - `{"type":"awaiting_input"}`: the answer is finished
   - `{"type":"done","session_id","ok"}`
   - `{"type":"cancelled"}`

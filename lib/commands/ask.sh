@@ -463,22 +463,71 @@ _ask_stream_turn() {
 
   _ASK_STREAM_STATUS=$(tr -d '\r' < "$hdr" | awk '/^HTTP\//{s=$2} END{print s}')
   [[ -z "$_ASK_STREAM_STATUS" ]] && _ASK_STREAM_STATUS="000"
+  # Return 2 = transient: nothing was saved, resend the same body.
+  # The server persists a turn only when it completes, so a resend is safe.
+  local code
   case "$_ASK_STREAM_STATUS" in
     2??) ;;
+    409)
+      code=$(printf '%s' "$_ASK_RAW" | jq -r '.error // empty' 2>/dev/null)
+      if [[ "$code" == "turn_in_progress" ]]; then
+        return 2
+      fi
+      _ask_http_error "$_ASK_STREAM_STATUS" "$_ASK_RAW" "The assistant request"
+      return 1
+      ;;
+    000|429|502|503|504) return 2 ;;
     *)
       _ask_http_error "$_ASK_STREAM_STATUS" "$_ASK_RAW" "The assistant request"
       return 1
       ;;
   esac
   if [[ -n "$_ASK_STREAM_ERR" ]]; then
+    # An error followed by turn_end: the server saved the turn (e.g. it
+    # gave up on an invalid tool call). Say so and keep the chat going.
+    if [[ -n "$_ASK_STOP" ]]; then
+      [[ "$_ASK_JSON" == "true" ]] || printf '  %b%s%b\n' "$DIM" "$_ASK_STREAM_ERR" "$RESET"
+      return 0
+    fi
+    case "$_ASK_STREAM_ERR" in
+      *"interrupted before it finished"*|*"handling a lot of requests"*|*"temporarily unavailable. Try again shortly"*)
+        return 2
+        ;;
+    esac
     _ask_fail "assistant_error" "The assistant hit an error: ${_ASK_STREAM_ERR}"
     return 1
   fi
   if [[ -z "$_ASK_STOP" && "$_TR_N" -eq 0 ]]; then
-    _ask_fail "stream_interrupted" "The connection dropped before the answer finished."
-    return 1
+    return 2
   fi
   return 0
+}
+
+# Runs a turn, resending it after transient failures (dropped connection,
+# rate limit, overloaded server, a turn still finishing).
+_ask_turn() {
+  local body_file="$1" attempt=0 rc
+  while true; do
+    _ask_stream_turn "$body_file"
+    rc=$?
+    ((rc == 2)) || return "$rc"
+    attempt=$((attempt + 1))
+    if ((attempt > 2)); then
+      if [[ -n "$_ASK_STREAM_ERR" ]]; then
+        _ask_fail "assistant_error" "The assistant hit an error: ${_ASK_STREAM_ERR}"
+      else
+        _ask_fail "stream_interrupted" "The connection dropped before the answer finished. Run muster ask again to retry."
+      fi
+      return 1
+    fi
+    if [[ "$_ASK_JSON" == "true" ]]; then
+      _ask_emit "$(jq -cn --argjson n "$attempt" '{type: "retrying", attempt: $n}')"
+    else
+      printf '  %b(Connection hiccup, retrying…)%b\n' "$DIM" "$RESET"
+    fi
+    sleep $((attempt * 3))
+    _md_reset
+  done
 }
 
 # ── Local muster invocation (tool backends) ──
@@ -1304,7 +1353,7 @@ cmd_ask() {
     local rounds=0
     while true; do
       _md_reset
-      if ! _ask_stream_turn "$_ASK_TMP/body"; then
+      if ! _ask_turn "$_ASK_TMP/body"; then
         rc=1
         break 2
       fi
