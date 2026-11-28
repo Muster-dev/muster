@@ -1446,6 +1446,13 @@ cmd_ask() {
     CONFIG_FILE="$config"
     _ASK_PROJECT="$(cd "$(dirname "$config")" && pwd)"
     _ASK_ENV_FILE="${_ASK_PROJECT}/.env"
+    # muster env store: learn its secret values (in memory) so redaction
+    # masks them even with no .env on disk. No key → patterns still apply.
+    if [[ -d "${_ASK_PROJECT}/.muster/env" ]]; then
+      source "$MUSTER_ROOT/lib/core/env_store.sh"
+      MUSTER_ENV_ROOT="$_ASK_PROJECT" _env_resolve "$_ASK_PROJECT" "$(_env_default_name "$_ASK_PROJECT")" optional >/dev/null 2>&1 || true
+      _ENV_RESOLVED=""
+    fi
     while IFS= read -r s; do
       [[ -n "$s" ]] && _ASK_SERVICES="${_ASK_SERVICES}${s} "
     done < <(jq -r '.services // {} | keys[]' "$config" 2>/dev/null)

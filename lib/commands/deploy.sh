@@ -884,6 +884,11 @@ ${_k8s_env_lines}"
           _run_hook_with_timeout "$_json_hook_timeout" "$hook" 2>&1
         fi
       } | while IFS= read -r _jline; do
+        # Mask muster env secret values before they reach the log or stdout
+        if [[ -n "${_MUSTER_ENV_SECRET_LITS:-}" ]]; then
+          _redact_env_secrets "$_jline"
+          _jline="$_REDACTED"
+        fi
         printf '%s\n' "$_jline" >> "$log_file"
         printf '{"event":"log","service":"%s","line":"%s"}\n' "$svc" "$(_json_esc "${_jline//$_JSON_CR/}")"
       done

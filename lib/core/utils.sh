@@ -519,20 +519,59 @@ _run_with_timeout() {
 
 # ── .env file loading ──
 
-# Tracks variable names loaded from .env for cleanup
+# Tracks variable names loaded from .env / muster env for cleanup
 _MUSTER_ENV_VARS=()
+_MUSTER_ENV_LOG_MARK=""
 
-# Load a .env file, exporting KEY=VALUE pairs without overriding existing env vars.
-# Usage: _load_env_file [path]   (defaults to $(dirname "$CONFIG_FILE")/.env)
+# Load deploy-time environment variables without overriding existing ones.
+# Usage: _load_env_file [path]
+#   With a path: load that dotenv file only.
+#   Without: the project's muster env store (.muster/env, docs/env.md) and/or
+#   its .env:
+#     muster.json "env": {"source": "muster"}  → store first, then .env
+#     .env present                             → .env only (unchanged behaviour)
+#     no .env, .muster/env present             → store
+#   The store is decrypted in memory (muster-crypt) and exported to this
+#   shell only, so hooks see it; nothing is written to disk. MUSTER_ENV picks
+#   the environment (default: env.default_env in muster.json, else local).
 _load_env_file() {
   local env_file="${1:-}"
-  if [[ -z "$env_file" ]]; then
-    [[ -z "${CONFIG_FILE:-}" ]] && return 0
-    env_file="$(dirname "$CONFIG_FILE")/.env"
-  fi
-  [[ -f "$env_file" ]] || return 0
-
   _MUSTER_ENV_VARS=()
+  if [[ -n "$env_file" ]]; then
+    _load_dotenv_vars "$env_file"
+    return 0
+  fi
+  [[ -z "${CONFIG_FILE:-}" ]] && return 0
+  local project_dir env_source=""
+  project_dir="$(dirname "$CONFIG_FILE")"
+  env_file="${project_dir}/.env"
+  if has_cmd jq; then
+    env_source=$(jq -r ".env.source // empty" "$CONFIG_FILE" 2>/dev/null)
+  fi
+  if [[ "$env_source" == "muster" ]] || { [[ ! -f "$env_file" && "$env_source" != "dotenv" ]] && [[ -d "${project_dir}/.muster/env" ]]; }; then
+    if has_cmd jq; then
+      # shellcheck source=lib/core/env_store.sh
+      source "$MUSTER_ROOT/lib/core/env_store.sh"
+      MUSTER_ENV_ROOT="$project_dir" _env_load_into_shell "$project_dir" || true
+      if [[ -n "${_MUSTER_ENV_SECRET_LITS:-}" ]]; then
+        source "$MUSTER_ROOT/lib/core/redact.sh"
+        # Hook output written to logs from now on gets secret values masked
+        # when the env is unloaded (_redact_scrub_logs).
+        mkdir -p "${project_dir}/.muster/logs" 2>/dev/null
+        _MUSTER_ENV_LOG_MARK="${project_dir}/.muster/logs/.env-load-mark"
+        : >"$_MUSTER_ENV_LOG_MARK" 2>/dev/null || _MUSTER_ENV_LOG_MARK=""
+      fi
+    else
+      warn "muster env needs jq; .muster/env not loaded" >&2
+    fi
+  fi
+  _load_dotenv_vars "$env_file"
+}
+
+# Export KEY=VALUE pairs from a dotenv file (existing vars win).
+_load_dotenv_vars() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
   local line key val
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Skip blank lines and comments
@@ -561,7 +600,8 @@ _load_env_file() {
   done < "$env_file"
 }
 
-# Unset all variables loaded by _load_env_file
+# Unset all variables loaded by _load_env_file, and mask secret values in
+# any log written while they were loaded.
 _unload_env_file() {
   local k
   # bash 3.2: "${arr[@]}" with empty array triggers "unbound variable" under set -u
@@ -571,6 +611,14 @@ _unload_env_file() {
     done
   fi
   _MUSTER_ENV_VARS=()
+  if [[ -n "${_MUSTER_ENV_LOG_MARK:-}" ]]; then
+    if type _redact_scrub_logs &>/dev/null || source "$MUSTER_ROOT/lib/core/redact.sh" 2>/dev/null; then
+      _redact_scrub_logs "$(dirname "$_MUSTER_ENV_LOG_MARK")" "$_MUSTER_ENV_LOG_MARK"
+    fi
+    rm -f "$_MUSTER_ENV_LOG_MARK" 2>/dev/null
+    _MUSTER_ENV_LOG_MARK=""
+  fi
+  _MUSTER_ENV_SECRET_LITS=""
 }
 
 # Find the project deploy.json by walking up from cwd
