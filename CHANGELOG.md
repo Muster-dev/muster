@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-28
+
+### Added
+- `muster ask --server <name>`: ask the Muster Assistant about a fleet server from any folder. Status, logs, deploy history and hook approvals are read on that server (SSH or Fleet Cloud) and redacted before they leave this computer; deploy, rollback and restart still need your approval. Consent is asked once per server.
+- `muster fleet history <server> [svc] [--all] [--json]`: a server's deploy and rollback history.
+
 ## [0.7.2] - 2026-11-28
 
 ### Fixed
