@@ -1061,7 +1061,18 @@ _setup_noninteractive() {
     done
 
     [[ "$first" == "true" ]] && first=false || services_json+=","
-    services_json+="\"${key}\":{\"name\":\"${display_name}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}${remote_json}${k8s_json}${skip_deploy_json}${git_pull_json}}"
+    local strategy_json="" _st_type
+    _st_type=$(_setup_strategy_for "$svc" "$key")
+    case "$_st_type" in
+      blue-green|canary)
+        if [[ -n "$k8s_json" ]]; then
+          strategy_json=",\"strategy\":{\"type\":\"${_st_type}\"}"
+        else
+          _setup_notice "--strategy ${svc}=${_st_type} ignored: blue-green/canary need a Kubernetes service"
+        fi
+        ;;
+    esac
+    services_json+="\"${key}\":{\"name\":\"${display_name}\",\"health\":${health_json},\"credentials\":{\"mode\":\"${cred_mode}\"}${remote_json}${k8s_json}${skip_deploy_json}${git_pull_json}${strategy_json}}"
     deploy_order_json+="\"${key}\","
   done
 
@@ -1145,7 +1156,8 @@ _setup_noninteractive() {
       "${_detected_compose:-docker-compose.yml}" \
       "${_detected_dockerfile:-Dockerfile}" \
       "${_detected_k8s:-k8s/${svc}/}" \
-      "$_ns" "$_svc_port" "$_k8s_deploy_name" "$_start_cmd"
+      "$_ns" "$_svc_port" "$_k8s_deploy_name" "$_start_cmd" \
+      "$( [[ "$stack" == "k8s" ]] && _setup_strategy_for "$svc" "$key" )"
   done
 
   # Write muster.json (without absolute root path)
@@ -1188,6 +1200,20 @@ _FLAG_HEALTH=()
 _FLAG_CREDS=()
 _FLAG_REMOTE=()
 _FLAG_GIT_PULL=()
+_FLAG_STRATEGY=()
+
+# Strategy given with --strategy for a service (svc or its key), else ""
+_setup_strategy_for() {
+  local i=0 spec
+  while (( i < ${#_FLAG_STRATEGY[@]} )); do
+    spec="${_FLAG_STRATEGY[$i]}"
+    if [[ "${spec%%=*}" == "$1" || "${spec%%=*}" == "${2:-$1}" ]]; then
+      printf '%s' "${spec#*=}"
+      return 0
+    fi
+    i=$(( i + 1 ))
+  done
+}
 
 cmd_setup() {
   # ── Parse flags ──
@@ -1198,6 +1224,7 @@ cmd_setup() {
   _FLAG_CREDS=()
   _FLAG_REMOTE=()
   _FLAG_GIT_PULL=()
+  _FLAG_STRATEGY=()
   _SETUP_TXN_MODE="fresh"
   _SETUP_NOTICES=()
   local has_flags=false
@@ -1223,6 +1250,8 @@ cmd_setup() {
         _FLAG_REMOTE[${#_FLAG_REMOTE[@]}]="$2"; shift 2 ;;
       --git-pull)
         _FLAG_GIT_PULL[${#_FLAG_GIT_PULL[@]}]="$2"; shift 2 ;;
+      --strategy)
+        _FLAG_STRATEGY[${#_FLAG_STRATEGY[@]}]="$2"; shift 2 ;;
       --name|-n)
         flag_name="$2"; shift 2 ;;
       --namespace)
@@ -1250,6 +1279,9 @@ cmd_setup() {
         echo "  --creds <spec>        Per-service credentials: svc=mode (repeatable)"
         echo "  --remote <spec>       Per-service remote: svc=user@host[:port][:path] (repeatable)"
         echo "  --git-pull <spec>     Per-service git pull: svc[=remote:branch] (repeatable)"
+        echo "  --strategy <spec>     Per-service deploy strategy: svc=rolling|blue-green|canary"
+        echo "                        (repeatable; k8s services). With --update alone it switches"
+        echo "                        an existing service and regenerates its unedited hooks"
         echo "  --namespace <ns>      Kubernetes namespace (default: default)"
         echo "  --name, -n <name>     Project name (default: directory basename)"
         echo "  --force, -f           Start over: regenerate muster.json and hooks"
@@ -1283,13 +1315,14 @@ cmd_setup() {
         echo "  muster setup --stack k8s --services api,redis --name myapp"
         echo "  muster setup --scan --health api=http:/health:3000 --name myapp"
         echo "  muster setup --scan --dry-run --json    Preview detected services as JSON"
+        echo "  muster setup --update --strategy api=canary   Switch api to canary deploys"
         return 0
         ;;
       *)
         err "Unknown flag: $1"
         source "$MUSTER_ROOT/lib/core/suggest.sh"
         _suggest_print "$1" --path --scan --stack --services --order --health --creds \
-          --remote --git-pull --name --namespace --force --update --help || true
+          --remote --git-pull --strategy --name --namespace --force --update --help || true
         echo "Run 'muster setup --help' for usage."
         return 1
         ;;
@@ -1300,6 +1333,14 @@ cmd_setup() {
   if [[ "$flag_dry_run" == "true" || "$flag_json" == "true" ]]; then
     source "$MUSTER_ROOT/lib/commands/setup_scan.sh"
     _setup_scan_preview "${flag_path:-.}" "$flag_stack" "$flag_namespace" "$flag_name" "$flag_force" "$flag_json"
+    return $?
+  fi
+
+  # --strategy on an existing project (no scan / service list): switch
+  # strategies in place, regenerate unedited hooks (docs/rollouts.md)
+  if (( ${#_FLAG_STRATEGY[@]} > 0 )) && [[ "$flag_scan" != "true" && -z "$flag_services" ]]; then
+    source "$MUSTER_ROOT/lib/commands/setup_strategy.sh"
+    _setup_apply_strategies "${flag_path:-.}"
     return $?
   fi
 

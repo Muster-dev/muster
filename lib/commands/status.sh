@@ -5,6 +5,39 @@ source "$MUSTER_ROOT/lib/tui/spinner.sh"
 source "$MUSTER_ROOT/lib/core/remote.sh"
 source "$MUSTER_ROOT/lib/core/just_runner.sh"
 source "$MUSTER_ROOT/lib/core/engine.sh"
+source "$MUSTER_ROOT/lib/core/rollout_k8s.sh"
+
+# Version / rollout snapshot for a service (cached per service per run):
+# k8s via kubectl (local only, like replicas), else the deploy history.
+_STATUS_SNAP_SVC=""; _STATUS_SNAP=""
+_status_snapshot() {
+  local svc="$1" project_dir="$2" stack="${3:-}"
+  [[ "$_STATUS_SNAP_SVC" == "$svc" ]] && { printf '%s' "$_STATUS_SNAP"; return 0; }
+  _STATUS_SNAP=""
+  if has_cmd jq; then
+    [[ -z "$stack" ]] && stack=$(_engine_service_stack "$svc" "$project_dir")
+    local dep
+    dep=$(config_get ".services.${svc}.k8s.deployment" 2>/dev/null)
+    if [[ "$stack" == "k8s" && -n "$dep" && "$dep" != "null" && "${MUSTER_HAS_KUBECTL:-false}" == "true" ]] && ! remote_is_enabled "$svc"; then
+      _STATUS_SNAP=$(_rollout_snapshot "$svc" 2>/dev/null)
+    fi
+    if [[ -z "$_STATUS_SNAP" || "$_STATUS_SNAP" == "null" ]]; then
+      _STATUS_SNAP=$(_rollout_history_snapshot "$svc" 2>/dev/null)
+    fi
+  fi
+  _STATUS_SNAP_SVC="$svc"
+  printf '%s' "$_STATUS_SNAP"
+}
+
+# Human: compact rollout display under a service while one is in progress
+_status_rollout_lines() {
+  local svc="$1" project_dir="$2" snap ro
+  snap=$(_status_snapshot "$svc" "$project_dir")
+  [[ -z "$snap" ]] && return 0
+  ro=$(printf '%s' "$snap" | jq -c '.rollout // empty' 2>/dev/null)
+  [[ -z "$ro" ]] && return 0
+  _rollout_render "$svc" "$ro" "    "
+}
 
 # Extra per-service fields for `status --json` (leading comma included):
 # stack, health config + target, remote, last deploy, lock holder, k8s replicas
@@ -59,10 +92,19 @@ _status_json_extra() {
     fi
   fi
 
-  printf ',"stack":%s,"health":{"type":%s,"port":%s,"endpoint":%s,"command":%s,"timeout":%s,"enabled":%s},"target":%s,"remote":%s,"last_deploy":%s,"locked_by":%s,"deploying":%s,"replicas":%s' \
+  # Version visibility: version / image / revision / strategy / rollout
+  local vfields='"version":null,"image":null,"revision":null,"strategy":"rolling","rollout":null'
+  local snap
+  snap=$(_status_snapshot "$svc" "$project_dir" "$stack")
+  if [[ -n "$snap" && "$snap" != "null" ]]; then
+    vfields=$(printf '%s' "$snap" | jq -r '{version, image, revision, strategy: (.strategy // "rolling"), rollout} | tojson | .[1:-1]' 2>/dev/null)
+    [[ -z "$vfields" ]] && vfields='"version":null,"image":null,"revision":null,"strategy":"rolling","rollout":null'
+  fi
+
+  printf ',"stack":%s,"health":{"type":%s,"port":%s,"endpoint":%s,"command":%s,"timeout":%s,"enabled":%s},"target":%s,"remote":%s,"last_deploy":%s,"locked_by":%s,"deploying":%s,"replicas":%s,%s' \
     "$(_json_str "$stack")" "$(_json_str_or_null "$htype")" "$(_json_int "$hport")" "$(_json_str_or_null "$hep")" \
     "$(_json_str_or_null "$hcmd")" "$(_json_int "$htimeout")" "$henabled" "$(_json_str_or_null "$target")" "$remote" \
-    "$(_engine_last_event "$svc" "deploy" "$project_dir")" "$locked" "$deploying" "$replicas"
+    "$(_engine_last_event "$svc" "deploy" "$project_dir")" "$locked" "$deploying" "$replicas" "$vfields"
 }
 
 cmd_status() {
@@ -229,9 +271,11 @@ cmd_status() {
         if [[ "$_health_ok" == "true" ]]; then
           stop_spinner
           printf '  %b●%b %s%s\n' "${GREEN}" "${RESET}" "$name" "$_remote_tag"
+          _status_rollout_lines "$svc" "$project_dir"
         else
           stop_spinner
           printf '  %b●%b %s%s\n' "${RED}" "${RESET}" "$name" "$_remote_tag"
+          _status_rollout_lines "$svc" "$project_dir"
           # Plain-words reason from the rules engine (wrong port, 5xx, ...)
           declare -F hints_health >/dev/null 2>&1 || source "$MUSTER_ROOT/lib/core/hints.sh"
           if hints_health "$svc"; then

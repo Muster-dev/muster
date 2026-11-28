@@ -554,6 +554,49 @@ $(cat "$_hf" 2>/dev/null)"
   # ════════════════════════════════════════════════
   # Category 3: Stack Readiness
   # ════════════════════════════════════════════════
+  # Blue-green / canary prerequisites: RBAC for what the rollout engine
+  # touches, the traffic Service, rollouts left paused, HPA vs replica canary.
+  _doc_strategy_checks() {
+    local _svcs="$1" _s
+    has_cmd jq || return 0
+    source "$MUSTER_ROOT/lib/core/rollout_k8s.sh"
+    while IFS= read -r _s; do
+      [[ -z "$_s" ]] && continue
+      _rollout_is_progressive "$_s" || continue
+      remote_is_enabled "$_s" && continue
+      _ro_ctx "$_s" || continue
+      local _missing="" _vr
+      for _vr in "get configmaps" "create configmaps" "patch configmaps" "get services" "patch services" \
+                 "create deployments" "patch deployments" "get replicasets" "get pods"; do
+        if [[ "$(kubectl auth can-i ${_vr} -n "$_RO_NS" 2>/dev/null)" != "yes" ]]; then
+          _missing="${_missing}${_missing:+, }${_vr}"
+        fi
+      done
+      if [[ -n "$_missing" ]]; then
+        _doc_fail "${_s} (${_RO_TYPE}): kubectl can't ${_missing} in ${_RO_NS} — the rollout engine needs them"
+        continue
+      fi
+      if ! kubectl get service "$_RO_KSVC" -n "$_RO_NS" &>/dev/null; then
+        if [[ "$_RO_TYPE" == "blue-green" ]]; then
+          _doc_fail "${_s} (blue-green): Service ${_RO_KSVC} not found in ${_RO_NS} — set k8s.service in muster.json"
+          continue
+        fi
+        _doc_warn "${_s} (canary): Service ${_RO_KSVC} not found in ${_RO_NS} (set k8s.service if it has another name)"
+      fi
+      if [[ "$_RO_TYPE" == "canary" ]]; then
+        local _hpa
+        _hpa=$(kubectl get hpa -n "$_RO_NS" -o json 2>/dev/null | jq -r --arg d "$_RO_DEPLOY" \
+          '[.items[]? | select(.spec.scaleTargetRef.name == $d)] | length' 2>/dev/null)
+        [[ "$_hpa" =~ ^[1-9] ]] && _doc_warn "${_s} (canary): an HPA scales ${_RO_DEPLOY} — replica-ratio weights will drift while it rescales"
+      fi
+      if _ro_state_load && _ro_state_active; then
+        _doc_warn "${_s}: ${_RO_TYPE} rollout $(_ro_st state) at $(_ro_st weight)% — muster promote ${_s} or muster abort ${_s}"
+      else
+        _doc_pass "${_s}: ${_RO_TYPE} prerequisites OK (RBAC, Service ${_RO_KSVC})"
+      fi
+    done <<< "$_svcs"
+  }
+
   _doc_cat_stack() {
     local _has_checks=false
 
@@ -670,6 +713,7 @@ $(cat "$_hf" 2>/dev/null)"
         if (( _deploy_found > 0 && _deploy_missing == 0 )); then
           _doc_pass "All ${_deploy_found} K8s deployment(s) found"
         fi
+        _doc_strategy_checks "$services"
       else
         _doc_fail "K8s cluster not reachable"
       fi

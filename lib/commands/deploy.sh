@@ -16,6 +16,7 @@ source "$MUSTER_ROOT/lib/skills/manager.sh"
 source "$MUSTER_ROOT/lib/commands/history.sh"
 source "$MUSTER_ROOT/lib/core/preflight.sh"
 source "$MUSTER_ROOT/lib/core/suggest.sh"
+source "$MUSTER_ROOT/lib/core/rollout_k8s.sh"
 
 # Run a deploy command with TUI stream box (interactive) or plain (non-interactive)
 # Usage: _deploy_run_hook "title" "log_file" command args...
@@ -88,8 +89,12 @@ _DR_DUR=()      # seconds
 _DR_HEALTH=()   # healthy | unhealthy | disabled | -
 _DR_LOG=()      # deploy log path ("" if none)
 _DR_ERROR=()    # true when this entry should make the deploy exit non-zero
+_DR_VERSION=()  # deployed version label ("" if unknown)
+_DR_IMAGE=()    # deployed image ("" if unknown)
+_DR_STRATEGY=() # rolling | blue-green | canary
+_DR_RSTATE=()   # rollout state after the deploy (complete, paused, …; "" for rolling)
 
-# Args: svc name result duration health log is_error
+# Args: svc name result duration health log is_error [version image strategy rollout_state]
 _deploy_record() {
   local i=${#_DR_SVC[@]}
   _DR_SVC[$i]="$1"
@@ -99,6 +104,10 @@ _deploy_record() {
   _DR_HEALTH[$i]="$5"
   _DR_LOG[$i]="$6"
   _DR_ERROR[$i]="$7"
+  _DR_VERSION[$i]="${8:-}"
+  _DR_IMAGE[$i]="${9:-}"
+  _DR_STRATEGY[$i]="${10:-}"
+  _DR_RSTATE[$i]="${11:-}"
 }
 
 # Record every service after position $1 (0-based) as skipped — used when a
@@ -147,11 +156,12 @@ _deploy_fmt_dur() {
 _deploy_summary() {
   local json="$1" project_dir="$2" total_s="$3"
   local n=${#_DR_SVC[@]}
-  local deployed=0 failed=0 skipped=0 rolled=0 errors=0 not_run=0
+  local deployed=0 failed=0 skipped=0 rolled=0 errors=0 not_run=0 paused=0
   local i=0
   while (( i < n )); do
     case "${_DR_RESULT[$i]}" in
       deployed) deployed=$(( deployed + 1 )) ;;
+      paused) paused=$(( paused + 1 )) ;;
       failed) failed=$(( failed + 1 )) ;;
       skipped) skipped=$(( skipped + 1 )) ;;
       not_run) not_run=$(( not_run + 1 )) ;;
@@ -168,13 +178,13 @@ _deploy_summary() {
     i=0
     while (( i < n )); do
       [[ "$first" == "true" ]] && first=false || items="${items},"
-      items="${items}{\"service\":$(_json_str "${_DR_SVC[$i]}"),\"name\":$(_json_str "${_DR_NAME[$i]}"),\"result\":$(_json_str "${_DR_RESULT[$i]}"),\"duration\":$(_json_int "${_DR_DUR[$i]}" 0),\"health\":$(_json_str "${_DR_HEALTH[$i]}"),\"log_file\":$(_json_str "${_DR_LOG[$i]}")}"
+      items="${items}{\"service\":$(_json_str "${_DR_SVC[$i]}"),\"name\":$(_json_str "${_DR_NAME[$i]}"),\"result\":$(_json_str "${_DR_RESULT[$i]}"),\"duration\":$(_json_int "${_DR_DUR[$i]}" 0),\"health\":$(_json_str "${_DR_HEALTH[$i]}"),\"log_file\":$(_json_str "${_DR_LOG[$i]}"),\"version\":$(_json_str_or_null "${_DR_VERSION[$i]:-}"),\"image\":$(_json_str_or_null "${_DR_IMAGE[$i]:-}"),\"strategy\":$(_json_str_or_null "${_DR_STRATEGY[$i]:-}"),\"rollout_state\":$(_json_str_or_null "${_DR_RSTATE[$i]:-}")}"
       i=$(( i + 1 ))
     done
     local _stopped=false
     (( not_run > 0 )) && _stopped=true
-    printf '{"event":"summary","total":%d,"deployed":%d,"failed":%d,"skipped":%d,"not_run":%d,"rolled_back":%d,"duration":%d,"exit_code":%d,"stopped_early":%s,"services":[%s]}\n' \
-      "$n" "$deployed" "$failed" "$skipped" "$not_run" "$rolled" "$total_s" "$rc" "$_stopped" "$items"
+    printf '{"event":"summary","total":%d,"deployed":%d,"failed":%d,"skipped":%d,"not_run":%d,"rolled_back":%d,"paused":%d,"duration":%d,"exit_code":%d,"stopped_early":%s,"services":[%s]}\n' \
+      "$n" "$deployed" "$failed" "$skipped" "$not_run" "$rolled" "$paused" "$total_s" "$rc" "$_stopped" "$items"
     return $rc
   fi
 
@@ -196,7 +206,7 @@ _deploy_summary() {
     local color="$GREEN" hcolor="$DIM"
     case "${_DR_RESULT[$i]}" in
       failed) color="$RED" ;;
-      skipped|not_run|"rolled back") color="$YELLOW" ;;
+      skipped|not_run|"rolled back"|paused) color="$YELLOW" ;;
     esac
     case "${_DR_HEALTH[$i]}" in
       healthy) hcolor="$GREEN" ;;
@@ -213,6 +223,7 @@ _deploy_summary() {
 
   # Final line: "3 deployed in 41s" / "2 deployed, 1 failed — see <log>"
   local parts="${deployed} deployed"
+  (( paused > 0 )) && parts="${parts}, ${paused} paused (muster promote / muster abort)"
   (( failed > 0 )) && parts="${parts}, ${failed} failed"
   (( rolled > 0 )) && parts="${parts}, ${rolled} rolled back"
   (( skipped > 0 )) && parts="${parts}, ${skipped} skipped"
@@ -268,6 +279,242 @@ _deploy_preflight() {
   _preflight "$@"
 }
 
+# Image a k8s service's Deployment runs now (local kubectl only), else ""
+_deploy_image_for() {
+  local svc="$1" dep ns c
+  dep=$(config_get ".services.${svc}.k8s.deployment" 2>/dev/null)
+  [[ -z "$dep" || "$dep" == "null" ]] && return 0
+  [[ "${MUSTER_HAS_KUBECTL:-false}" == "true" ]] || has_cmd kubectl || return 0
+  remote_is_enabled "$svc" && return 0
+  has_cmd jq || return 0
+  ns=$(_engine_k8s_namespace "$svc")
+  c=$(config_get ".services.${svc}.k8s.container" 2>/dev/null)
+  [[ "$c" == "null" ]] && c=""
+  kubectl --request-timeout=10s get deployment "$dep" -n "$ns" -o json 2>/dev/null \
+    | jq -r --arg c "$c" '(.spec.template.spec.containers // []) as $cs
+        | ((if $c != "" then ([$cs[] | select(.name == $c)] | first) else null end) // $cs[0] // {}) | .image // empty' 2>/dev/null
+  return 0
+}
+
+# Callback for the rollout engine: run the deploy hook with extra env lines
+# (MUSTER_TARGET_DEPLOYMENT=<candidate>, …) and log/stream its output like a
+# normal deploy. Reads the caller's svc/name/hook/_use_just/_hook_dir/
+# _cred_env_lines/_k8s_env_lines/_json_mode and _DRH_LOG.
+_deploy_rollout_hook() {
+  local extra="$1" _ek _ev rc=0
+  local _saved_dep="${MUSTER_K8S_DEPLOYMENT:-}"
+  while IFS='=' read -r _ek _ev; do
+    [[ -z "$_ek" ]] && continue
+    export "$_ek=$_ev"
+  done <<< "$extra"
+  local _timeout
+  _timeout=$(_deploy_timeout_for "$svc")
+  local _all_env="${_cred_env_lines:+${_cred_env_lines}
+}${_k8s_env_lines}
+${extra}"
+  if [[ "$_json_mode" == "true" ]]; then
+    {
+      if remote_is_enabled "$svc"; then
+        _remote_load_config "$svc"; _remote_build_opts
+        if [[ "$_use_just" == "true" ]] && _just_remote_available; then
+          _run_with_timeout "$_timeout" _just_remote_run "$svc" "deploy" "$_all_env" 2>&1
+        else
+          _run_with_timeout "$_timeout" remote_exec_stdout "$svc" "$hook" "$_all_env" 2>&1
+        fi
+      elif [[ "$_use_just" == "true" ]]; then
+        _run_with_timeout "$_timeout" just --justfile "${_hook_dir}/justfile" deploy 2>&1
+      else
+        _run_hook_with_timeout "$_timeout" "$hook" 2>&1
+      fi
+    } | while IFS= read -r _jline; do
+      printf '%s\n' "$_jline" >> "$_DRH_LOG"
+      printf '{"event":"log","service":"%s","line":"%s"}\n' "$svc" "$(_json_esc "${_jline//$_JSON_CR/}")"
+    done
+    rc=${PIPESTATUS[0]}
+  else
+    if remote_is_enabled "$svc"; then
+      _remote_load_config "$svc"; _remote_build_opts
+      if [[ "$_use_just" == "true" ]] && _just_remote_available; then
+        _deploy_run_hook "$name" "$_DRH_LOG" _run_with_timeout "$_timeout" _just_remote_run "$svc" "deploy" "$_all_env"
+      else
+        _deploy_run_hook "$name" "$_DRH_LOG" _run_with_timeout "$_timeout" remote_exec_stdout "$svc" "$hook" "$_all_env"
+      fi
+    elif [[ "$_use_just" == "true" ]]; then
+      _deploy_run_hook "$name" "$_DRH_LOG" _run_with_timeout "$_timeout" just --justfile "${_hook_dir}/justfile" deploy
+    else
+      _deploy_run_hook "$name" "$_DRH_LOG" _run_hook_with_timeout "$_timeout" "$hook"
+    fi
+    rc=$?
+    unset _SIB_REDRAW_FN
+  fi
+  while IFS='=' read -r _ek _ev; do
+    [[ -z "$_ek" ]] && continue
+    unset "$_ek"
+  done <<< "$extra"
+  [[ -n "$_saved_dep" ]] && export MUSTER_K8S_DEPLOYMENT="$_saved_dep"
+  if (( rc != 0 )) && [[ -f "$_DRH_LOG" ]]; then
+    if [[ "$_json_mode" == "true" ]]; then
+      if hints_match_file "$_DRH_LOG" "$rc" "$svc"; then
+        printf '{"event":"hint","service":"%s","hint":%s}\n' "$svc" "$(hints_json)"
+      fi
+    else
+      tail -5 "$_DRH_LOG" | while IFS= read -r _line; do
+        printf '  %b%s%b\n' "${DIM}" "$_line" "${RESET}"
+      done
+      hints_show_for_failure "$svc" "$_DRH_LOG" "$rc" "deploy"
+    fi
+    hints_record_failure "$svc" "deploy" "$rc" "$_DRH_LOG" 2>/dev/null || true
+  fi
+  return $rc
+}
+
+# Deploy one service with blue-green / canary. Uses the caller's loop
+# variables (svc name current total project_dir log_dir _json_mode _force
+# hook _hook_dir _use_just _svc_t0 _version_flag _no_wait). Records the result.
+# Usage: _deploy_rollout_one strategy
+_deploy_rollout_one() {
+  local _stype="$1"
+  local _ro_lock_out=/dev/stdout
+  [[ "$_json_mode" == "true" ]] && _ro_lock_out=/dev/stderr
+  [[ "$_force" == "true" ]] && _service_lock_release "$project_dir" "$svc"
+  if ! _service_lock_acquire "$project_dir" "$svc" > "$_ro_lock_out"; then
+    if [[ "$_json_mode" == "true" ]]; then
+      printf '{"event":"skipped","service":"%s","reason":"locked"}\n' "$svc"
+    else
+      warn "Skipping ${name} — service is locked"
+    fi
+    _deploy_record "$svc" "$name" "skipped" 0 "-" "" "true" "" "" "$_stype" ""
+    return 0
+  fi
+
+  # Rollout already in progress? --force aborts it first.
+  if ! _rollout_check_idle "$svc"; then
+    if [[ "$_force" == "true" ]]; then
+      _RO_JSON="$_json_mode"
+      _ro_warn "--force: aborting the ${_RO_TYPE} rollout in progress for ${svc} first"
+      _rollout_abort_current user_abort || true
+    else
+      err "${_RO_BUSY_MSG}" >&2
+      [[ "$_json_mode" == "true" ]] && printf '{"event":"skipped","service":%s,"reason":"rollout_in_progress","message":%s}\n' \
+        "$(_json_str "$svc")" "$(_json_str "$_RO_BUSY_MSG")"
+      _deploy_record "$svc" "$name" "skipped" 0 "-" "" "true" "" "" "$_stype" "$(_ro_st state)"
+      _service_lock_release "$project_dir" "$svc"
+      return 0
+    fi
+  fi
+
+  local _cred_env_lines="" _k8s_env_lines="" _ek _ev
+  _cred_env_lines=$(cred_env_for_service "$svc")
+  _k8s_env_lines=$(k8s_env_for_service "$svc")
+
+  # Auto git pull (non-interactive, like the JSON path)
+  local _gp_enabled
+  _gp_enabled=$(config_get ".services.${svc}.git_pull.enabled")
+  if [[ "$_gp_enabled" == "true" ]]; then
+    local _gp_remote _gp_branch _gp_rc=0
+    _gp_remote=$(config_get ".services.${svc}.git_pull.remote"); [[ "$_gp_remote" == "null" || -z "$_gp_remote" ]] && _gp_remote="origin"
+    _gp_branch=$(config_get ".services.${svc}.git_pull.branch"); [[ "$_gp_branch" == "null" || -z "$_gp_branch" ]] && _gp_branch="main"
+    if remote_is_enabled "$svc"; then
+      _remote_load_config "$svc"; _remote_build_opts
+      # shellcheck disable=SC2086
+      ssh $_SSH_OPTS "${_REMOTE_USER}@${_REMOTE_HOST}" "cd ${_REMOTE_PROJECT_DIR:-.} && git pull ${_gp_remote} ${_gp_branch}" >/dev/null 2>&1 || _gp_rc=$?
+    else
+      git pull "$_gp_remote" "$_gp_branch" >/dev/null 2>&1 || _gp_rc=$?
+    fi
+    (( _gp_rc != 0 )) && warn "git pull failed for ${name} — deploying the current code" >&2
+  fi
+
+  local _ver
+  _ver=$(_rollout_resolve_version "$project_dir" "$_version_flag")
+  _k8s_env_lines="${_k8s_env_lines:+${_k8s_env_lines}
+}$(_rollout_env_lines "$_stype" "$_ver")"
+  while IFS='=' read -r _ek _ev; do
+    [[ -z "$_ek" ]] && continue
+    export "$_ek=$_ev"
+  done <<< "$_k8s_env_lines"
+  if ! remote_is_enabled "$svc" && [[ -n "$_cred_env_lines" ]]; then
+    while IFS='=' read -r _ek _ev; do
+      [[ -z "$_ek" ]] && continue
+      export "$_ek=$_ev"
+    done <<< "$_cred_env_lines"
+  fi
+  export MUSTER_DEPLOY_STATUS="" MUSTER_SERVICE_NAME="$name"
+
+  local log_file
+  log_file="${log_dir}/${svc}-deploy-$(date +%Y%m%d-%H%M%S).log"
+  _DRH_LOG="$log_file"
+  if [[ "$_json_mode" == "true" ]]; then
+    printf '{"event":"start","service":%s,"name":%s,"index":%d,"total":%d,"log_file":%s,"strategy":%s,"version":%s}\n' \
+      "$(_json_str "$svc")" "$(_json_str "$name")" "$current" "$total" "$(_json_str "$log_file")" \
+      "$(_json_str "$_stype")" "$(_json_str "$(_rollout_sanitize_label "$_ver")")"
+  else
+    _deploy_progress "$current" "$total" "Deploying ${name} (${_stype})..."
+  fi
+  run_skill_hooks "pre-deploy" "$svc" >/dev/null 2>&1
+
+  local _result="failed" _health="-" _err="true" _rc=0
+  local _hook_check_path="$hook"
+  [[ "$_use_just" == "true" ]] && _hook_check_path="${_hook_dir}/justfile"
+  if ! _hook_security_check "$_hook_check_path" "$project_dir" > "$_ro_lock_out"; then
+    err "${name} not deployed — hook blocked by security check" >&2
+    [[ "$_json_mode" == "true" ]] && printf '{"event":"done","service":"%s","status":"blocked"}\n' "$svc"
+    _history_log_event "$svc" "deploy" "failed" "" "$(_rollout_sanitize_label "$_ver")" "" "$_stype"
+  else
+    _RO_JSON="$_json_mode"
+    _RO_NO_WAIT="$_no_wait"
+    _RO_INTERACTIVE=false
+    [[ -t 0 && "$_json_mode" != "true" ]] && _RO_INTERACTIVE=true
+    _RO_HOOK_FN="_deploy_rollout_hook"
+    _MUSTER_CANCEL_SVC="$svc"
+    _rollout_deploy "$svc" "$_ver" "$_stype" || _rc=$?
+    _MUSTER_CANCEL_SVC=""
+    _RO_HOOK_FN=""
+    case "$_RO_RESULT" in
+      deployed) _result="deployed"; _health="healthy"; _err="false" ;;
+      paused)   _result="paused"; _health="healthy"; _err="false" ;;
+      aborted)  _result="rolled back" ;;
+      degraded) _result="failed"; _health="unhealthy" ;;
+      *)        _result="failed" ;;
+    esac
+    if [[ "$_json_mode" == "true" ]]; then
+      local _dstat="failed"
+      case "$_result" in
+        deployed) _dstat="success" ;;
+        paused) _dstat="paused" ;;
+        "rolled back") _dstat="aborted" ;;
+      esac
+      printf '{"event":"done","service":%s,"status":"%s","strategy":%s,"rollout_state":%s}\n' \
+        "$(_json_str "$svc")" "$_dstat" "$(_json_str "$_stype")" "$(_json_str_or_null "$(_ro_st state)")"
+    fi
+    if [[ "$_err" == "false" ]]; then
+      _history_log_event "$svc" "deploy" "ok" "$(_git_current_sha 2>/dev/null)" "$(_ro_st candidate_version)" "$(_ro_st candidate_image)" "$_stype"
+      export MUSTER_DEPLOY_STATUS="success"
+    else
+      export MUSTER_DEPLOY_STATUS="failed"
+      if [[ "$_json_mode" == "true" ]]; then
+        k8s_diagnose_json "$svc" 2>/dev/null
+      fi
+    fi
+    run_skill_hooks "post-deploy" "$svc" >/dev/null 2>&1
+  fi
+
+  while IFS='=' read -r _ek _ev; do
+    [[ -z "$_ek" ]] && continue
+    unset "$_ek"
+  done <<< "$_k8s_env_lines"
+  if [[ -n "$_cred_env_lines" ]]; then
+    while IFS='=' read -r _ek _ev; do
+      [[ -z "$_ek" ]] && continue
+      unset "$_ek"
+    done <<< "$_cred_env_lines"
+  fi
+  _service_lock_release "$project_dir" "$svc"
+  _deploy_record "$svc" "$name" "$_result" "$(( $(date +%s) - _svc_t0 ))" "$_health" "$log_file" "$_err" \
+    "$(_ro_st candidate_version)" "$(_ro_st candidate_image)" "$_stype" "$(_ro_st state)"
+  [[ "$_json_mode" == "true" ]] || echo ""
+  return 0
+}
+
 cmd_deploy() {
   _deploy_main "$@"
   local rc=$?
@@ -303,9 +550,11 @@ _deploy_main() {
   local _force=false
   local _approve_hooks=false _no_preflight=false
   local _stop_on_failure=false _from_svc=""
+  local _strategy_override="" _version_flag="" _no_wait=false
   [[ "${MUSTER_APPROVE_HOOKS:-}" == "1" || "${MUSTER_APPROVE_HOOKS:-}" == "true" ]] && _approve_hooks=true
   _DR_STOP_ON_FAILURE=false
   _DR_SVC=(); _DR_NAME=(); _DR_RESULT=(); _DR_DUR=(); _DR_HEALTH=(); _DR_LOG=(); _DR_ERROR=()
+  _DR_VERSION=(); _DR_IMAGE=(); _DR_STRATEGY=(); _DR_RSTATE=()
   local _deploy_t0
   _deploy_t0=$(date +%s)
   # Flags and service names may come in any order:
@@ -328,10 +577,24 @@ _deploy_main() {
         echo "  --no-preflight  Skip pre-deploy checks (tools, cluster, disk, ports, env)"
         echo "  --yes           Approve changed/unapproved hooks without review (for CI;"
         echo "                  same as MUSTER_APPROVE_HOOKS=1)"
+        echo "  --strategy <s>  rolling, blue-green or canary for this run (overrides"
+        echo "                  muster.json; blue-green/canary need a k8s service)"
+        echo "  --version <v>   Version label for this deploy (default: IMAGE_TAG, git tag,"
+        echo "                  short SHA); exported to hooks as MUSTER_DEPLOY_VERSION"
+        echo "  --no-wait       Blue-green/canary: stop after the first step (preview up, or"
+        echo "                  first canary weight) and exit 0; continue with muster promote"
         echo "  -h, --help      Show this help"
         echo ""
+        echo "Strategies (docs/rollouts.md):"
+        echo "  rolling     default; the hook's own rollout, with per-version visibility"
+        echo "  blue-green  candidate colour at 0% traffic, then one Service switch"
+        echo "  canary      stepped traffic (10/25/50/100 by default) with health gates"
+        echo "  A paused rollout continues with 'muster promote <svc>' or reverts with"
+        echo "  'muster abort <svc>'; 'muster rollout status <svc>' shows it."
+        echo ""
         echo "Exit codes:"
-        echo "  0  every selected service deployed and passed its health check"
+        echo "  0  every selected service deployed (or is paused waiting for promote) and"
+        echo "     passed its health check"
         echo "  1  a service failed, was rolled back, failed its health check, was"
         echo "     skipped because of an error, or hooks weren't approved"
         echo ""
@@ -343,6 +606,8 @@ _deploy_main() {
         echo "  muster deploy --json       Stream deploy events as NDJSON"
         echo "  muster deploy --json --stop-on-failure   Stop at the first failure"
         echo "  muster deploy --from web   Resume the deploy from web onwards"
+        echo "  muster deploy api --strategy canary   Canary this deploy"
+        echo "  muster deploy api --no-wait --json    Start a rollout from CI, promote later"
         echo "  muster deploy fleet test   Deploy a fleet group (shortcut for muster group deploy)"
         return 0
         ;;
@@ -359,9 +624,19 @@ _deploy_main() {
         _from_svc="$2"; shift 2 ;;
       --from=*) _from_svc="${1#--from=}"; shift ;;
       --no-preflight) _no_preflight=true; shift ;;
+      --no-wait) _no_wait=true; shift ;;
+      --strategy|--version)
+        if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+          err "$1 needs a value"
+          return 1
+        fi
+        if [[ "$1" == "--strategy" ]]; then _strategy_override="$2"; else _version_flag="$2"; fi
+        shift 2 ;;
+      --strategy=*) _strategy_override="${1#--strategy=}"; shift ;;
+      --version=*) _version_flag="${1#--version=}"; shift ;;
       -*)
         err "Unknown flag: $1"
-        _suggest_print "$1" --dry-run --force --json --yes --no-preflight --help || true
+        _suggest_print "$1" --dry-run --force --json --yes --no-preflight --strategy --version --no-wait --stop-on-failure --from --help || true
         echo "Run 'muster deploy --help' for usage."
         return 1
         ;;
@@ -369,6 +644,19 @@ _deploy_main() {
     esac
   done
   set -- "${_targets[@]+"${_targets[@]}"}"
+
+  case "$_strategy_override" in
+    ""|rolling|blue-green|canary) ;;
+    *)
+      err "Unknown strategy: ${_strategy_override} (use rolling, blue-green or canary)"
+      _suggest_print "$_strategy_override" rolling blue-green canary || true
+      return 1
+      ;;
+  esac
+  if [[ -n "$_version_flag" && ! "$_version_flag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+    err "--version may only contain letters, digits and . _ + - (got \"${_version_flag}\")"
+    return 1
+  fi
 
   # Redirect: muster deploy fleet <name> → muster group deploy <name>
   if [[ "${1:-}" == "fleet" ]]; then
@@ -626,6 +914,24 @@ _deploy_main() {
     _unload_env_file
   }
 
+  # ── --strategy blue-green/canary needs a k8s service ──
+  if [[ "$_strategy_override" == "blue-green" || "$_strategy_override" == "canary" ]]; then
+    local _so_svc
+    for _so_svc in ${services[@]+"${services[@]}"}; do
+      local _so_dep
+      _so_dep=$(config_get ".services.${_so_svc}.k8s.deployment" 2>/dev/null)
+      if [[ -z "$_so_dep" || "$_so_dep" == "null" ]]; then
+        if [[ "$_json_mode" == "true" ]]; then
+          printf '{"event":"error","reason":"strategy_unsupported","message":%s,"services":[%s]}\n' \
+            "$(_json_str "--strategy ${_strategy_override} needs a Kubernetes service (k8s.deployment); ${_so_svc} has none")" "$(_json_str "$_so_svc")"
+        fi
+        err "--strategy ${_strategy_override}: ${_so_svc} isn't a Kubernetes service (no k8s.deployment) — blue-green/canary support Kubernetes only in this version" >&2
+        _deploy_end
+        return 1
+      fi
+    done
+  fi
+
   # ── Hook approval gate + tool preflight (real deploys only) ──
   if [[ "$dry_run" == "false" ]] && (( total > 0 )); then
     local _gate_ok=true _gate_reason=""
@@ -762,6 +1068,29 @@ _deploy_main() {
       continue
     fi
 
+    # Strategy for this service (rolling unless muster.json / --strategy say otherwise)
+    local _svc_strategy="$_strategy_override"
+    [[ -z "$_svc_strategy" ]] && _svc_strategy=$(_rollout_type "$svc")
+
+    # ── Blue-green / canary: the rollout engine drives this service ──
+    if [[ "$dry_run" == "false" ]] && _rollout_is_progressive "$svc" "$_svc_strategy"; then
+      _deploy_rollout_one "$_svc_strategy"
+      continue
+    fi
+    # A rolling deploy must not run over a paused blue-green/canary rollout
+    if [[ "$dry_run" == "false" && "$_force" == "true" ]] && _rollout_is_progressive "$svc" && ! _rollout_check_idle "$svc"; then
+      _RO_JSON="$_json_mode"
+      _ro_warn "--force: aborting the ${_RO_TYPE} rollout in progress for ${svc} first"
+      _rollout_abort_current user_abort || true
+    fi
+    if [[ "$dry_run" == "false" ]] && _rollout_is_progressive "$svc" && ! _rollout_check_idle "$svc"; then
+      err "${_RO_BUSY_MSG}" >&2
+      [[ "$_json_mode" == "true" ]] && printf '{"event":"skipped","service":%s,"reason":"rollout_in_progress","message":%s}\n' \
+        "$(_json_str "$svc")" "$(_json_str "$_RO_BUSY_MSG")"
+      _deploy_record "$svc" "$name" "skipped" 0 "-" "" "true" "" "" "$_svc_strategy" "$(_ro_st state)"
+      continue
+    fi
+
     if [[ "$_json_mode" == "true" && "$dry_run" == "true" ]]; then
       # ── JSON dry-run ──
       local _hook_lines _hook_display="$hook"
@@ -771,8 +1100,9 @@ _deploy_main() {
       else
         _hook_lines=$(wc -l < "$hook" | tr -d ' ')
       fi
-      printf '{"event":"dry_run","service":%s,"name":%s,"index":%d,"total":%d,"hook":%s,"hook_lines":%s}\n' \
-        "$(_json_str "$svc")" "$(_json_str "$name")" "$current" "$total" "$(_json_str "$_hook_display")" "$(_json_int "$_hook_lines" 0)"
+      printf '{"event":"dry_run","service":%s,"name":%s,"index":%d,"total":%d,"hook":%s,"hook_lines":%s,"strategy":%s}\n' \
+        "$(_json_str "$svc")" "$(_json_str "$name")" "$current" "$total" "$(_json_str "$_hook_display")" "$(_json_int "$_hook_lines" 0)" \
+        "$(_rollout_strategy "$svc" "$_strategy_override" 2>/dev/null || echo null)"
       continue
 
     elif [[ "$_json_mode" == "true" ]]; then
@@ -795,6 +1125,11 @@ _deploy_main() {
       # Export k8s config
       local _k8s_env_lines=""
       _k8s_env_lines=$(k8s_env_for_service "$svc")
+      # Version + strategy for the hook (MUSTER_DEPLOY_VERSION, MUSTER_IMAGE_TAG)
+      local _svc_version
+      _svc_version=$(_rollout_resolve_version "$project_dir" "$_version_flag")
+      _k8s_env_lines="${_k8s_env_lines:+${_k8s_env_lines}
+}$(_rollout_env_lines rolling "$_svc_version")"
       if [[ -n "$_k8s_env_lines" ]]; then
         while IFS='=' read -r _ek _ev; do
           [[ -z "$_ek" ]] && continue
@@ -902,7 +1237,7 @@ ${_k8s_env_lines}"
         _svc_health="disabled"
         printf '{"event":"done","service":"%s","status":"success"}\n' "$svc"
         _deploy_verify "$log_file" "$svc" "$_json_deploy_start_time" "json"
-        _history_log_event "$svc" "deploy" "ok" ""
+        _history_log_event "$svc" "deploy" "ok" "" "$(_rollout_sanitize_label "$_svc_version")" "$(_deploy_image_for "$svc")" "rolling"
         export MUSTER_DEPLOY_STATUS="success"
         run_skill_hooks "post-deploy" "$svc" 2>/dev/null
 
@@ -980,7 +1315,8 @@ ${_k8s_env_lines}"
       _service_lock_release "$project_dir" "$svc"
       local _jerr=false
       [[ "$_svc_result" != "deployed" || "$_svc_health" == "unhealthy" ]] && _jerr=true
-      _deploy_record "$svc" "$name" "$_svc_result" "$(( $(date +%s) - _svc_t0 ))" "$_svc_health" "$_svc_log" "$_jerr"
+      _deploy_record "$svc" "$name" "$_svc_result" "$(( $(date +%s) - _svc_t0 ))" "$_svc_health" "$_svc_log" "$_jerr" \
+        "$(_rollout_sanitize_label "$_svc_version")" "$(_deploy_image_for "$svc")" "rolling" ""
       continue
 
     elif [[ "$dry_run" == "true" ]]; then
@@ -1011,6 +1347,17 @@ ${_k8s_env_lines}"
         printf '  %b...%b\n' "${DIM}" "${RESET}"
       fi
       printf '  %b%s%b\n' "${DIM}" "$_separator" "${RESET}"
+
+      # Strategy plan
+      if _rollout_is_progressive "$svc" "$_svc_strategy"; then
+        local _dr_plan
+        _dr_plan=$(_rollout_strategy "$svc" "$_strategy_override" | jq -r '
+          if .type == "canary" then "canary via \(.traffic): " + ([.steps[] | "\(.weight)%" + (if .pause == "manual" then " (manual)" elif .pause > 0 then " (\(.pause)s)" else "" end)] | join(" → "))
+          else "blue-green via \(.traffic)" + (if .auto_promote then ", auto-promote" else ", promote manually" end) + (if .preview.enabled then ", preview Service" else "" end) end')
+        printf '  %bStrategy:%b %s\n' "${DIM}" "${RESET}" "$_dr_plan"
+      else
+        printf '  %bStrategy:%b rolling\n' "${DIM}" "${RESET}"
+      fi
 
       # Show credential key names (without fetching values)
       local _cred_enabled
@@ -1096,6 +1443,11 @@ ${_k8s_env_lines}"
       # Export k8s config as env vars (hooks read these at runtime)
       local _k8s_env_lines=""
       _k8s_env_lines=$(k8s_env_for_service "$svc")
+      # Version + strategy for the hook (MUSTER_DEPLOY_VERSION, MUSTER_IMAGE_TAG)
+      local _svc_version
+      _svc_version=$(_rollout_resolve_version "$project_dir" "$_version_flag")
+      _k8s_env_lines="${_k8s_env_lines:+${_k8s_env_lines}
+}$(_rollout_env_lines rolling "$_svc_version")"
       if [[ -n "$_k8s_env_lines" ]]; then
         while IFS='=' read -r _ek _ev; do
           [[ -z "$_ek" ]] && continue
@@ -1185,6 +1537,12 @@ ${_k8s_env_lines}"
             fi
           else
             ok "Pulled ${_gp_remote}/${_gp_branch}"
+            # The pull moved HEAD: re-resolve the version label for the hook
+            if [[ -z "$_version_flag" ]] && ! remote_is_enabled "$svc"; then
+              _svc_version=$(_rollout_resolve_version "$project_dir")
+              export MUSTER_DEPLOY_VERSION
+              MUSTER_DEPLOY_VERSION=$(_rollout_sanitize_label "$_svc_version")
+            fi
           fi
         fi
 
@@ -1264,7 +1622,7 @@ ${_k8s_env_lines}"
             _git_save_deploy_sha "$svc" "$_git_sha"
           fi
 
-          _history_log_event "$svc" "deploy" "ok" "$_git_sha"
+          _history_log_event "$svc" "deploy" "ok" "$_git_sha" "$(_rollout_sanitize_label "$_svc_version")" "$(_deploy_image_for "$svc")" "rolling"
           export MUSTER_DEPLOY_STATUS="success"
           run_skill_hooks "post-deploy" "$svc"
 
@@ -1522,7 +1880,8 @@ ${_k8s_env_lines}"
 
       local _serr=false
       [[ "$_svc_result" != "deployed" || "$_svc_health" == "unhealthy" ]] && _serr=true
-      _deploy_record "$svc" "$name" "${_svc_result:-failed}" "$(( $(date +%s) - _svc_t0 ))" "$_svc_health" "$_svc_log" "$_serr"
+      _deploy_record "$svc" "$name" "${_svc_result:-failed}" "$(( $(date +%s) - _svc_t0 ))" "$_svc_health" "$_svc_log" "$_serr" \
+        "$(_rollout_sanitize_label "$_svc_version")" "$(_deploy_image_for "$svc")" "rolling" ""
 
       # Clean up exported env vars (local deploy only)
       if ! remote_is_enabled "$svc"; then

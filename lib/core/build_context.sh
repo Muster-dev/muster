@@ -193,8 +193,12 @@ _build_context_detect() {
           fi
         fi
 
-        # Skip if no distinct child directory to check
-        [[ -z "$child_dir" ]] && continue
+        # Skip if no distinct child directory to check (advance _j first —
+        # a bare `continue` here looped forever)
+        if [[ -z "$child_dir" ]]; then
+          _j=$(( _j + 1 ))
+          continue
+        fi
 
         local abs_child
         abs_child="${project_dir}/${child_dir}"

@@ -252,6 +252,21 @@ _config_validate() {
 
   done < <(jq -r '.services | keys[]' "$CONFIG_FILE" 2>/dev/null)
 
+  # ── Deploy strategies (blue-green / canary; docs/rollouts.md) ──
+  local _v_line
+  while IFS= read -r _v_line; do
+    [[ -z "$_v_line" ]] && continue
+    case "$_v_line" in
+      E:*)
+        printf '%b\n' "  ${RED}x${RESET} Config error: ${_v_line#E:}" >&2
+        _v_errors=$(( _v_errors + 1 ))
+        ;;
+      W:*)
+        printf '%b\n' "  ${YELLOW}!${RESET} Config warning: ${_v_line#W:}" >&2
+        ;;
+    esac
+  done < <(_config_validate_strategies "$CONFIG_FILE")
+
   if (( _v_errors > 0 )); then
     return 1
   fi
@@ -259,6 +274,79 @@ _config_validate() {
   # Mark as validated for this config file
   _CONFIG_VALIDATED="$CONFIG_FILE"
   return 0
+}
+
+# Validate every service's "strategy" block. Prints "E:msg" (error) or
+# "W:msg" (warning) lines. Phase 1 supports Kubernetes blue-green
+# (service-selector) and canary (replicas); the other traffic mechanisms are
+# accepted names reserved for later releases and rejected with a clear message.
+# Usage: _config_validate_strategies config_file
+_config_validate_strategies() {
+  jq -r '
+    def isint: type == "number" and . == (. | floor);
+    def pauseok: (isint and . >= 0) or . == "manual";
+    .services // {} | to_entries[] | .key as $k | .value as $svc
+    | ($svc.strategy // null) as $raw
+    | select($raw != null)
+    | (if ($raw | type) == "string" then {type: $raw}
+       elif ($raw | type) == "object" then $raw else {type: "__bad__"} end) as $r
+    | ($r.type // "rolling") as $t
+    | "strategy for \"\($k)\"" as $w
+    | (
+      if (["rolling","blue-green","canary"] | index($t)) == null then
+        (if $t == "__bad__" then "E:\($w) must be an object or a string"
+         else "E:\($w): type must be rolling, blue-green or canary (got \"\($t)\")" end)
+      else empty end,
+      if ($t == "blue-green" or $t == "canary") and (($svc.k8s.deployment // "") == "") then
+        "E:\($w): \($t) needs a Kubernetes service (k8s.deployment) in this version — Docker/Compose support is planned"
+      else empty end,
+      ( ($r.traffic // "auto") as $tr
+        | if (["auto","service-selector","replicas","gateway-api","ingress-nginx","traefik","caddy","nginx","caddy-managed"] | index($tr)) == null then
+            "E:\($w): unknown traffic \"\($tr)\" (use auto, service-selector or replicas)"
+          elif $tr == "gateway-api" or $tr == "ingress-nginx" then
+            "E:\($w): traffic \"\($tr)\" is not supported by this muster version yet — use \"auto\" (\(if $t == "canary" then "replicas" else "service-selector" end))"
+          elif (["traefik","caddy","nginx","caddy-managed"] | index($tr)) != null then
+            "E:\($w): traffic \"\($tr)\" is for Docker/Compose hosts, which aren'"'"'t supported yet"
+          elif $t == "canary" and $tr == "service-selector" then
+            "E:\($w): service-selector switches all traffic at once — canary needs \"replicas\" (or \"auto\")"
+          elif $t == "blue-green" and $tr == "replicas" then
+            "E:\($w): blue-green uses \"service-selector\" (or \"auto\"), not replicas"
+          else empty end ),
+      ( $r.steps as $st | select($st != null)
+        | if $t != "canary" then "W:\($w): steps only apply to canary — ignored"
+          elif ($st | type) != "array" or ($st | length) == 0 then "E:\($w): steps must be a non-empty array"
+          else
+            ([$st[] | if type == "object" then .weight else . end]) as $ws
+            | ( if any($ws[]; (isint and . >= 1 and . <= 100) | not) then "E:\($w): step weights must be whole numbers from 1 to 100" else empty end,
+                if any($st[]; type == "object" and has("pause") and (.pause | pauseok | not)) then
+                  "E:\($w): step pause must be seconds (0 or more) or \"manual\"" else empty end,
+                if ([range(1; $ws | length)] | any(. as $i | ($ws[$i] | isint) and ($ws[$i - 1] | isint) and $ws[$i] <= $ws[$i - 1])) then
+                  "E:\($w): step weights must increase (got \($ws | map(tostring) | join(", ")))" else empty end,
+                if ($ws | last) != 100 and ($ws | last | isint) then "W:\($w): last step is \($ws | last)% — a final 100% step is added" else empty end )
+          end ),
+      ( select($r | has("pause")) | if ($r.pause | pauseok) then empty else "E:\($w): pause must be seconds (0 or more) or \"manual\"" end ),
+      ( ["auto_promote","auto_rollback"][] as $b | select($r | has($b))
+        | if ($r[$b] | type) == "boolean" then empty else "E:\($w): \($b) must be true or false" end ),
+      ( select($r | has("drain_seconds")) | if ($r.drain_seconds | isint and . >= 0 and . <= 3600) then empty
+          else "E:\($w): drain_seconds must be 0-3600" end ),
+      ( select($r | has("keep_old_seconds")) | if ($r.keep_old_seconds | isint and . >= -1 and . <= 86400) then empty
+          else "E:\($w): keep_old_seconds must be -1 (keep) or 0-86400" end ),
+      ( select($r | has("on_interrupt")) | if (["abort","pause"] | index($r.on_interrupt)) != null then empty
+          else "E:\($w): on_interrupt must be abort or pause" end ),
+      ( ($r.analysis // {}) as $a
+        | ( select($a | has("interval_seconds")) | if ($a.interval_seconds | isint and . >= 1 and . <= 300) then empty
+              else "E:\($w): analysis.interval_seconds must be 1-300" end ),
+          ( select($a | has("max_failures")) | if ($a.max_failures | isint and . >= 1 and . <= 20) then empty
+              else "E:\($w): analysis.max_failures must be 1-20" end ),
+          ( select($a | has("max_restarts")) | if ($a.max_restarts | isint and . >= 0) then empty
+              else "E:\($w): analysis.max_restarts must be 0 or more" end ),
+          ( ["health_check","pod_stability"][] as $b | select($a | has($b))
+            | if ($a[$b] | type) == "boolean" then empty else "E:\($w): analysis.\($b) must be true or false" end ),
+          ( ["http_probe","prometheus","command"][] as $g | select(($a[$g] // null) != null)
+            | "W:\($w): analysis.\($g) is not supported by this muster version yet — ignored" ) ),
+      ( select(($r.preview // null) != null and $t != "blue-green") | "W:\($w): preview only applies to blue-green — ignored" ),
+      ( select(($r.proxy // null) != null) | "W:\($w): proxy is for Docker/Compose hosts (not supported yet) — ignored" )
+    )' "$1" 2>/dev/null
 }
 
 # Load config from muster.json (or deploy.json fallback)
@@ -371,6 +459,12 @@ k8s_env_for_service() {
   deploy_timeout=$(config_get ".services.${svc}.deploy_timeout")
   if [[ -n "$deploy_timeout" && "$deploy_timeout" != "null" ]]; then
     echo "MUSTER_DEPLOY_TIMEOUT=${deploy_timeout}"
+  fi
+  # Service that carries the traffic (blue-green/canary hooks), when set
+  local traffic_svc
+  traffic_svc=$(config_get ".services.${svc}.k8s.service")
+  if [[ -n "$traffic_svc" && "$traffic_svc" != "null" ]]; then
+    echo "MUSTER_K8S_TRAFFIC_SERVICE=${traffic_svc}"
   fi
   local deploy_mode
   deploy_mode=$(config_get ".services.${svc}.deploy_mode")
