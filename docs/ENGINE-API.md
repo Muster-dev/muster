@@ -43,7 +43,11 @@ CI drive muster through these commands; this page is the contract. Tests:
 | `hooks --json` / `hooks <svc> --json` / `hooks <svc> <hook> --json` | read | document |
 | `hooks status --json` | read | document |
 | `hooks approve --yes [service…] --json` | deploy | document |
-| `deploy --json [--dry-run] [--stop-on-failure] [--from svc] [--yes] [service…]` | deploy | NDJSON |
+| `deploy --json [--dry-run] [--stop-on-failure] [--from svc] [--yes] [--strategy S] [--version V] [--no-wait] [service…]` | deploy | NDJSON |
+| `rollout status [service…] --json` | read | document |
+| `rollout status [service…] --watch --json [--interval N]` | read | NDJSON |
+| `promote <service> --json [--to N \| --full]` | deploy | NDJSON |
+| `abort <service> --json` | deploy | NDJSON |
 | `rollback <service> --json [--yes]` | deploy | NDJSON |
 | `restart <service> --json [--yes]` | deploy | NDJSON |
 | `logs <service> --json [--tail N] [--follow]` | read | NDJSON |
@@ -128,7 +132,12 @@ would configure. Writes nothing. Accepts `--path`, `--stack`,
       "last_deploy": {"ts": "2026-11-26 13:38:00", "status": "ok", "commit": "4f2a9c1", "source": "local"},
       "locked_by": null,
       "deploying": false,
-      "replicas": {"ready": 2, "desired": 3}
+      "replicas": {"ready": 2, "desired": 3},
+      "version": "v1.4.1",
+      "image": "registry.acme.dev/api:v1.4.1",
+      "revision": 13,
+      "strategy": "canary",
+      "rollout": null
     }
   }
 }
@@ -149,17 +158,30 @@ would configure. Writes nothing. Accepts `--path`, `--stack`,
 - `muster_version`: the muster that answered (added after 0.7.0; older
   versions omit it).
 - `replicas`: k8s only, when kubectl answers within 5s; otherwise null.
+- `version` / `image` / `revision` (added in 0.8): what the service runs.
+  k8s (local kubectl): read from the cluster (stable/active Deployment for
+  blue-green and canary, newest ReplicaSet for rolling; version = the
+  `muster.dev/version` label, else the image tag, else `sha256:<7>` for a
+  digest). Other stacks: the last successful deploy/promote in history
+  (`version`, else `commit`); `image`/`revision` null.
+- `strategy`: `rolling`, `blue-green` or `canary` (from muster.json).
+- `rollout`: the [rollout object](#rollout-object) while a blue-green/canary
+  rollout is in progress, or while a rolling update has more than one live
+  ReplicaSet; otherwise null.
 
 ## history --json
 
 Array, oldest first (last 20 unless `--all`):
 
 ```json
-[{"timestamp": "2026-11-26 13:40:05", "service": "api", "action": "deploy", "status": "ok", "commit": "4f2a9c1", "source": "local"}]
+[{"timestamp": "2026-11-26 13:40:05", "service": "api", "action": "deploy", "status": "ok", "commit": "4f2a9c1", "source": "local",
+  "version": "4f2a9c1", "image": "registry.acme.dev/api:4f2a9c1", "strategy": "rolling"}]
 ```
 
-`action`: `deploy`, `rollback`, `restart`. `status`: `ok`, `failed`,
-`cancelled`. `source`: `local` or the fleet/group deployer.
+`action`: `deploy`, `rollback`, `restart`, `promote`, `abort`. `status`:
+`ok`, `failed`, `cancelled`. `source`: `local` or the fleet/group deployer.
+`version`, `image`, `strategy` (added in 0.8) are null for entries written
+before them or when unknown.
 
 ## doctor --json
 
@@ -245,25 +267,27 @@ NDJSON, in order:
 | Event | Fields |
 |-------|--------|
 | `error` | `reason`, `message`, `services` (+ `files` for `hooks_not_approved`); then `summary` |
-| `dry_run` | `service`, `name`, `index`, `total`, `hook`, `hook_lines` (with `--dry-run`) |
-| `skipped` | `service`, `reason` (`no_hook`, `locked`) |
-| `start` | `service`, `name`, `index`, `total`, `log_file` |
+| `dry_run` | `service`, `name`, `index`, `total`, `hook`, `hook_lines`, `strategy` (normalized strategy object) (with `--dry-run`) |
+| `skipped` | `service`, `reason` (`no_hook`, `locked`, `rollout_in_progress` + `message`) |
+| `start` | `service`, `name`, `index`, `total`, `log_file` (+ `strategy`, `version` for blue-green/canary) |
 | `git_pull` | `service`, `status` (`pulling`/`done`/`failed`), `remote`, `branch`, `exit_code` |
 | `log` | `service`, `line` |
-| `done` | `service`, `status` (`success`/`failed`/`timeout`/`blocked`), `exit_code`, `timeout` |
+| `done` | `service`, `status` (`success`/`failed`/`timeout`/`blocked`, and for blue-green/canary `paused`/`aborted`), `exit_code`, `timeout`; blue-green/canary add `strategy`, `rollout_state` |
+| `rollout_step` `traffic_shift` `analysis` `promoted` `aborted` | blue-green/canary progress, see [Rollout events](#rollout-events) |
 | `verify_warning` | `service`, `message` |
 | `diagnosis` | after a failed k8s `done`, see below |
 | `hint` | after a failed `done` when the offline rules engine matches, see below |
 | `health` | `service`, `status` (`checking`/`healthy`/`unhealthy`) |
 | `stopped` | `reason: "failure"`, `after`, `remaining` (`--stop-on-failure`) |
-| `cancelled` | `service`, `exit_code: 130` |
+| `cancelled` | `service`, `exit_code: 130` (+ `safe_version` when a rollout was interrupted) |
 | `complete` | `total`, `dry_run` |
 | `summary` | see below (not for `--dry-run`) |
 
 `error` reasons: `hooks_not_approved` (`files: [{key, state}]`, fix with
 `hooks approve --yes`), `preflight_failed` (`message`: missing/unreachable
 docker, compose or kubectl), `unknown_service` (`--from` target not in the
-deploy).
+deploy), `strategy_unsupported` (`--strategy blue-green|canary` for a service
+without `k8s.deployment`).
 
 ```json
 {"event":"error","reason":"hooks_not_approved","message":"Hooks changed or not approved on this machine (muster hooks status --json)",
@@ -271,16 +295,23 @@ deploy).
 ```
 
 ```json
-{"event":"summary","total":3,"deployed":1,"failed":1,"skipped":0,"not_run":1,"rolled_back":0,
+{"event":"summary","total":3,"deployed":1,"failed":1,"skipped":0,"not_run":1,"rolled_back":0,"paused":0,
  "duration":42,"exit_code":1,"stopped_early":true,
  "services":[
-   {"service":"api","name":"API Server","result":"deployed","duration":30,"health":"healthy","log_file":"…/api-deploy-20261126-134005.log"},
+   {"service":"api","name":"API Server","result":"deployed","duration":30,"health":"healthy","log_file":"…/api-deploy-20261126-134005.log",
+    "version":"4f2a9c1","image":"registry.acme.dev/api:latest","strategy":"rolling","rollout_state":null},
    {"service":"web","name":"Web","result":"failed","duration":12,"health":"-","log_file":"…"},
    {"service":"worker","name":"Worker","result":"not_run","duration":0,"health":"-","log_file":""}]}
 ```
 
-`result`: `deployed`, `failed`, `skipped`, `not_run`, `rolled back`.
+`result`: `deployed`, `failed`, `skipped`, `not_run`, `rolled back`, and
+`paused` (blue-green awaiting promotion / canary at a manual step or after
+`--no-wait`; not an error, exit code 0). A blue-green/canary that failed its
+gates and restored stable is `rolled back` (an error).
 `health`: `healthy`, `unhealthy`, `disabled`, `-`.
+Per-service `version`, `image`, `strategy`, `rollout_state` and the top-level
+`paused` count were added in 0.8 (`image` needs a local kubectl; null
+otherwise).
 
 Flags:
 
@@ -291,6 +322,9 @@ Flags:
   `deploy_phases`), e.g. to resume after a fix. Combine with service names
   to resume inside a selection.
 - `--yes` / `MUSTER_APPROVE_HOOKS=1`: approve pending hooks first.
+- `--strategy rolling|blue-green|canary`: override muster.json for this run.
+- `--version V`: version label (exported as `MUSTER_DEPLOY_VERSION`).
+- `--no-wait`: blue-green/canary stop after the first step with `paused`.
 
 ### hint
 
@@ -499,6 +533,123 @@ the machine that deploys a push server), `remote_failed`. A remote
  "tunnel_installed": true, "tunnel_path": "/usr/local/bin/muster-tunnel"}
 ```
 
+## Rollout object
+
+Used by `status --json` (`services.<svc>.rollout`), `rollout status --json`
+and the `rollout_state` stream. See [rollouts.md](rollouts.md).
+
+```json
+{
+  "state": "paused",
+  "strategy": "canary",
+  "traffic_mechanism": "replicas",
+  "step": 1, "total_steps": 4,
+  "weight": 25, "effective_weight": 25,
+  "started_at": "2026-11-28T14:30:00-05:00", "elapsed_seconds": 185,
+  "preview_service": null,
+  "next_gate": {"type": "manual", "next_weight": 50, "remaining_seconds": null},
+  "versions": [
+    {"role": "stable", "track": "stable", "deployment": "acme-api", "version": "v1.4.1",
+     "image": "registry.acme.dev/api:v1.4.1", "revision": 13,
+     "replicas": {"ready": 3, "desired": 3}, "weight": 75, "effective_weight": 75, "health": "healthy"},
+    {"role": "canary", "track": "canary", "deployment": "acme-api-canary", "version": "v1.4.2",
+     "image": "registry.acme.dev/api:v1.4.2", "revision": 2,
+     "replicas": {"ready": 1, "desired": 1}, "weight": 25, "effective_weight": 25, "health": "healthy"}
+  ],
+  "last_analysis": {"status": "pass", "checked_at": "2026-11-28T14:32:55-05:00",
+    "checks": [{"name": "pod_stability", "ok": true, "detail": "1/1 ready, restarts <= 0"},
+               {"name": "health", "ok": true, "detail": "health.sh passed"}]}
+}
+```
+
+- `state`: `progressing`, `paused` (canary manual step), `awaiting_promotion`
+  (blue-green preview up), `degraded` (gate failed with `auto_rollback:
+  false`). `rollout status` also returns `idle` objects (below).
+- `strategy`: `blue-green`, `canary`, or `rolling` (a plain rolling update
+  with several live ReplicaSets: `traffic_mechanism: "replicas"`,
+  `step`/`total_steps`/`started_at`/`elapsed_seconds`/`next_gate`/`last_analysis`
+  null).
+- `weight`: target candidate weight; `effective_weight` (canary): the
+  candidate's share of ready pods, which differs from the target with few
+  replicas.
+- `next_gate.type`: `manual` (run `promote`), `promotion` (blue-green),
+  `timer` (`remaining_seconds` until the next step); null otherwise.
+- `versions[].role`: `stable` (serving / old), `canary` (canary track),
+  `candidate` (blue-green preview colour, or the newest ReplicaSet of a
+  rolling update). Blue-green adds `track` `blue`/`green` and
+  `weight`/`effective_weight` 100/0 from the Service selector. Rolling
+  entries have `replicaset` instead of `deployment` and `track: "rs-<revision>"`.
+- `versions[].health`: `healthy`, `progressing`, `scaled_down`.
+
+Idle object (no rollout in progress):
+`{"state": "idle", "strategy": "canary", "traffic_mechanism": "replicas",
+"last_state": "complete", "versions": [...]}`. For non-k8s services
+`versions` has one entry built from history (replicas/revision null).
+
+## rollout status --json
+
+```json
+{"project": "acme-store", "checked_at": "2026-11-28T14:33:05-05:00",
+ "services": {"api": {…rollout object or idle object…}, "worker": {…}}}
+```
+
+Without service names every service is listed. `--watch --json` prints one
+line per service per poll instead, and ends when no rollout is in progress:
+
+```json
+{"event":"rollout_state","service":"api","checked_at":"2026-11-28T14:33:08-05:00","rollout":{…}}
+```
+
+Exit codes: 0, or 1 for an unknown service / missing jq
+(`{"error":"unknown_service"|"missing_dependency",…}` on stderr).
+
+## Rollout events
+
+Emitted by `deploy --json` (blue-green/canary services), `promote --json`
+and `abort --json`, and the rollback of a blue-green/canary service.
+
+```json
+{"event":"rollout_step","service":"api","strategy":"canary","step":2,"total_steps":4,"weight":25,"status":"active","version":"v1.4.2","stable_version":"v1.4.1","pause":"manual","elapsed_seconds":120}
+{"event":"traffic_shift","service":"api","mechanism":"replicas","stable_version":"v1.4.1","candidate_version":"v1.4.2","stable_weight":75,"candidate_weight":25,"effective_candidate_weight":25,"preview_service":null}
+{"event":"analysis","service":"api","step":2,"track":"canary","status":"pass","consecutive_failures":0,"max_failures":2,"checks":[{"name":"pod_stability","ok":true,"detail":"1/1 ready, restarts <= 0"},{"name":"health","ok":true,"detail":"health.sh passed"}]}
+{"event":"promoted","service":"api","strategy":"canary","version":"v1.4.2","previous_version":"v1.4.1","image":"registry.acme.dev/api:v1.4.2","duration":240}
+{"event":"aborted","service":"api","strategy":"canary","reason":"analysis_failed","detail":"health.sh exited 1","restored_version":"v1.4.1","aborted_version":"v1.4.2","duration":85}
+```
+
+- `rollout_step.status`: `starting` (step 0, before the hook), `active`,
+  `paused`, `awaiting_promotion`. `pause`: seconds, `"manual"`, or null.
+- `traffic_shift`: blue-green switches are 0/100 (or 100/0 when switching
+  back); canary carries the target and the effective weight.
+- `analysis.status`: `pass` / `fail`.
+- `aborted.reason`: `user_abort`, `analysis_failed`, `health_failed`
+  (candidate never became ready, e.g. CrashLoopBackOff), `deploy_failed`
+  (hook failed), `interrupted` (Ctrl+C / SIGTERM; followed by `cancelled` and
+  exit 130).
+
+## promote \<service\> --json / abort \<service\> --json
+
+```bash
+muster promote api --json [--to 50 | --full]
+muster abort api --json
+```
+
+NDJSON rollout events, then a final line:
+
+```json
+{"event":"done","service":"api","action":"promote","status":"paused","rollout_state":"paused","exit_code":0}
+```
+
+`status`: `promoted` (100% reached), `paused`, `aborted`, `degraded`,
+`failed`. No rollout in progress → exit 1 with
+`{"error":"no_rollout","message":…}` on stderr; also `unknown_service`,
+`not_kubernetes`, `missing_dependency`. `--json` implies `--yes` (no prompt).
+Deploy scope (`MUSTER_TOKEN`). The deploy lock is held while it runs.
+
+`rollback <service> --json` on a service with a rollout in progress aborts
+it; on a completed blue-green it switches the Service back. Both stream
+`start` (`action: "rollback"`, `strategy`, `mode`: `abort`/`bg`), rollout
+events, `done` (`status`, `rollout_state`) and the usual rollback `summary`.
+
 ## Other documents
 
 - `group list --json`: `{"<group>": {"name", "project_count"}}`
@@ -508,8 +659,7 @@ the machine that deploys a push server), `remote_failed`. A remote
 
 ## Not in the API yet
 
-Tracked in muster-tui's `docs/ENGINE-GAPS.md`: per-service image/version in
-history and the deploy summary, health latency and error detail in
+Tracked in muster-tui's `docs/ENGINE-GAPS.md`: health latency and error detail in
 `status`, `machine` on `fleet deploy --json` events,
 `cloud agents --json`, `doctor --fix --json` change reports, settings /
 config validation as JSON, and a TUI pairing command.

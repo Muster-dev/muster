@@ -23,6 +23,13 @@ muster deploy --dry-run api    # dry-run a single service
 muster deploy --json --stop-on-failure   # stop at first failure, rest reported not_run
 muster deploy --from web       # resume from web in deploy order
 muster deploy --no-preflight   # skip pre-deploy checks
+muster deploy api --strategy canary   # blue-green/canary/rolling for this run (k8s)
+muster deploy api --version v1.4.2    # version label (MUSTER_DEPLOY_VERSION); default tag/SHA
+muster deploy api --no-wait --json    # start a rollout, stop at the first step (paused, exit 0)
+muster rollout status [svc] [--watch] [--json]  # versions, replicas, traffic share, step/next gate
+muster promote <svc> [--to N|--full] [--yes] [--json]  # continue a paused rollout
+muster abort <svc> [--yes] [--json]   # 100% traffic back to stable, candidate to 0
+muster setup --update --strategy api=canary  # switch a service's strategy + regenerate hooks
 muster explain                 # explain the last failure (offline rules engine)
 muster explain api             # explain a service's newest log
 muster explain --log FILE      # explain any log (works outside a project)
@@ -92,16 +99,18 @@ muster --minimal deploy api   # build context warnings as stderr comments
 muster/
 ├── bin/muster                     ← entry point (routes commands, startup integrity check)
 ├── bin/muster-mcp                 ← MCP stdio transport (uses shared scanner)
-├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn
+├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn, rollout (+rollout_k8s)
 ├── lib/tui/                       ← menu, checklist, spinner, progress, streambox, dashboard, order
-├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart/history), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain
+├── lib/commands/                  ← setup (+setup_scan, setup_strategy), deploy, rollout (status/promote/abort), dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart/history), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain
 ├── lib/agent/muster-agent.sh     ← standalone fleet monitoring daemon (no lib dependencies)
 ├── lib/skills/manager.sh          ← skill lifecycle (reads name from skill.json)
 ├── templates/deploy.example.json  ← example config
 ├── templates/hooks/               ← stack-specific hook templates (k8s, compose, docker, bare, dev)
+│   ├── k8s/{blue-green,canary}/   ← strategy variants (target $MUSTER_TARGET_DEPLOYMENT, no manifest apply)
 │   ├── {k8s,compose,docker}/infra/ ← infrastructure service variants (pull-only, no build)
 │   └── dev/                       ← local dev stack (PID-managed processes, docker compose infra)
 ├── docs/ENGINE-API.md             ← --json contract (every command/event shape; muster-tui relies on it)
+├── docs/rollouts.md               ← blue-green / canary / version visibility (config, commands, k8s mechanics)
 ├── docs/troubleshooting.md        ← generated from the rule table (make docs)
 ├── docs/fleet/fleet.md            ← fleet deployment guide
 ├── docs/skills/skills.md          ← skill authoring guide
@@ -205,6 +214,10 @@ Deploy and rollback failures show interactive recovery menus instead of aborting
 **Dashboard** (`lib/tui/dashboard.sh`): Services panel auto-refreshes every 20s via `MENU_TIMEOUT=20` in menu.sh. Health check results are cached persistently in `~/.muster/.health_cache/` (not temp dir) so status survives across renders. Build context overlap detection runs on each refresh (cache-based — only re-scans when muster.json or .dockerignore changes). Shows warning banner and badges the Doctor menu item with `!` when issues found. `--minimal` mode outputs plain text service status and exits.
 
 **Interactive service selection:** `muster deploy` with >1 service in a TTY shows "All services" / "Select services" menu. "Select services" opens a checklist (`lib/tui/checklist.sh`). Non-interactive (scripts, CI) deploys all as before.
+
+## Rollouts (blue-green / canary)
+
+Per-service `"strategy"` in muster.json (`rolling` default, `blue-green`, `canary`; string shorthand allowed), validated by `_config_validate_strategies` (lib/core/config.sh). Phase 1 = Kubernetes only: `traffic` `service-selector` (blue-green) / `replicas` (canary); `gateway-api`, `ingress-nginx` and Docker proxies are reserved names that error. Hooks still build and point `$MUSTER_TARGET_DEPLOYMENT` (also exported as `MUSTER_K8S_DEPLOYMENT`) at `$MUSTER_IMAGE_TAG`; the engine (`lib/core/rollout.sh` config/version/render, `lib/core/rollout_k8s.sh` kubectl flows) scales the candidate, runs gates (`pod_stability`, `health.sh`), shifts traffic, and keeps state in `ConfigMap/muster-rollout-<deployment>`. Blue-green adopts `<deploy>` as `<deploy>-blue` on first deploy and swaps the Service selector `muster.dev/track`; canary scales `<deploy>-canary` vs `<deploy>` (target + effective weight). `deploy.sh` hands progressive services to `_deploy_rollout_one` → `_rollout_deploy` with the `_deploy_rollout_hook` callback. Paused rollouts exit 0 with result `paused`; `muster promote|abort` (lib/commands/rollout.sh) continue them; `muster rollback` aborts a live rollout or flips a completed blue-green back (`_rollout_rollback_mode`). Ctrl+C: the trap only sets `_MUSTER_CANCELLED`; `_ro_interrupted` checkpoints restore stable, emit `cancelled`, exit 130. `status --json` gains `version`/`image`/`revision`/`strategy`/`rollout` (`_rollout_snapshot`, also every live ReplicaSet for rolling). Tests: `tests/test_rollouts.sh` with `_mock_kube_cluster` (stateful fake kubectl in tests/mock_helpers.sh). Docs: docs/rollouts.md.
 
 ## Rules Engine, Preflight & Explain
 
