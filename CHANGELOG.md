@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-28
+
+### Fixed
+- `muster restart` (and `fleet restart`, `rollback --json`) waits up to 30 seconds (`MUSTER_HEALTH_WAIT`) for the service to come up before reporting it unhealthy, instead of checking once right after the restart.
+
 ## [0.7.1] - 2026-11-28
 
 ### Added
