@@ -560,6 +560,9 @@ _ro_bg_preview() {
 
 _ro_bg_deploy() {
   local svcj active cand adep cdep aj reps sv si
+  # Old colour kept warm past keep_old_seconds? Scale it down now.
+  if _ro_state_load; then _ro_bg_cleanup_due; fi
+  _RO_STATE=""
   svcj=$(_ro_get service "$_RO_KSVC") || { _ro_err "Service ${_RO_KSVC} not found in ${_RO_NS} (set k8s.service in muster.json)"; _RO_RESULT="failed"; return 1; }
   active=$(printf '%s' "$svcj" | jq -r '.spec.selector["muster.dev/track"] // empty')
   if [[ -z "$active" ]]; then

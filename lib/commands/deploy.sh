@@ -1078,6 +1078,11 @@ _deploy_main() {
       continue
     fi
     # A rolling deploy must not run over a paused blue-green/canary rollout
+    if [[ "$dry_run" == "false" && "$_force" == "true" ]] && _rollout_is_progressive "$svc" && ! _rollout_check_idle "$svc"; then
+      _RO_JSON="$_json_mode"
+      _ro_warn "--force: aborting the ${_RO_TYPE} rollout in progress for ${svc} first"
+      _rollout_abort_current user_abort || true
+    fi
     if [[ "$dry_run" == "false" ]] && _rollout_is_progressive "$svc" && ! _rollout_check_idle "$svc"; then
       err "${_RO_BUSY_MSG}" >&2
       [[ "$_json_mode" == "true" ]] && printf '{"event":"skipped","service":%s,"reason":"rollout_in_progress","message":%s}\n' \

@@ -275,6 +275,7 @@ cmd_status() {
         else
           stop_spinner
           printf '  %b●%b %s%s\n' "${RED}" "${RESET}" "$name" "$_remote_tag"
+          _status_rollout_lines "$svc" "$project_dir"
           # Plain-words reason from the rules engine (wrong port, 5xx, ...)
           declare -F hints_health >/dev/null 2>&1 || source "$MUSTER_ROOT/lib/core/hints.sh"
           if hints_health "$svc"; then

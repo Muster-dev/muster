@@ -130,6 +130,11 @@ case "$verb" in
   version|cluster-info) echo "fake"; exit 0 ;;
   get)
     k=$(kind_of "${pos[1]:-}") name="${pos[2]:-}"
+    case "$k" in namespace|namespaces|ns) echo "${name:-default}"; exit 0 ;; esac
+    if [[ "$k" == "hpa" || "$k" == "horizontalpodautoscalers" ]]; then
+      if [[ -f "$S/$ns/hpa.json" ]]; then cat "$S/$ns/hpa.json"; else echo '{"kind":"List","items":[]}'; fi
+      exit 0
+    fi
     if [[ "$k" == "pod" ]]; then
       shopt -s nullglob
       items="[]"

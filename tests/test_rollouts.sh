@@ -326,6 +326,42 @@ _test_eq "rolling summary has version + strategy" "v9 rolling" "$(printf '%s\n' 
 _test_eq "rolling summary has image" "registry/api:latest" "$(printf '%s\n' "$out" | jq -r 'select(.event == "summary") | .services[0].image')"
 
 # ─────────────────────────────────────────────
+echo "  Doctor: strategy prerequisites"
+_proj doc "$CANARY_MANUAL"
+out=$("$M" doctor --verbose 2>&1 </dev/null) || true
+_test_contains "doctor reports canary prerequisites" "canary prerequisites OK" "$out"
+printf '{"kind":"List","items":[{"spec":{"scaleTargetRef":{"name":"acme-api"}}}]}' > "$KUBE_STATE/prod/hpa.json"
+_token
+"$M" deploy api --version v2 --json --no-preflight >/dev/null 2>&1 || true
+out=$("$M" doctor 2>&1 </dev/null) || true
+_test_contains "doctor warns about HPA vs replica canary" "HPA scales acme-api" "$out"
+_test_contains "doctor flags the paused rollout" "rollout paused at 25%" "$out"
+
+# ─────────────────────────────────────────────
+echo "  Setup: --strategy and --update migration"
+_proj setup '"rolling"'
+rm -rf muster.json .muster
+"$M" setup --stack k8s --services api,web --namespace prod --strategy api=canary --name demo </dev/null >/dev/null 2>&1 || true
+_test_eq "fresh setup writes the strategy" "canary" "$(jq -r '.services.api.strategy.type' muster.json)"
+_test_contains "api gets the canary template" "canary (muster's rollout engine)" "$(cat .muster/hooks/api/deploy.sh)"
+_test_contains "canary template targets MUSTER_TARGET_DEPLOYMENT" 'MUSTER_TARGET_DEPLOYMENT' "$(cat .muster/hooks/api/deploy.sh)"
+_test_not_contains "web keeps the rolling template" "rollout engine" "$(cat .muster/hooks/web/deploy.sh)"
+echo "# my edit" >> .muster/hooks/web/deploy.sh
+out=$("$M" setup --update --strategy web=blue-green --strategy api=rolling </dev/null 2>&1) && rc=0 || rc=$?
+_test_eq "update exits 0" "0" "$rc"
+_test_eq "web switched to blue-green" "blue-green" "$(jq -r '.services.web.strategy.type' muster.json)"
+_test_eq "api back to rolling (strategy removed)" "null" "$(jq -r '.services.api.strategy' muster.json)"
+_test_contains "edited hook kept" "# my edit" "$(cat .muster/hooks/web/deploy.sh)"
+_test "strategy template written next to it" test -f .muster/hooks/web/deploy.sh.strategy-new
+_test_contains "unedited health hook regenerated" "blue-green" "$(cat .muster/hooks/web/health.sh)"
+_test_contains "api hooks back to rolling template" "Applying Kubernetes manifests" "$(cat .muster/hooks/api/deploy.sh)"
+_test_contains "notice explains .strategy-new" "strategy-new" "$out"
+_test_contains "tells you to approve hooks" "muster hooks approve" "$out"
+out=$("$M" setup --update --strategy web=canry </dev/null 2>&1) && rc=0 || rc=$?
+_test_eq "unknown strategy rejected" "1" "$rc"
+_test_contains "with did-you-mean" "canary" "$out"
+
+# ─────────────────────────────────────────────
 echo "  Commands and help"
 out=$("$M" promot 2>&1) && rc=0 || rc=$?
 _test_contains "did-you-mean for promote" "promote" "$out"
