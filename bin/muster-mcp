@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-# muster-mcp — MCP stdio transport for muster
-# Reads JSON-RPC from stdin, executes muster operations, returns JSON to stdout.
-# Requires: jq
+# muster-mcp — Model Context Protocol server for muster (stdio)
+#
+# Speaks JSON-RPC 2.0, one message per line, on stdin/stdout. Dual-era:
+#   * MCP 2026-07-28 (stateless): `server/discover`, every request carries
+#     _meta["io.modelcontextprotocol/protocolVersion"].
+#   * MCP 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05: `initialize`
+#     handshake with version negotiation, then plain requests.
+#
+# Every tool goes through muster's engine API (`muster … --json`, see
+# docs/ENGINE-API.md) with a local scoped token, so hook approvals, locks and
+# MUSTER_TOKEN scopes are enforced exactly as on the command line. Hooks are
+# never executed directly. All output passes through lib/core/redact.sh.
+#
+# Usage: muster-mcp [--project DIR] [--allow-actions] [--list-tools] [--help]
+# Docs:  docs/mcp.md
 set -uo pipefail
 
 MUSTER_VERSION="0.7.3"
@@ -16,947 +28,1485 @@ done
 MUSTER_ROOT="$(cd "$(dirname "$_muster_self")/.." && pwd)"
 unset _muster_self _muster_dir
 
-# ── Core libs (for config reading) ──
-source "$MUSTER_ROOT/lib/core/utils.sh"
-source "$MUSTER_ROOT/lib/core/config.sh"
-source "$MUSTER_ROOT/lib/core/platform.sh"
-source "$MUSTER_ROOT/lib/core/scanner.sh"
-source "$MUSTER_ROOT/lib/core/remote.sh"
+# GUI clients (Claude Desktop, Cursor) start servers with a minimal PATH:
+# make sure jq, openssl and friends from Homebrew are reachable.
+for _d in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+  case ":${PATH}:" in
+    *":${_d}:"*) ;;
+    *) [[ -d "$_d" ]] && PATH="${PATH:+${PATH}:}${_d}" ;;
+  esac
+done
+unset _d
+export PATH
 
-# ── Override EXIT trap — utils.sh writes ANSI to stdout which corrupts protocol ──
-trap 'true' EXIT
+MCP_MODERN_VERSION="2026-07-28"
+MCP_LEGACY_VERSIONS="2025-11-25 2025-06-18 2025-03-26 2024-11-05"
+MCP_LATEST_LEGACY="2025-11-25"
 
-# ── Require jq ──
-if ! command -v jq &>/dev/null; then
-  printf '{"jsonrpc":"2.0","error":{"code":-32603,"message":"jq is required for muster-mcp"},"id":null}\n'
+# ── Arguments ──
+MCP_PROJECT_ARG="${MUSTER_PROJECT:-}"
+MCP_ALLOW_ACTIONS=false
+case "${MUSTER_MCP_ALLOW_ACTIONS:-}" in 1 | true | yes | on) MCP_ALLOW_ACTIONS=true ;; esac
+MCP_LIST_TOOLS=false
+
+_mcp_usage() {
+  cat <<'EOF'
+muster-mcp — MCP server for muster (stdio, JSON-RPC 2.0)
+
+Usage: muster-mcp [--project DIR] [--allow-actions] [--read-only]
+
+  --project DIR     muster project to serve (default: $MUSTER_PROJECT, else cwd)
+  --allow-actions   enable deploy/rollback/restart/approve tools (deploy-scoped
+                    token); also MUSTER_MCP_ALLOW_ACTIONS=1
+  --read-only       force read-only even when MUSTER_MCP_ALLOW_ACTIONS is set
+  --list-tools      print the tool definitions as JSON and exit
+  --version         print the version
+
+Protocol: MCP 2026-07-28 (server/discover) and 2025-11-25 … 2024-11-05
+(initialize). Configure clients with: muster mcp install <client>
+Docs: docs/mcp.md
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project | -p)
+      [[ -z "${2:-}" ]] && { echo "muster-mcp: --project needs a directory" >&2; exit 2; }
+      MCP_PROJECT_ARG="$2"; shift 2 ;;
+    --project=*) MCP_PROJECT_ARG="${1#--project=}"; shift ;;
+    --allow-actions) MCP_ALLOW_ACTIONS=true; shift ;;
+    --read-only) MCP_ALLOW_ACTIONS=false; MUSTER_MCP_ALLOW_ACTIONS=""; shift ;;
+    --list-tools) MCP_LIST_TOOLS=true; shift ;;
+    --version | -v) echo "muster-mcp ${MUSTER_VERSION}"; exit 0 ;;
+    --help | -h) _mcp_usage; exit 0 ;;
+    *) echo "muster-mcp: unknown argument: $1 (see --help)" >&2; exit 2 ;;
+  esac
+done
+
+# ── Require jq (stdout is protocol: say it there too) ──
+if ! command -v jq >/dev/null 2>&1; then
+  printf '{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"jq is required for muster-mcp (brew install jq / apt install jq)"}}\n'
+  echo "[muster-mcp] jq is required" >&2
   exit 1
 fi
 
-# ── Logging (stderr only — stdout is protocol) ──
-_log() { echo "[muster-mcp] $*" >&2; }
+# ── Core libs ──
+# shellcheck source=/dev/null
+source "$MUSTER_ROOT/lib/core/utils.sh" >/dev/null 2>&1
+# shellcheck source=/dev/null
+source "$MUSTER_ROOT/lib/core/engine.sh"
+# shellcheck source=/dev/null
+source "$MUSTER_ROOT/lib/core/redact.sh"
+# shellcheck source=/dev/null
+source "$MUSTER_ROOT/lib/core/auth.sh"
+declare -f err >/dev/null 2>&1 || err() { echo "[muster-mcp] $*" >&2; }
+# utils.sh installs TUI traps; stdout is protocol here
+trap - WINCH INT
+trap 'true' EXIT
 
-# ── JSON helpers ──
-json_str() {
-  printf '%s' "$1" | jq -Rs .
+_mcp_log_stderr() { echo "[muster-mcp] $*" >&2; }
+
+# ── Project resolution ──
+MCP_CWD=""        # directory muster commands run in
+MCP_ROOT=""       # project root (dir of muster.json), "" when none
+MCP_CONFIG=""     # path to muster.json / deploy.json
+_mcp_resolve_project() {
+  local dir="${MCP_PROJECT_ARG:-$PWD}"
+  case "$dir" in "~"/*) dir="${HOME}/${dir#"~/"}" ;; esac
+  if [[ ! -d "$dir" ]]; then
+    _mcp_log_stderr "project directory not found: ${dir}"
+    MCP_CWD="$PWD"
+    return 0
+  fi
+  MCP_CWD="$(cd "$dir" && pwd)"
+  local cfg
+  cfg=$(cd "$MCP_CWD" && find_config 2>/dev/null) || cfg=""
+  if [[ -n "$cfg" ]]; then
+    MCP_CONFIG="$cfg"
+    MCP_ROOT="$(dirname "$cfg")"
+    MCP_CWD="$MCP_ROOT"
+  fi
+}
+_mcp_resolve_project
+
+# ── State (per server process) ──
+MCP_STATE="$(mktemp -d "${TMPDIR:-/tmp}/muster-mcp.XXXXXX")"
+mkdir -p "$MCP_STATE/req"
+MCP_SESSION_VERSION=""   # set by a legacy initialize
+MCP_LOG_LEVEL=""         # legacy logging/setLevel ("" = no notifications)
+MCP_TOKEN_READ=""
+MCP_TOKEN_DEPLOY=""
+MCP_USER_TOKEN="${MUSTER_TOKEN:-}"
+unset MUSTER_TOKEN MUSTER_APPROVE_HOOKS
+
+# ── Output (stdout is shared by background workers: one writer at a time) ──
+_mcp_lock() {
+  local n=0
+  while ! mkdir "$MCP_STATE/out.lock" 2>/dev/null; do
+    n=$((n + 1))
+    if ((n > 3000)); then
+      rmdir "$MCP_STATE/out.lock" 2>/dev/null || true
+      n=0
+    fi
+    sleep 0.01 2>/dev/null || sleep 1
+  done
+}
+_mcp_unlock() { rmdir "$MCP_STATE/out.lock" 2>/dev/null || true; }
+
+_mcp_send() {
+  _mcp_lock
+  printf '%s\n' "$1" >&3
+  _mcp_unlock
 }
 
-json_response() {
-  local id="$1" result="$2"
-  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+_mcp_server_info() {
+  printf '{"name":"muster","title":"Muster","version":"%s"}' "$MUSTER_VERSION"
 }
 
-json_error() {
-  local id="$1" code="$2" msg="$3"
-  printf '{"jsonrpc":"2.0","id":%s,"error":{"code":%s,"message":%s}}\n' "$id" "$code" "$(json_str "$msg")"
+# Result envelope. $3 = era (modern|legacy)
+_mcp_result_json() {
+  local id="$1" result="$2" era="${3:-legacy}"
+  if [[ "$era" == "modern" ]]; then
+    jq -cn --argjson id "$id" --argjson r "$result" --argjson si "$(_mcp_server_info)" \
+      '{jsonrpc: "2.0", id: $id, result: ($r + {resultType: ($r.resultType // "complete"), _meta: (($r._meta // {}) + {"io.modelcontextprotocol/serverInfo": $si})})}'
+  else
+    jq -cn --argjson id "$id" --argjson r "$result" '{jsonrpc: "2.0", id: $id, result: $r}'
+  fi
 }
 
-json_tool_result() {
-  local id="$1" text="$2"
-  local escaped
-  escaped=$(json_str "$text")
-  printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":%s}]}}\n' "$id" "$escaped"
+_mcp_error_json() {
+  local id="$1" code="$2" msg="$3" data="${4:-}"
+  if [[ -n "$data" ]]; then
+    jq -cn --argjson id "$id" --argjson c "$code" --arg m "$msg" --argjson d "$data" \
+      '{jsonrpc: "2.0", id: $id, error: {code: $c, message: $m, data: $d}}'
+  else
+    jq -cn --argjson id "$id" --argjson c "$code" --arg m "$msg" \
+      '{jsonrpc: "2.0", id: $id, error: {code: $c, message: $m}}'
+  fi
 }
 
-# ── In-memory credential storage (session-scoped, never written to disk) ──
-# Parallel arrays since bash 3.2 has no associative arrays
-_CRED_KEYS=()   # "service:KEY_NAME"
-_CRED_VALS=()   # "the_value"
+_mcp_respond() { _mcp_send "$(_mcp_result_json "$1" "$2" "${3:-legacy}")"; }
+_mcp_fail() { _mcp_send "$(_mcp_error_json "$@")"; }
 
-# ── Strip ANSI escape codes ──
-strip_ansi() {
-  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\[[0-9;]*m//g; s/\x1b(B//g'
+# ── Logging notifications ──
+_mcp_level_num() {
+  case "$1" in
+    debug) echo 0 ;; info) echo 1 ;; notice) echo 2 ;; warning) echo 3 ;;
+    error) echo 4 ;; critical) echo 5 ;; alert) echo 6 ;; emergency) echo 7 ;;
+    *) echo -1 ;;
+  esac
 }
+# Usage: _mcp_notify_log level message   (uses REQ_LOG_LEVEL / MCP_LOG_LEVEL)
+_mcp_notify_log() {
+  local level="$1" msg="$2" thr="${REQ_LOG_LEVEL:-$MCP_LOG_LEVEL}"
+  _mcp_log_stderr "${level}: ${msg}"
+  [[ -z "$thr" ]] && return 0
+  (($(_mcp_level_num "$level") >= $(_mcp_level_num "$thr"))) || return 0
+  _mcp_send "$(jq -cn --arg l "$level" --arg m "$msg" \
+    '{jsonrpc: "2.0", method: "notifications/message", params: {level: $l, logger: "muster", data: $m}}')"
+}
+
+# ── Progress (only when the request carried _meta.progressToken) ──
+REQ_PROGRESS=""
+REQ_PROGRESS_N=0
+_mcp_progress() {
+  [[ -z "$REQ_PROGRESS" ]] && return 0
+  local msg="$1" total="${2:-}"
+  REQ_PROGRESS_N=$((REQ_PROGRESS_N + 1))
+  [[ -f "$REQ_CANCEL_FILE" ]] && return 0
+  if [[ -n "$total" ]]; then
+    _mcp_send "$(jq -cn --argjson t "$REQ_PROGRESS" --argjson p "$REQ_PROGRESS_N" --argjson tot "$total" --arg m "$msg" \
+      '{jsonrpc: "2.0", method: "notifications/progress", params: {progressToken: $t, progress: $p, total: $tot, message: $m}}')"
+  else
+    _mcp_send "$(jq -cn --argjson t "$REQ_PROGRESS" --argjson p "$REQ_PROGRESS_N" --arg m "$msg" \
+      '{jsonrpc: "2.0", method: "notifications/progress", params: {progressToken: $t, progress: $p, message: $m}}')"
+  fi
+}
+
+# ── Local scoped tokens (like `muster ask`'s ~/.muster/assistant/local-token) ──
+# read  → "muster-mcp-read"   (~/.muster/mcp/read-token)
+# deploy→ "muster-mcp-deploy" (~/.muster/mcp/deploy-token, only with --allow-actions)
+_mcp_local_token() {
+  local scope="$1" name file tok hash
+  name="muster-mcp-${scope}"
+  file="$HOME/.muster/mcp/${scope}-token"
+  if [[ -f "$file" ]]; then
+    tok=$(cat "$file" 2>/dev/null)
+    if [[ -n "$tok" && -f "$MUSTER_TOKENS_FILE" ]]; then
+      hash=$(_auth_hash "$tok")
+      if jq -e --arg h "sha256:${hash}" --arg s "$scope" \
+        '.tokens[] | select(.token_hash == $h and .scope == $s)' "$MUSTER_TOKENS_FILE" >/dev/null 2>&1; then
+        printf '%s' "$tok"
+        return 0
+      fi
+    fi
+  fi
+  _auth_ensure_file
+  _auth_update_tokens --arg n "$name" 'del(.tokens[] | select(.name == $n))' >/dev/null 2>&1 || true
+  tok=$(_auth_create_token_internal "$name" "$scope" 2>/dev/null) || return 1
+  [[ -n "$tok" ]] || return 1
+  mkdir -p "$HOME/.muster/mcp"
+  chmod 700 "$HOME/.muster/mcp" 2>/dev/null || true
+  (umask 077 && printf '%s' "$tok" > "$file")
+  printf '%s' "$tok"
+}
+
+# Called in the main process before a worker starts (workers inherit it)
+_mcp_ensure_tokens() {
+  local need_deploy="${1:-false}"
+  [[ -n "$MCP_USER_TOKEN" ]] && return 0
+  if [[ -z "$MCP_TOKEN_READ" ]]; then
+    MCP_TOKEN_READ=$(_mcp_local_token read 2>/dev/null) || MCP_TOKEN_READ=""
+  fi
+  if [[ "$need_deploy" == "true" && "$MCP_ALLOW_ACTIONS" == "true" && -z "$MCP_TOKEN_DEPLOY" ]]; then
+    MCP_TOKEN_DEPLOY=$(_mcp_local_token deploy 2>/dev/null) || MCP_TOKEN_DEPLOY=""
+  fi
+}
+
+# ── Running muster ──
+_MCP_ANSI_RE=$'s/\033\\[[0-9;?]*[A-Za-z]//g; s/\033[()][A-Z0-9]//g'
+
+# Usage: _mcp_muster scope timeout out_file err_file args…  → muster's exit code
+_mcp_muster() {
+  local scope="$1" timeout="$2" out="$3" errf="$4"
+  shift 4
+  local tok="$MCP_TOKEN_READ"
+  [[ "$scope" == "deploy" ]] && tok="$MCP_TOKEN_DEPLOY"
+  [[ -n "$MCP_USER_TOKEN" ]] && tok="$MCP_USER_TOKEN"
+  local pids="${REQ_DIR:-$MCP_STATE}/muster.pids" tmark="${REQ_DIR:-$MCP_STATE}/timedout.$$"
+  rm -f "$tmark"
+  (
+    cd "$MCP_CWD" || exit 1
+    export NO_COLOR=1 MUSTER_MINIMAL=true MUSTER_NO_VERIFY=true MUSTER_DEPLOY_SOURCE="mcp"
+    unset MUSTER_APPROVE_HOOKS MUSTER_TOKEN
+    [[ -n "$tok" ]] && export MUSTER_TOKEN="$tok"
+    # muster runs as its own job so a cancel can SIGTERM it directly: its
+    # handlers stop the hook tree and release deploy/service locks.
+    set -m 2>/dev/null || true
+    "$MUSTER_ROOT/bin/muster" "$@" </dev/null &
+    mpid=$!
+    set +m 2>/dev/null || true
+    printf '%s\n' "$mpid" >>"$pids"
+    (
+      sleep "$timeout"
+      : >"$tmark"
+      kill -TERM -- "-$mpid" 2>/dev/null || kill -TERM "$mpid" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+    wpid=$!
+    wait "$mpid"
+    mrc=$?
+    _kill_tree "$wpid" 2>/dev/null
+    exit "$mrc"
+  ) >"$out" 2>"$errf" 3>&-
+  local rc=$?
+  if [[ -f "$tmark" ]]; then
+    rm -f "$tmark"
+    echo "muster-mcp: timed out after ${timeout}s" >>"$errf"
+    return 124
+  fi
+  return "$rc"
+}
+
+# Like _mcp_muster, but streams NDJSON events into progress notifications.
+_mcp_muster_stream() {
+  local scope="$1" timeout="$2" out="$3" errf="$4"
+  shift 4
+  local fifo="$REQ_DIR/stream.fifo" rc_file="$REQ_DIR/stream.rc" line msg
+  rm -f "$fifo" "$rc_file"
+  if ! mkfifo "$fifo"; then
+    _mcp_muster "$scope" "$timeout" "$out" "$errf" "$@"
+    echo $? >"$rc_file"
+    return 0
+  fi
+  (
+    _mcp_muster "$scope" "$timeout" "$fifo" "$errf" "$@"
+    echo $? >"$rc_file"
+  ) &
+  : >"$out"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s\n' "$line" >>"$out"
+    [[ -z "$REQ_PROGRESS" ]] && continue
+    case "$line" in
+      *'"event":"start"'* | *'"event":"done"'* | *'"event":"health"'* | *'"event":"dry_run"'* | *'"event":"error"'* | *'"event":"restart"'*)
+        msg=$(printf '%s' "$line" | jq -r '[.event, .service, (.status // .reason // .action // empty)] | map(select(. != null) | tostring) | join(" ")' 2>/dev/null)
+        [[ -n "$msg" ]] && _mcp_progress "$msg"
+        ;;
+    esac
+  done <"$fifo"
+  wait
+  rm -f "$fifo"
+  [[ -s "$rc_file" ]] || echo 1 >"$rc_file"
+}
+
+# Exit code of the last _mcp_muster_stream
+_mcp_stream_rc() { cat "$REQ_DIR/stream.rc" 2>/dev/null || echo 1; }
+
+# NDJSON file → JSON array of its objects (non-JSON lines are skipped)
+_mcp_ndjson() { jq -Rcn '[inputs | fromjson? | select(type == "object")]' "$1" 2>/dev/null || echo '[]'; }
+
+# Last {"error":…} document muster printed on stderr, or ""
+_mcp_err_doc() {
+  grep '^{.*"error"' "$1" 2>/dev/null | tail -1 | jq -c 'select(type == "object" and has("error"))' 2>/dev/null
+}
+
+# Human stderr (stripped, last N lines) as a JSON string array
+_mcp_err_lines() {
+  sed "$_MCP_ANSI_RE" "$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "${2:-20}" | jq -R . | jq -sc .
+}
+
+# ── Redaction (fails closed) ──
+_mcp_redact() {
+  local envf=""
+  [[ -n "$MCP_ROOT" && -f "$MCP_ROOT/.env" ]] && envf="$MCP_ROOT/.env"
+  redact_text "$envf"
+}
+
+# ── Validation ──
+_MCP_NAME_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$'
+
+# JSON Schema subset validator (type, properties, required,
+# additionalProperties:false, items, enum, pattern, minimum, maximum,
+# minItems, maxItems, minLength, maxLength, uniqueItems). Prints one
+# error per line; empty output = valid.
+# shellcheck disable=SC2016
+_MCP_VALIDATE_JQ='
+def tname: if type == "number" and . == floor then "integer" else type end;
+def ok($t): if $t == "number" then type == "number" elif $t == "integer" then (type == "number" and . == floor) else type == $t end;
+def v($s; $p):
+  . as $x
+  | if ($s.type != null) and (($x | ok($s.type)) | not) then
+      "\($p): expected \($s.type), got \($x | tname)"
+    else
+      ( if $s.enum != null and ([$s.enum[] | . == $x] | any | not) then "\($p): must be one of \($s.enum | map(tostring) | join(", "))" else empty end ),
+      ( if ($x | type) == "string" then
+          ( if $s.pattern != null and ($x | test($s.pattern) | not) then "\($p): invalid value \($x | tojson)" else empty end ),
+          ( if $s.maxLength != null and ($x | length) > $s.maxLength then "\($p): longer than \($s.maxLength) characters" else empty end ),
+          ( if $s.minLength != null and ($x | length) < $s.minLength then "\($p): shorter than \($s.minLength) characters" else empty end )
+        else empty end ),
+      ( if ($x | type) == "number" then
+          ( if $s.minimum != null and $x < $s.minimum then "\($p): must be >= \($s.minimum)" else empty end ),
+          ( if $s.maximum != null and $x > $s.maximum then "\($p): must be <= \($s.maximum)" else empty end )
+        else empty end ),
+      ( if ($x | type) == "array" then
+          ( if $s.minItems != null and ($x | length) < $s.minItems then "\($p): needs at least \($s.minItems) item(s)" else empty end ),
+          ( if $s.maxItems != null and ($x | length) > $s.maxItems then "\($p): at most \($s.maxItems) item(s)" else empty end ),
+          ( if $s.uniqueItems == true and ($x | length) != ($x | unique | length) then "\($p): items must be unique" else empty end ),
+          ( if $s.items != null then ($x | to_entries[] | .key as $i | .value | v($s.items; "\($p)[\($i)]")) else empty end )
+        else empty end ),
+      ( if ($x | type) == "object" then
+          ( ($s.required // [])[] | . as $k | select(($x | has($k)) | not) | "\($p == "" | if . then "" else "\($p)." end)\(.): required" ),
+          ( if $s.additionalProperties == false then
+              ($x | keys[]) | . as $k | select((($s.properties // {}) | has($k)) | not) | "unknown argument \($k | tojson)"
+            else empty end ),
+          ( $x | to_entries[] | .key as $k | select(($s.properties // {}) | has($k)) | .value | v($s.properties[$k]; $k) )
+        else empty end )
+    end;
+v($schema; "")
+'
 
 # ── Tool definitions ──
-TOOLS_JSON='[
-  {
-    "name": "muster_list_services",
-    "description": "List all configured services and their health check types",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        }
-      },
-      "required": ["project_dir"]
-    }
-  },
-  {
-    "name": "muster_status",
-    "description": "Check health status of all services. Returns each service as healthy, unhealthy, or no health check.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        }
-      },
-      "required": ["project_dir"]
-    }
-  },
-  {
-    "name": "muster_deploy",
-    "description": "Deploy services. Runs deploy hooks in configured order and verifies health after each.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        },
-        "service": {
-          "type": "string",
-          "description": "Service key to deploy. Omit to deploy all services."
-        }
-      },
-      "required": ["project_dir"]
-    }
-  },
-  {
-    "name": "muster_rollback",
-    "description": "Rollback a service to its previous state using the rollback hook.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        },
-        "service": {
-          "type": "string",
-          "description": "Service key to rollback"
-        }
-      },
-      "required": ["project_dir", "service"]
-    }
-  },
-  {
-    "name": "muster_logs",
-    "description": "Get recent deploy logs for a service.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        },
-        "service": {
-          "type": "string",
-          "description": "Service key to get logs for"
-        },
-        "lines": {
-          "type": "number",
-          "description": "Number of log lines to return (default: 50)"
-        }
-      },
-      "required": ["project_dir", "service"]
-    }
-  },
-  {
-    "name": "muster_cleanup",
-    "description": "Clean up old deploy logs and run cleanup hooks for all services.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        }
-      },
-      "required": ["project_dir"]
-    }
-  },
-  {
-    "name": "muster_config",
-    "description": "Get the full muster.json configuration for the project.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        }
-      },
-      "required": ["project_dir"]
-    }
-  },
-  {
-    "name": "muster_scan_project",
-    "description": "Scan a project directory and detect what services might be needed based on files found (Dockerfile, docker-compose.yml, package.json, go.mod, Cargo.toml, requirements.txt, etc). Use this to help users figure out what services to configure.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory to scan"
-        }
-      },
-      "required": ["project_dir"]
-    }
-  },
-  {
-    "name": "muster_init_project",
-    "description": "Create or update muster.json for a project. Provide the full JSON config as a string. Also creates .muster/hooks/<service>/ directories and .muster/logs/. Updates .gitignore to exclude .muster/logs/.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory"
-        },
-        "config": {
-          "type": "string",
-          "description": "The full muster.json content as a JSON string"
-        }
-      },
-      "required": ["project_dir", "config"]
-    }
-  },
-  {
-    "name": "muster_write_hook",
-    "description": "Write a hook script for a service. Creates the hook directory if needed and makes the script executable. Hook types: deploy.sh, health.sh, rollback.sh, logs.sh, cleanup.sh.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        },
-        "service": {
-          "type": "string",
-          "description": "Service key (e.g. api, redis, postgres)"
-        },
-        "hook": {
-          "type": "string",
-          "description": "Hook filename: deploy.sh, health.sh, rollback.sh, logs.sh, or cleanup.sh"
-        },
-        "content": {
-          "type": "string",
-          "description": "The bash script content for the hook"
-        }
-      },
-      "required": ["project_dir", "service", "hook", "content"]
-    }
-  },
-  {
-    "name": "muster_read_hook",
-    "description": "Read the contents of a hook script for a service. Returns the script content or indicates the hook does not exist.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory containing muster.json"
-        },
-        "service": {
-          "type": "string",
-          "description": "Service key (e.g. api, redis, postgres)"
-        },
-        "hook": {
-          "type": "string",
-          "description": "Hook filename: deploy.sh, health.sh, rollback.sh, logs.sh, or cleanup.sh"
-        }
-      },
-      "required": ["project_dir", "service", "hook"]
-    }
-  },
-  {
-    "name": "muster_set_credential",
-    "description": "Store a credential for a service in memory for this session. Credentials are passed to hook scripts as MUSTER_CRED_<KEY> environment variables during deploy and rollback. Never written to disk or logged. Use for passwords, API keys, tokens, etc.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory"
-        },
-        "service": {
-          "type": "string",
-          "description": "Service key (e.g. api, redis, postgres)"
-        },
-        "key": {
-          "type": "string",
-          "description": "Credential key name (e.g. SSH_PASSWORD, DB_PASSWORD, API_KEY). Will be available as MUSTER_CRED_<KEY> in hooks."
-        },
-        "value": {
-          "type": "string",
-          "description": "The credential value (password, token, etc.)"
-        }
-      },
-      "required": ["project_dir", "service", "key", "value"]
-    }
-  },
-  {
-    "name": "muster_list_credentials",
-    "description": "List what credential keys are stored for each service. Shows key names only, never values.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory"
-        }
-      },
-      "required": ["project_dir"]
-    }
-  },
-  {
-    "name": "muster_clear_credentials",
-    "description": "Wipe all stored credentials from memory.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "project_dir": {
-          "type": "string",
-          "description": "Path to the project directory"
-        }
-      },
-      "required": ["project_dir"]
-    }
-  }
-]'
+# shellcheck disable=SC2016
+_MCP_TOOLS_JQ='
+def svc: {type: "string", pattern: $name_re, description: "Service key from muster.json (see project_info)"};
+def svcs: {type: "array", items: svc, minItems: 1, maxItems: 50, uniqueItems: true};
+def target: {type: "string", pattern: $name_re, description: "Fleet server or group name (see fleet_list)"};
+def server: {type: "string", pattern: $name_re, description: "Fleet server name (see fleet_list)"};
+def tail: {type: "integer", minimum: 1, maximum: 1000, default: 100, description: "Number of log lines (1-1000, default 100)"};
+def obj($props; $req): {type: "object", properties: $props, required: $req, additionalProperties: false};
+def out($props): {type: "object", properties: $props};
+def ro($title; $open): {title: $title, readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: $open};
+def act($title; $destructive; $idem): {title: $title, readOnlyHint: false, destructiveHint: $destructive, idempotentHint: $idem, openWorldHint: true};
+def events_out: out({events: {type: "array", items: {type: "object"}}, log_tail: {type: "array", items: {type: "string"}}, summary: {type: ["object", "null"]}, error: {type: ["object", "null"]}, exit_code: {type: "integer"}});
+def text_out: out({target: {type: "string"}, exit_code: {type: "integer"}, output: {type: "array", items: {type: "string"}}});
+[
+  {name: "project_info", title: "Project info",
+   description: "Summary of the muster project this server is attached to: name, root, services (name, health check, stack, remote, hooks present), deploy order, whether a fleet is configured and whether action tools are enabled. Call this first.",
+   inputSchema: obj({}; []), annotations: ro("Project info"; false),
+   outputSchema: out({found: {type: "boolean"}, project: {type: ["string", "null"]}, root: {type: ["string", "null"]}, services: {type: "array"}, deploy_order: {type: "array"}, actions_enabled: {type: "boolean"}})},
+  {name: "status", title: "Service health",
+   description: "Run every service health check (or only the given services) and report healthy/unhealthy/disabled, last deploy, locks and k8s replicas. Same as `muster status --json`.",
+   inputSchema: obj({services: (svcs + {description: "Only these services (default: all)"})}; []), annotations: ro("Service health"; true),
+   outputSchema: out({project: {type: "string"}, checked_at: {type: "string"}, deploying: {type: "boolean"}, services: {type: "object"}})},
+  {name: "logs", title: "Service logs",
+   description: "Last N log lines of a service from its stack (kubectl, docker compose, docker, dev log file, logs hook or latest deploy log). Same as `muster logs <service> --tail N --json`. Secrets are redacted.",
+   inputSchema: obj({service: svc, tail: tail}; ["service"]), annotations: ro("Service logs"; true),
+   outputSchema: out({service: {type: "string"}, source: {type: ["string", "null"]}, lines: {type: "array", items: {type: "string"}}, exit_code: {type: ["integer", "null"]}})},
+  {name: "history", title: "Deploy history",
+   description: "Deploy, rollback and restart events, oldest first (last 20 unless all=true). Optionally for one service.",
+   inputSchema: obj({service: svc, all: {type: "boolean", default: false, description: "Full history instead of the last 20 events"}}; []), annotations: ro("Deploy history"; false),
+   outputSchema: out({entries: {type: "array", items: {type: "object"}}})},
+  {name: "explain", title: "Explain failure",
+   description: "Explain the most recent failure (or a service'"'"'s newest log) with muster'"'"'s offline rules engine: likely cause, what to try, and a suggested fix (never run automatically). Same as `muster explain --json`.",
+   inputSchema: obj({service: svc}; []), annotations: ro("Explain failure"; false),
+   outputSchema: out({service: {type: ["string", "null"]}, matched: {type: "boolean"}, hint: {type: ["object", "null"]}})},
+  {name: "doctor", title: "Project diagnostics",
+   description: "Run muster doctor: configuration, platform tools, hooks, deploy readiness, storage and fleet checks with pass/warn/fail and which ones `muster doctor --fix` can repair. Read-only.",
+   inputSchema: obj({}; []), annotations: ro("Project diagnostics"; true),
+   outputSchema: out({pass: {type: "integer"}, warnings: {type: "integer"}, failures: {type: "integer"}, checks: {type: "array"}})},
+  {name: "hooks_status", title: "Hook approvals",
+   description: "Approval state of every hook file, muster.json and .env on this machine. `pending` lists what a deploy would stop on; `dangerous` flags risky lines. Use before deploy; approve with hooks_approve only after a human reviewed the changes.",
+   inputSchema: obj({}; []), annotations: ro("Hook approvals"; false),
+   outputSchema: out({approved: {type: "boolean"}, security_enabled: {type: "boolean"}, files: {type: "array"}, pending: {type: "array"}})},
+  {name: "setup_preview", title: "Setup preview",
+   description: "Scan a directory (default: this project) and report what `muster setup --scan` would configure: stack, services, health checks, deploy order. Writes nothing.",
+   inputSchema: obj({path: {type: "string", minLength: 1, maxLength: 1024, description: "Directory to scan (absolute or relative to the project)"}, stack: {type: "string", enum: ["k8s", "compose", "docker", "dev", "bare"]}, namespace: {type: "string", pattern: $name_re}}; []),
+   annotations: ro("Setup preview"; true),
+   outputSchema: out({dry_run: {type: "boolean"}, stack: {type: ["string", "null"]}, services: {type: "array"}, deploy_order: {type: "array"}, warnings: {type: "array"}})},
+  {name: "config_get", title: "Read muster.json",
+   description: "The project'"'"'s muster.json with credentials and env values removed and secrets redacted.",
+   inputSchema: obj({}; []), annotations: ro("Read muster.json"; false),
+   outputSchema: out({config: {type: "object"}})},
+  {name: "fleet_list", title: "Fleet servers",
+   description: "Fleet servers and groups (remotes.json or fleet directories): host, transport (ssh/cloud), mode (muster/push), pairing.",
+   inputSchema: obj({}; []), annotations: ro("Fleet servers"; false),
+   outputSchema: out({source: {type: "string"}, machines: {type: "array"}, groups: {type: "array"}})},
+  {name: "fleet_status", title: "Fleet health",
+   description: "Health of every service on each fleet server (or one server/group).",
+   inputSchema: obj({target: target}; []), annotations: ro("Fleet health"; true),
+   outputSchema: out({status: {type: "array"}})},
+  {name: "fleet_test", title: "Fleet connectivity",
+   description: "Test SSH / Fleet Cloud connectivity and muster on each server (or one server/group): ok, latency, error.",
+   inputSchema: obj({target: target}; []), annotations: ro("Fleet connectivity"; true),
+   outputSchema: out({servers: {type: "array"}, passed: {type: "integer"}, failed: {type: "integer"}})},
+  {name: "fleet_logs", title: "Fleet server logs",
+   description: "Last N log lines of a service on a fleet server. Secrets are redacted.",
+   inputSchema: obj({server: server, service: (svc + {description: "Service key on that server"}), tail: tail}; ["server", "service"]),
+   annotations: ro("Fleet server logs"; true),
+   outputSchema: out({server: {type: "string"}, service: {type: "string"}, lines: {type: "array", items: {type: "string"}}, exit_code: {type: ["integer", "null"]}})},
+  {name: "fleet_history", title: "Fleet server history",
+   description: "Deploy history recorded on a muster-mode fleet server (optionally one service).",
+   inputSchema: obj({server: server, service: svc, all: {type: "boolean", default: false}}; ["server"]),
+   annotations: ro("Fleet server history"; true),
+   outputSchema: out({server: {type: "string"}, entries: {type: "array"}})},
+  {name: "deploy", title: "Deploy services",
+   description: "Deploy services in deploy order, stopping at the first failure. Defaults to dry_run=true (shows the plan, runs nothing); pass dry_run=false to really deploy. Name services explicitly or pass all=true. Unapproved or changed hooks block the deploy (see hooks_status). Requires the server to run with --allow-actions.",
+   inputSchema: obj({services: (svcs + {description: "Services to deploy"}), all: {type: "boolean", description: "Deploy every service (instead of naming them)"}, dry_run: {type: "boolean", default: true, description: "Preview only (default true)"}, stop_on_failure: {type: "boolean", default: true}}; []),
+   annotations: act("Deploy services"; true; false), outputSchema: events_out},
+  {name: "rollback", title: "Roll back a service",
+   description: "Roll a service back with its rollback hook, then check health. Requires --allow-actions; unapproved hooks block it.",
+   inputSchema: obj({service: svc}; ["service"]), annotations: act("Roll back a service"; true; false), outputSchema: events_out},
+  {name: "restart", title: "Restart a service",
+   description: "Restart a service without redeploying (restart hook, kubectl rollout restart, docker compose restart or docker restart; bare/dev services are redeployed). Requires --allow-actions.",
+   inputSchema: obj({service: svc}; ["service"]), annotations: act("Restart a service"; true; false), outputSchema: events_out},
+  {name: "hooks_approve", title: "Approve hooks",
+   description: "Approve pending (new or changed) hooks on this machine so deploys may run them. Only call after the user reviewed the diff (hooks_status shows what is pending). Name services or pass all=true. Hooks with dangerous patterns are refused. Requires --allow-actions.",
+   inputSchema: obj({services: svcs, all: {type: "boolean", description: "Approve everything pending, including muster.json and .env"}}; []),
+   annotations: (act("Approve hooks"; false; true) + {openWorldHint: false}),
+   outputSchema: out({ok: {type: "boolean"}, count: {type: "integer"}, approved: {type: "array"}})},
+  {name: "fleet_deploy", title: "Fleet deploy",
+   description: "Deploy this project to a fleet server or group. Defaults to dry_run=true (plan only). Requires --allow-actions.",
+   inputSchema: obj({target: target, dry_run: {type: "boolean", default: true}}; ["target"]),
+   annotations: act("Fleet deploy"; true; false), outputSchema: text_out},
+  {name: "fleet_rollback", title: "Fleet rollback",
+   description: "Roll back services on a fleet server or group (default: every service in deploy order). Requires --allow-actions.",
+   inputSchema: obj({target: target, services: svcs}; ["target"]),
+   annotations: act("Fleet rollback"; true; false), outputSchema: text_out},
+  {name: "fleet_restart", title: "Fleet restart",
+   description: "Restart services on a fleet server (default: deploy order). Restart hooks must be approved on the server. Requires --allow-actions.",
+   inputSchema: obj({server: server, services: svcs}; ["server"]),
+   annotations: act("Fleet restart"; true; false), outputSchema: out({server: {type: "string"}, results: {type: "array"}})}
+]
+| map(. + {_action: (.annotations.readOnlyHint | not)})
+'
 
-# ── Load config for a project dir ──
-load_project_config() {
-  local dir="$1"
-  if [[ -f "${dir}/muster.json" ]]; then
-    CONFIG_FILE="${dir}/muster.json"
-    return 0
+MCP_TOOLS_ALL=$(jq -cn --arg name_re "$_MCP_NAME_RE" "$_MCP_TOOLS_JQ") || {
+  _mcp_log_stderr "internal error: tool definitions"
+  exit 1
+}
+MCP_TOOLS_LIST=$(printf '%s' "$MCP_TOOLS_ALL" | jq -c --argjson allow "$MCP_ALLOW_ACTIONS" '
+  map(if ._action and ($allow | not) then .description += " [Disabled: start muster-mcp with --allow-actions to enable.]" else . end | del(._action))')
+
+if [[ "$MCP_LIST_TOOLS" == "true" ]]; then
+  printf '%s\n' "$MCP_TOOLS_LIST" | jq .
+  rm -rf "$MCP_STATE"
+  exit 0
+fi
+
+# Protocol goes to fd 3; anything else that reaches stdout lands on stderr
+exec 3>&1 1>&2
+
+MCP_INSTRUCTIONS="Muster deploys, checks and rolls back the services of one project (and its fleet servers). Start with project_info. Read tools (status, logs, history, explain, doctor, hooks_status, fleet_*) are safe. Action tools (deploy, rollback, restart, hooks_approve, fleet_deploy/rollback/restart) change running systems: deploy and fleet_deploy default to dry_run, and you should confirm with the user before running anything for real. Never approve hooks the user has not reviewed."
+
+# ── Small helpers used by tools ──
+
+_mcp_need_project() {
+  if [[ -z "$MCP_CONFIG" ]]; then
+    jq -cn --arg d "$MCP_CWD" '{error: "no_project", message: ("No muster project (muster.json) found in " + $d + ". Start muster-mcp with --project <dir> or set MUSTER_PROJECT.")}'
+    return 1
   fi
-  if [[ -f "${dir}/deploy.json" ]]; then
-    CONFIG_FILE="${dir}/deploy.json"
-    return 0
-  fi
-  return 1
 }
 
-# ── Tool implementations ──
+_mcp_services() { jq -r '.services // {} | keys[]' "$MCP_CONFIG" 2>/dev/null; }
 
-tool_list_services() {
-  local dir="$1"
-  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
+_mcp_check_service() {
+  local s="$1"
+  if [[ ! "$s" =~ $_MCP_NAME_RE ]] || ! _mcp_services | grep -qxF -- "$s"; then
+    jq -cn --arg s "$s" --argjson known "$(_mcp_services | jq -R . | jq -sc .)" \
+      '{error: "unknown_service", message: ("Unknown service " + ($s | tojson) + ". Known services: " + ($known | join(", "))), known: $known}'
+    return 1
+  fi
+}
 
-  local output=""
-  local services
-  services=$(config_services)
+# Fleet names: "machines\ngroups" via fleet list --json
+_mcp_check_fleet_name() {
+  local name="$1" kind="${2:-target}" out="$REQ_DIR/fl.out" errf="$REQ_DIR/fl.err" rc=0 known
+  _mcp_muster read 30 "$out" "$errf" fleet list --json || rc=$?
+  if ((rc != 0)) || ! jq -e . "$out" >/dev/null 2>&1; then
+    jq -cn '{error: "no_fleet", message: "No fleet configured for this project (muster fleet init / muster fleet add)."}'
+    return 1
+  fi
+  if [[ "$kind" == "server" ]]; then
+    known=$(jq -c '[.machines[].name]' "$out")
+  else
+    known=$(jq -c '[.machines[].name] + [.groups[].name] | unique' "$out")
+  fi
+  if ! printf '%s' "$known" | jq -e --arg n "$name" 'index($n) != null' >/dev/null; then
+    jq -cn --arg n "$name" --arg k "$kind" --argjson known "$known" \
+      '{error: "unknown_server", message: ("Unknown fleet " + $k + " " + ($n | tojson) + ". Known: " + ($known | join(", "))), known: $known}'
+    return 1
+  fi
+}
 
-  while IFS= read -r svc; do
-    [[ -z "$svc" ]] && continue
-    local name health_type
-    name=$(config_get ".services.${svc}.name")
-    health_type=$(config_get ".services.${svc}.health.type")
-    local has_deploy="false" has_rollback="false" has_logs="false"
-    [[ -x "${dir}/.muster/hooks/${svc}/deploy.sh" ]] && has_deploy="true"
-    [[ -x "${dir}/.muster/hooks/${svc}/rollback.sh" ]] && has_rollback="true"
-    [[ -x "${dir}/.muster/hooks/${svc}/logs.sh" ]] && has_logs="true"
-    local remote_info=""
-    if remote_is_enabled "$svc"; then
-      local r_host r_user
-      r_host=$(config_get ".services.${svc}.remote.host")
-      r_user=$(config_get ".services.${svc}.remote.user")
-      remote_info=", remote: ${r_user}@${r_host}"
-    fi
-    output="${output}${svc}: ${name} (health: ${health_type}, deploy: ${has_deploy}, rollback: ${has_rollback}, logs: ${has_logs}${remote_info})\n"
-  done <<< "$services"
+# Turn a failed muster run into a tool error document
+_mcp_cmd_error() {
+  local out="$1" errf="$2" rc="$3" doc
+  doc=$(_mcp_err_doc "$errf")
+  [[ -z "$doc" ]] && doc=$(jq -c 'select(type == "object" and has("error"))' "$out" 2>/dev/null | tail -1)
+  if [[ -n "$doc" ]]; then
+    printf '%s' "$doc" | jq -c --argjson rc "$rc" '. + {exit_code: $rc}'
+  else
+    jq -cn --argjson rc "$rc" --argjson lines "$(_mcp_err_lines "$errf")" \
+      '{error: "command_failed", message: ("muster exited " + ($rc | tostring) + (if ($lines | length) > 0 then ": " + $lines[-1] else "" end)), exit_code: $rc, stderr: $lines}'
+  fi
+}
 
-  printf '%b' "$output"
+# Summarise an NDJSON event stream (deploy / rollback / restart)
+_mcp_events_doc() {
+  local out="$1" rc="$2"
+  _mcp_ndjson "$out" | jq -c --argjson rc "$rc" '
+    . as $all
+    | {events: [$all[] | select(.event != "log")],
+       log_tail: ([$all[] | select(.event == "log") | "\(.service): \(.line)"] | .[-60:]),
+       summary: ([$all[] | select(.event == "summary")] | last // null),
+       error: ([$all[] | select(.event == "error")] | first // null),
+       exit_code: $rc}' 2>/dev/null
+}
+
+_mcp_actions_disabled() {
+  jq -cn --arg t "$1" '{error: "actions_disabled",
+    message: ("The " + $t + " tool changes running systems and is disabled: this muster MCP server is read-only. To enable action tools, restart it with `muster-mcp --allow-actions` (or set MUSTER_MCP_ALLOW_ACTIONS=1), e.g. `muster mcp install <client> --allow-actions`. Hook approvals and token scopes still apply.")}'
+}
+
+_arg() { printf '%s' "$REQ_ARGS" | jq -r --arg k "$1" '.[$k] // empty | if type == "array" then .[] else tostring end'; }
+_arg_bool() {
+  local v
+  v=$(printf '%s' "$REQ_ARGS" | jq -r --arg k "$1" 'if has($k) then .[$k] | tostring else empty end')
+  printf '%s' "${v:-$2}"
+}
+
+# ── Tools (print a JSON document; return 0 ok, 1 tool error) ──
+
+tool_project_info() {
+  if [[ -z "$MCP_CONFIG" ]]; then
+    jq -cn --arg d "$MCP_CWD" --argjson allow "$MCP_ALLOW_ACTIONS" --arg v "$MUSTER_VERSION" \
+      '{found: false, project: null, root: null, cwd: $d, muster_version: $v, services: [], deploy_order: [], actions_enabled: $allow,
+        message: "No muster.json here. Use setup_preview to see what muster setup would configure, or restart the server with --project <dir>."}'
+    return 0
+  fi
+  local hooks_tsv="" s f fleet=false
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    for f in "$MCP_ROOT/.muster/hooks/$s"/*; do
+      [[ -f "$f" ]] && hooks_tsv="${hooks_tsv}${s}	${f##*/}
+"
+    done
+  done < <(_mcp_services)
+  [[ -f "$MCP_ROOT/remotes.json" || -d "$HOME/.muster/fleets" ]] && fleet=true
+  printf '%s' "$hooks_tsv" | jq -R 'split("\t")' | jq -sc . >"$REQ_DIR/hooks.json"
+  jq -c --arg root "$MCP_ROOT" --arg cfg "$MCP_CONFIG" --arg v "$MUSTER_VERSION" \
+    --argjson allow "$MCP_ALLOW_ACTIONS" --argjson fleet "$fleet" --slurpfile hk "$REQ_DIR/hooks.json" '
+    ($hk[0] | map(select(length == 2)) | group_by(.[0]) | map({key: .[0][0], value: map(.[1])}) | from_entries) as $hooks
+    | {found: true, project: (.project // .name // ($root | split("/") | last)), root: $root,
+       config_file: ($cfg | split("/") | last), muster_version: $v,
+       services: [(.services // {}) | to_entries[] | {
+         key, name: (.value.name // .key),
+         health: (if .value.health == null then null else {type: .value.health.type, enabled: (.value.health.enabled != false)} end),
+         skip_deploy: (.value.skip_deploy == true),
+         remote: (if .value.remote.enabled == true then "\(.value.remote.user // "")@\(.value.remote.host // "")" else null end),
+         k8s: (.value.k8s // null),
+         hooks: ($hooks[.key] // [])}],
+       deploy_order: (.deploy_order // ((.services // {}) | keys)),
+       fleet_configured: $fleet, actions_enabled: $allow,
+       resources: ["muster://project", "muster://config", "muster://history", "muster://fleet", "muster://services/{name}", "muster://logs/{service}"]}' "$MCP_CONFIG"
 }
 
 tool_status() {
-  local dir="$1"
-  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
-
-  local output=""
-  local services
-  services=$(config_services)
-
-  while IFS= read -r svc; do
-    [[ -z "$svc" ]] && continue
-    local name
-    name=$(config_get ".services.${svc}.name")
-    local hook="${dir}/.muster/hooks/${svc}/health.sh"
-
-    if [[ -x "$hook" ]]; then
-      if "$hook" &>/dev/null; then
-        output="${output}${svc} (${name}): HEALTHY\n"
-      else
-        output="${output}${svc} (${name}): UNHEALTHY\n"
-      fi
-    else
-      output="${output}${svc} (${name}): NO HEALTH CHECK\n"
-    fi
-  done <<< "$services"
-
-  printf '%b' "$output"
-}
-
-tool_deploy() {
-  local dir="$1" target="${2:-all}"
-  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
-
-  local log_dir="${dir}/.muster/logs"
-  mkdir -p "$log_dir"
-
-  local services=()
-  if [[ "$target" == "all" ]]; then
-    while IFS= read -r svc; do
-      [[ -z "$svc" ]] && continue
-      local skip
-      skip=$(config_get ".services.${svc}.skip_deploy")
-      [[ "$skip" == "true" ]] && continue
-      services[${#services[@]}]="$svc"
-    done < <(config_get '.deploy_order[]' 2>/dev/null || config_services)
-  else
-    services[0]="$target"
-  fi
-
-  local output=""
-  for svc in "${services[@]}"; do
-    local name
-    name=$(config_get ".services.${svc}.name")
-    local hook="${dir}/.muster/hooks/${svc}/deploy.sh"
-
-    if [[ ! -x "$hook" ]]; then
-      output="${output}${svc} (${name}): SKIPPED (no deploy hook)\n"
-      continue
-    fi
-
-    local log_file
-    log_file="${log_dir}/${svc}-deploy-$(date +%Y%m%d-%H%M%S).log"
-    _export_creds_for_service "$svc"
-    if "$hook" >> "$log_file" 2>&1; then
-      output="${output}${svc} (${name}): DEPLOYED"
-      # Health check
-      local health_hook="${dir}/.muster/hooks/${svc}/health.sh"
-      if [[ -x "$health_hook" ]]; then
-        if "$health_hook" &>/dev/null; then
-          output="${output} — HEALTHY\n"
-        else
-          output="${output} — HEALTH CHECK FAILED\n"
-        fi
-      else
-        output="${output}\n"
-      fi
-    else
-      output="${output}${svc} (${name}): DEPLOY FAILED (exit code $?)\n"
-    fi
-    _unexport_creds_for_service "$svc"
-  done
-
-  printf '%b' "$output"
-}
-
-tool_rollback() {
-  local dir="$1" target="$2"
-  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
-
-  local hook="${dir}/.muster/hooks/${target}/rollback.sh"
-  if [[ ! -x "$hook" ]]; then
-    echo "No rollback hook for ${target}"
+  _mcp_need_project || return 1
+  local s want=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    _mcp_check_service "$s" || return 1
+    want[${#want[@]}]="$s"
+  done < <(_arg services)
+  _mcp_progress "checking health"
+  _mcp_muster read 120 "$out" "$errf" status --json || rc=$?
+  if ! jq -e 'type == "object"' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
     return 1
   fi
-
-  local name
-  name=$(config_get ".services.${target}.name")
-  local log_dir="${dir}/.muster/logs"
-  mkdir -p "$log_dir"
-  local log_file
-  log_file="${log_dir}/${target}-rollback-$(date +%Y%m%d-%H%M%S).log"
-
-  _export_creds_for_service "$target"
-  if "$hook" >> "$log_file" 2>&1; then
-    echo "${target} (${name}): ROLLED BACK"
+  if ((${#want[@]} > 0)); then
+    jq -c --argjson w "$(printf '%s\n' "${want[@]}" | jq -R . | jq -sc .)" \
+      '.services |= with_entries(select(.key as $k | $w | index($k)))' "$out"
   else
-    echo "${target} (${name}): ROLLBACK FAILED (exit code $?)"
+    jq -c . "$out"
   fi
-  _unexport_creds_for_service "$target"
 }
 
 tool_logs() {
-  local dir="$1" target="$2" lines="${3:-50}"
-  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
-
-  local log_dir="${dir}/.muster/logs"
-  local latest
-  latest=$(ls -t "${log_dir}/${target}-"*.log 2>/dev/null | head -1)
-
-  if [[ -n "$latest" ]]; then
-    echo "=== $(basename "$latest") ==="
-    tail -n "$lines" "$latest" | strip_ansi
-  else
-    echo "No logs found for ${target}"
-  fi
-}
-
-tool_cleanup() {
-  local dir="$1"
-  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
-
-  local output=""
-  local services
-  services=$(config_services)
-
-  while IFS= read -r svc; do
-    [[ -z "$svc" ]] && continue
-    local hook="${dir}/.muster/hooks/${svc}/cleanup.sh"
-    if [[ -x "$hook" ]]; then
-      local name
-      name=$(config_get ".services.${svc}.name")
-      "$hook" &>/dev/null
-      output="${output}${name}: cleaned up\n"
-    fi
-  done <<< "$services"
-
-  local log_dir="${dir}/.muster/logs"
-  if [[ -d "$log_dir" ]]; then
-    local old_logs
-    old_logs=$(find "$log_dir" -name "*.log" -mtime +7 2>/dev/null | wc -l | tr -d ' ')
-    if (( old_logs > 0 )); then
-      find "$log_dir" -name "*.log" -mtime +7 -delete 2>/dev/null
-      output="${output}Removed ${old_logs} old log files\n"
-    fi
-  fi
-
-  [[ -z "$output" ]] && output="Nothing to clean up\n"
-  printf '%b' "$output"
-}
-
-tool_config() {
-  local dir="$1"
-  load_project_config "$dir" || { echo "No muster.json found in ${dir}"; return 1; }
-  cat "$CONFIG_FILE"
-}
-
-tool_scan_project() {
-  local dir="$1"
-  if [[ ! -d "$dir" ]]; then
-    echo "Directory not found: ${dir}"
+  _mcp_need_project || return 1
+  local svc tail out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  svc=$(_arg service)
+  tail=$(_arg tail)
+  _mcp_check_service "$svc" || return 1
+  _mcp_muster read 60 "$out" "$errf" logs "$svc" --json --tail "${tail:-100}" || rc=$?
+  if ! _mcp_ndjson "$out" | jq -e 'map(select(.event == "log")) | length > 0' >/dev/null 2>&1 && ((rc != 0)); then
+    _mcp_cmd_error "$out" "$errf" "$rc"
     return 1
   fi
+  _mcp_ndjson "$out" | jq -c --arg s "$svc" --argjson rc "$rc" '
+    . as $e
+    | {service: $s, source: ([$e[] | .source // empty] | first // null),
+       lines: [$e[] | select(.event == "log") | .line],
+       exit_code: ([$e[] | select(.event == "end") | .exit_code] | last // $rc)}'
+}
 
-  # Use shared scanner
-  scan_project "$dir"
-
-  # Build files JSON array
-  local files_json="["
-  local i=0
-  while (( i < ${#_SCAN_FILES[@]} )); do
-    local entry="${_SCAN_FILES[$i]}"
-    local file="${entry%%|*}"
-    local desc="${entry#*|}"
-    if (( i > 0 )); then
-      files_json="${files_json},"
+tool_history() {
+  _mcp_need_project || return 1
+  local svc all args=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  svc=$(_arg service)
+  all=$(_arg_bool all false)
+  [[ -n "$svc" ]] && { _mcp_check_service "$svc" || return 1; }
+  [[ "$all" == "true" ]] && args[${#args[@]}]="--all"
+  [[ -n "$svc" ]] && args[${#args[@]}]="$svc"
+  _mcp_muster read 30 "$out" "$errf" history --json ${args[@]+"${args[@]}"} || rc=$?
+  if ! jq -e 'type == "array"' "$out" >/dev/null 2>&1; then
+    if ((rc == 0)); then
+      echo '{"entries":[]}'
+      return 0
     fi
-    files_json="${files_json}{\"file\":$(json_str "$file"),\"description\":$(json_str "$desc")}"
-    i=$((i + 1))
-  done
-  files_json="${files_json}]"
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c '{entries: .}' "$out"
+}
 
-  # Build services JSON array
-  local services_json="["
-  i=0
-  while (( i < ${#_SCAN_SERVICES[@]} )); do
-    if (( i > 0 )); then
-      services_json="${services_json},"
+tool_explain() {
+  _mcp_need_project || return 1
+  local svc args=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  svc=$(_arg service)
+  if [[ -n "$svc" ]]; then
+    _mcp_check_service "$svc" || return 1
+    args[0]="$svc"
+  fi
+  _mcp_muster read 60 "$out" "$errf" explain --json ${args[@]+"${args[@]}"} || rc=$?
+  if ! jq -e 'type == "object"' "$out" >/dev/null 2>&1; then
+    if grep -qi 'no failure\|nothing to explain\|no recent' "$errf" "$out" 2>/dev/null; then
+      jq -cn --arg m "$(sed "$_MCP_ANSI_RE" "$errf" "$out" | grep -v '^[[:space:]]*$' | head -3 | tr '\n' ' ')" \
+        '{service: null, matched: false, hint: null, message: $m}'
+      return 0
     fi
-    services_json="${services_json}$(json_str "${_SCAN_SERVICES[$i]}")"
-    i=$((i + 1))
-  done
-  services_json="${services_json}]"
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
 
-  # Build paths JSON object: { "service": { "type": "path", ... }, ... }
-  local paths_json="{"
-  local first_path=true
-  i=0
-  while (( i < ${#_SCAN_PATHS[@]} )); do
-    local entry="${_SCAN_PATHS[$i]}"
-    local p_svc="${entry%%|*}"
-    local rest="${entry#*|}"
-    local p_type="${rest%%|*}"
-    local p_path="${rest#*|}"
-    if [[ "$first_path" == "true" ]]; then
-      first_path=false
+tool_doctor() {
+  _mcp_need_project || return 1
+  local out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  _mcp_progress "running diagnostics"
+  _mcp_muster read 180 "$out" "$errf" doctor --json || rc=$?
+  if ! jq -e 'type == "object" and has("checks")' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
+
+tool_hooks_status() {
+  _mcp_need_project || return 1
+  local out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  _mcp_muster read 60 "$out" "$errf" hooks status --json || rc=$?
+  if ! jq -e 'type == "object"' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
+
+tool_setup_preview() {
+  local path stack ns args=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  path=$(_arg path)
+  stack=$(_arg stack)
+  ns=$(_arg namespace)
+  [[ -z "$path" ]] && path="$MCP_CWD"
+  if [[ "$path" == *[\`\$\;\&\|\<\>]* || "$path" =~ [[:cntrl:]] ]]; then
+    jq -cn '{error: "usage", message: "path must not contain shell metacharacters or control characters"}'
+    return 1
+  fi
+  [[ "$path" != /* ]] && path="$MCP_CWD/$path"
+  if [[ ! -d "$path" ]]; then
+    jq -cn --arg p "$path" '{error: "not_found", message: ("Directory not found: " + $p)}'
+    return 1
+  fi
+  path="$(cd "$path" && pwd)"
+  args=(--path "$path")
+  [[ -n "$stack" ]] && args[${#args[@]}]="--stack" && args[${#args[@]}]="$stack"
+  [[ -n "$ns" ]] && args[${#args[@]}]="--namespace" && args[${#args[@]}]="$ns"
+  _mcp_progress "scanning ${path##*/}"
+  _mcp_muster read 120 "$out" "$errf" setup --scan --dry-run --json "${args[@]}" || rc=$?
+  if ! jq -e 'type == "object" and has("dry_run")' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
+
+tool_config_get() {
+  _mcp_need_project || return 1
+  jq -c '{config: (
+    del(.credentials)
+    | if (.services | type) == "object" then .services |= map_values(del(.credentials)) else . end
+    | (.. | objects | select(has("env")) | .env) |= (if type == "object" then map_values("‹redacted›") else "‹redacted›" end))}' "$MCP_CONFIG"
+}
+
+tool_fleet_list() {
+  local out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  _mcp_muster read 30 "$out" "$errf" fleet list --json || rc=$?
+  if ! jq -e 'type == "object"' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
+
+_mcp_fleet_target_args() {
+  local t
+  t=$(_arg target)
+  [[ -z "$t" ]] && return 0
+  _mcp_check_fleet_name "$t" target >"$REQ_DIR/fv" || { cat "$REQ_DIR/fv"; return 1; }
+  printf '%s' "$t" >"$REQ_DIR/target"
+}
+
+tool_fleet_status() {
+  local out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0 t=""
+  _mcp_fleet_target_args || return 1
+  [[ -f "$REQ_DIR/target" ]] && t=$(cat "$REQ_DIR/target")
+  _mcp_progress "checking fleet"
+  _mcp_muster read 300 "$out" "$errf" fleet status ${t:+"$t"} --json || rc=$?
+  if ! jq -e 'type == "object"' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
+
+tool_fleet_test() {
+  local out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0 t=""
+  _mcp_fleet_target_args || return 1
+  [[ -f "$REQ_DIR/target" ]] && t=$(cat "$REQ_DIR/target")
+  _mcp_progress "testing connectivity"
+  _mcp_muster read 300 "$out" "$errf" fleet test ${t:+"$t"} --json || rc=$?
+  if ! jq -e 'type == "object" and has("servers")' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
+
+tool_fleet_logs() {
+  local server svc tail out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  server=$(_arg server)
+  svc=$(_arg service)
+  tail=$(_arg tail)
+  _mcp_check_fleet_name "$server" server || return 1
+  _mcp_muster read 120 "$out" "$errf" fleet logs "$server" "$svc" --json --tail "${tail:-100}" || rc=$?
+  if ! _mcp_ndjson "$out" | jq -e 'map(select(.event == "log")) | length > 0' >/dev/null 2>&1 && ((rc != 0)); then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  _mcp_ndjson "$out" | jq -c --arg srv "$server" --arg s "$svc" --argjson rc "$rc" '
+    . as $e
+    | {server: $srv, service: $s, source: ([$e[] | .source // empty] | first // null),
+       lines: [$e[] | select(.event == "log") | .line],
+       exit_code: ([$e[] | select(.event == "end") | .exit_code] | last // $rc)}'
+}
+
+tool_fleet_history() {
+  local server svc all args=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  server=$(_arg server)
+  svc=$(_arg service)
+  all=$(_arg_bool all false)
+  _mcp_check_fleet_name "$server" server || return 1
+  [[ -n "$svc" ]] && args[${#args[@]}]="$svc"
+  [[ "$all" == "true" ]] && args[${#args[@]}]="--all"
+  _mcp_muster read 120 "$out" "$errf" fleet history "$server" ${args[@]+"${args[@]}"} --json || rc=$?
+  if ! jq -e 'type == "array"' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c --arg s "$server" '{server: $s, entries: .}' "$out"
+}
+
+# ── Action tools ──
+
+tool_deploy() {
+  _mcp_need_project || return 1
+  local s svcs=() all dry stop args=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc
+  all=$(_arg_bool all false)
+  dry=$(_arg_bool dry_run true)
+  stop=$(_arg_bool stop_on_failure true)
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    _mcp_check_service "$s" || return 1
+    svcs[${#svcs[@]}]="$s"
+  done < <(_arg services)
+  if ((${#svcs[@]} == 0)) && [[ "$all" != "true" ]]; then
+    jq -cn '{error: "usage", message: "Name the services to deploy (services: [\"api\"]) or pass all=true. Nothing was run."}'
+    return 1
+  fi
+  if ((${#svcs[@]} > 0)) && [[ "$all" == "true" ]]; then
+    jq -cn '{error: "usage", message: "Pass either services or all=true, not both."}'
+    return 1
+  fi
+  [[ "$dry" == "true" ]] && args[${#args[@]}]="--dry-run"
+  [[ "$stop" == "true" ]] && args[${#args[@]}]="--stop-on-failure"
+  _mcp_notify_log info "deploy ${svcs[*]:-all}${args[*]:+ (${args[*]})}"
+  _mcp_muster_stream deploy 3600 "$out" "$errf" deploy --json ${args[@]+"${args[@]}"} ${svcs[@]+"${svcs[@]}"}
+  rc=$(_mcp_stream_rc)
+  _mcp_action_result "$out" "$errf" "$rc"
+}
+
+# Shared result for deploy / rollback / restart streams
+_mcp_action_result() {
+  local out="$1" errf="$2" rc="$3" doc
+  if ! _mcp_ndjson "$out" | jq -e 'map(select(has("event"))) | length > 0' >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  doc=$(_mcp_events_doc "$out" "$rc")
+  if printf '%s' "$doc" | jq -e '.error.reason == "hooks_not_approved"' >/dev/null 2>&1; then
+    doc=$(printf '%s' "$doc" | jq -c '. + {next_step: "Hooks are not approved on this machine. Show the user what changed (hooks_status), and only after they reviewed it run hooks_approve (or `muster hooks approve` in a terminal). Nothing was deployed."}')
+  fi
+  printf '%s' "$doc"
+  [[ "$rc" == "0" ]]
+}
+
+tool_rollback() {
+  _mcp_need_project || return 1
+  local svc out="$REQ_DIR/o" errf="$REQ_DIR/e" rc
+  svc=$(_arg service)
+  _mcp_check_service "$svc" || return 1
+  _mcp_notify_log info "rollback ${svc}"
+  _mcp_muster_stream deploy 1800 "$out" "$errf" rollback "$svc" --json
+  rc=$(_mcp_stream_rc)
+  _mcp_action_result "$out" "$errf" "$rc"
+}
+
+tool_restart() {
+  _mcp_need_project || return 1
+  local svc out="$REQ_DIR/o" errf="$REQ_DIR/e" rc
+  svc=$(_arg service)
+  _mcp_check_service "$svc" || return 1
+  _mcp_notify_log info "restart ${svc}"
+  _mcp_muster_stream deploy 1800 "$out" "$errf" restart "$svc" --json
+  rc=$(_mcp_stream_rc)
+  _mcp_action_result "$out" "$errf" "$rc"
+}
+
+tool_hooks_approve() {
+  _mcp_need_project || return 1
+  local s svcs=() all out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  all=$(_arg_bool all false)
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    _mcp_check_service "$s" || return 1
+    svcs[${#svcs[@]}]="$s"
+  done < <(_arg services)
+  if ((${#svcs[@]} == 0)) && [[ "$all" != "true" ]]; then
+    jq -cn '{error: "usage", message: "Name the services whose hooks to approve or pass all=true. Nothing was approved."}'
+    return 1
+  fi
+  _mcp_notify_log notice "hooks approve ${svcs[*]:-all}"
+  _mcp_muster deploy 60 "$out" "$errf" hooks approve --yes ${svcs[@]+"${svcs[@]}"} --json || rc=$?
+  if ((rc != 0)) || ! jq -e 'type == "object"' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+}
+
+# Text-output fleet commands → {target, exit_code, output[]}
+_mcp_text_doc() {
+  local target="$1" out="$2" errf="$3" rc="$4" extra="${5:-}"
+  [[ -z "$extra" ]] && extra='{}'
+  cat "$out" "$errf" | sed "$_MCP_ANSI_RE" | grep -v '^[[:space:]]*$' | tail -n 300 | jq -R . |
+    jq -sc --arg t "$target" --argjson rc "$rc" --argjson x "$extra" '{target: $t, exit_code: $rc, output: .} + $x'
+}
+
+tool_fleet_deploy() {
+  local target dry args=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  target=$(_arg target)
+  dry=$(_arg_bool dry_run true)
+  _mcp_check_fleet_name "$target" target || return 1
+  [[ "$dry" == "true" ]] && args[0]="--dry-run"
+  _mcp_notify_log info "fleet deploy ${target}${args[*]:+ (${args[*]})}"
+  _mcp_progress "fleet deploy ${target}"
+  _mcp_muster deploy 3600 "$out" "$errf" fleet deploy "$target" ${args[@]+"${args[@]}"} || rc=$?
+  _mcp_text_doc "$target" "$out" "$errf" "$rc" "{\"dry_run\":${dry}}"
+  [[ "$rc" == "0" ]]
+}
+
+tool_fleet_rollback() {
+  local target s args=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  target=$(_arg target)
+  _mcp_check_fleet_name "$target" target || return 1
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    args[${#args[@]}]="--service"
+    args[${#args[@]}]="$s"
+  done < <(_arg services)
+  _mcp_notify_log info "fleet rollback ${target}"
+  _mcp_progress "fleet rollback ${target}"
+  _mcp_muster deploy 3600 "$out" "$errf" fleet rollback "$target" ${args[@]+"${args[@]}"} || rc=$?
+  _mcp_text_doc "$target" "$out" "$errf" "$rc"
+  [[ "$rc" == "0" ]]
+}
+
+tool_fleet_restart() {
+  local server s svcs=() out="$REQ_DIR/o" errf="$REQ_DIR/e" rc=0
+  server=$(_arg server)
+  _mcp_check_fleet_name "$server" server || return 1
+  while IFS= read -r s; do
+    [[ -n "$s" ]] && svcs[${#svcs[@]}]="$s"
+  done < <(_arg services)
+  _mcp_notify_log info "fleet restart ${server} ${svcs[*]:-}"
+  _mcp_progress "fleet restart ${server}"
+  # --yes is the non-TTY confirmation; the MCP client's tool approval is ours
+  _mcp_muster deploy 1800 "$out" "$errf" fleet restart "$server" ${svcs[@]+"${svcs[@]}"} --json --yes || rc=$?
+  if ! jq -e 'type == "object" and has("results")' "$out" >/dev/null 2>&1; then
+    _mcp_cmd_error "$out" "$errf" "$rc"
+    return 1
+  fi
+  jq -c . "$out"
+  [[ "$rc" == "0" ]]
+}
+
+# ── Resources ──
+
+_mcp_resource_list() {
+  local s list='[]'
+  list=$(jq -cn '[
+    {uri: "muster://project", name: "project", title: "Project summary", description: "Services, deploy order, hooks and settings of this muster project", mimeType: "application/json"},
+    {uri: "muster://config", name: "config", title: "muster.json (redacted)", description: "Project configuration without credentials or env values", mimeType: "application/json"},
+    {uri: "muster://history", name: "history", title: "Deploy history", description: "Last 20 deploy/rollback/restart events", mimeType: "application/json"},
+    {uri: "muster://fleet", name: "fleet", title: "Fleet", description: "Fleet servers and groups", mimeType: "application/json"}]')
+  if [[ -n "$MCP_CONFIG" ]]; then
+    while IFS= read -r s; do
+      [[ -z "$s" ]] && continue
+      list=$(printf '%s' "$list" | jq -c --arg s "$s" '. + [
+        {uri: "muster://services/\($s)", name: "service-\($s)", title: "Service \($s)", description: "Status and config of \($s)", mimeType: "application/json"},
+        {uri: "muster://logs/\($s)", name: "logs-\($s)", title: "Logs: \($s)", description: "Last 100 log lines of \($s)", mimeType: "text/plain"}]')
+    done < <(_mcp_services)
+  fi
+  printf '{"resources":%s}' "$list"
+}
+
+_MCP_TEMPLATES='{"resourceTemplates":[
+ {"uriTemplate":"muster://services/{name}","name":"service","title":"Service status and config","description":"Current health and (redacted) muster.json entry of a service","mimeType":"application/json"},
+ {"uriTemplate":"muster://logs/{service}","name":"logs","title":"Service logs","description":"Last 100 log lines of a service (redacted)","mimeType":"text/plain"}]}'
+
+# Prints "mime\tbody"-less: sets RES_MIME, prints body; return 2 = not found, 1 = error
+RES_MIME="application/json"
+_mcp_resource_body() {
+  local uri="$1" name doc
+  RES_MIME="application/json"
+  case "$uri" in
+    muster://project) tool_project_info ;;
+    muster://config)
+      doc=$(tool_config_get) || { printf '%s' "$doc"; return 1; }
+      printf '%s' "$doc" | jq -c '.config'
+      ;;
+    muster://history)
+      doc=$(REQ_ARGS='{}' tool_history) || { printf '%s' "$doc"; return 1; }
+      printf '%s' "$doc" | jq -c '.entries'
+      ;;
+    muster://fleet) tool_fleet_list ;;
+    muster://services/*)
+      name="${uri#muster://services/}"
+      [[ -n "$MCP_CONFIG" && "$name" =~ $_MCP_NAME_RE ]] && _mcp_services | grep -qxF -- "$name" || return 2
+      local st cfg
+      st=$(REQ_ARGS="$(jq -cn --arg s "$name" '{services: [$s]}')" tool_status) || st='{}'
+      cfg=$(tool_config_get | jq -c --arg s "$name" '.config.services[$s]')
+      jq -cn --arg s "$name" --argjson st "$st" --argjson cfg "$cfg" \
+        '{service: $s, status: ($st.services[$s] // null), checked_at: ($st.checked_at // null), config: $cfg}'
+      ;;
+    muster://logs/*)
+      name="${uri#muster://logs/}"
+      [[ -n "$MCP_CONFIG" && "$name" =~ $_MCP_NAME_RE ]] && _mcp_services | grep -qxF -- "$name" || return 2
+      RES_MIME="text/plain"
+      doc=$(REQ_ARGS="$(jq -cn --arg s "$name" '{service: $s, tail: 100}')" tool_logs) || {
+        printf '%s' "$doc" | jq -r '.message // "no logs"'
+        return 0
+      }
+      printf '%s' "$doc" | jq -r '.lines[]'
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+# ── Prompts ──
+
+_MCP_PROMPTS='{"prompts":[
+ {"name":"diagnose_failure","title":"Diagnose a failed deploy","description":"Find out why the last deploy (or a service) failed and what to do, using explain, logs and status. Read-only.","arguments":[{"name":"service","description":"Service to diagnose (default: the last failure)","required":false}]},
+ {"name":"deploy_checklist","title":"Pre-deploy checklist","description":"Check hooks approval, health and diagnostics before deploying, then preview the deploy with a dry run.","arguments":[{"name":"services","description":"Comma-separated services to deploy (default: all)","required":false}]},
+ {"name":"rollback_plan","title":"Rollback plan","description":"Decide whether and how to roll back a service: recent history, current health, rollback hook, and the exact steps.","arguments":[{"name":"service","description":"Service to roll back","required":true}]}]}'
+
+# Prints a prompts/get result; return 1 with an error message on bad args
+_mcp_prompt_get() {
+  local name="$1" args="$2" svc svcs ctx="" text s
+  svc=$(printf '%s' "$args" | jq -r '.service // empty | tostring')
+  case "$name" in
+    diagnose_failure)
+      if [[ -n "$svc" ]]; then
+        _mcp_check_service "$svc" >/dev/null || { echo "Unknown service: $svc"; return 1; }
+      fi
+      ctx=$(REQ_ARGS="$(jq -cn --arg s "$svc" 'if $s == "" then {} else {service: $s} end')" tool_explain 2>/dev/null) || true
+      text="Diagnose the most recent muster failure${svc:+ for the service \"${svc}\"}.
+
+1. Read the explain result below (muster's offline rules engine).
+2. Get more evidence with the logs tool${svc:+ (service: ${svc})}, history and status.
+3. If hooks are involved, check hooks_status.
+4. Explain the likely cause in plain words and propose concrete next steps. Do NOT run deploy, rollback, restart or hooks_approve without asking the user first; prefer \`muster explain ${svc:+$svc }--fix\` for suggested fixes so muster re-validates them."
+      ;;
+    deploy_checklist)
+      svcs=$(printf '%s' "$args" | jq -r '.services // empty | tostring')
+      local list_json='[]'
+      if [[ -n "$svcs" ]]; then
+        while IFS= read -r s; do
+          s="${s//[[:space:]]/}"
+          [[ -z "$s" ]] && continue
+          _mcp_check_service "$s" >/dev/null || { echo "Unknown service: $s"; return 1; }
+          list_json=$(printf '%s' "$list_json" | jq -c --arg s "$s" '. + [$s]')
+        done < <(printf '%s\n' "$svcs" | tr ',' '\n')
+      fi
+      ctx=$(tool_hooks_status 2>/dev/null | jq -c '{hooks_approved: .approved, pending: .pending, dangerous: [.files[]? | select((.dangerous // []) | length > 0) | {key, dangerous}]}' 2>/dev/null) || ctx=""
+      text="Prepare a deploy of ${svcs:-all services} and walk me through a checklist before anything runs.
+
+1. hooks_status: are hooks approved? If something is pending, show me what changed and stop; never approve on my behalf.
+2. status: which services are unhealthy right now?
+3. doctor: any failures under Deploy Readiness?
+4. deploy with dry_run=true and services=${list_json} (or all=true): show the plan.
+5. Summarize the risks and ask me before calling deploy with dry_run=false."
+      ;;
+    rollback_plan)
+      [[ -z "$svc" ]] && { echo "The service argument is required"; return 1; }
+      _mcp_check_service "$svc" >/dev/null || { echo "Unknown service: $svc"; return 1; }
+      ctx=$(REQ_ARGS="$(jq -cn --arg s "$svc" '{service: $s}')" tool_history 2>/dev/null | jq -c '.entries[-10:]' 2>/dev/null) || ctx=""
+      local has_rb=no
+      [[ -f "$MCP_ROOT/.muster/hooks/$svc/rollback.sh" ]] && has_rb=yes
+      text="Make a rollback plan for the service \"${svc}\" (rollback hook present: ${has_rb}).
+
+1. Review its recent history below: what was deployed when, and what failed.
+2. Check its current health (status) and recent logs.
+3. Decide whether a rollback is warranted, or whether a restart or a fix-forward deploy is better.
+4. List the exact steps (rollback tool with service=${svc}, then status to verify) and what could go wrong. Ask me before running the rollback."
+      ;;
+    *)
+      echo "Unknown prompt: ${name}"
+      return 1
+      ;;
+  esac
+  local desc
+  desc=$(printf '%s' "$_MCP_PROMPTS" | jq -r --arg n "$name" '.prompts[] | select(.name == $n) | .description')
+  jq -cn --arg d "$desc" --arg t "$text" --arg c "$ctx" '{description: $d, messages: (
+      [{role: "user", content: {type: "text", text: $t}}]
+      + (if $c == "" then [] else [{role: "user", content: {type: "text", text: ("Context from muster:\n```json\n" + $c + "\n```")}}] end))}'
+}
+
+# ── Worker plumbing (tools/call, resources/read, prompts/get run in the background) ──
+REQ_ID="null"
+REQ_ERA="legacy"
+REQ_DIR=""
+REQ_CANCEL_FILE="/nonexistent"
+REQ_ARGS="{}"
+REQ_LOG_LEVEL=""
+
+_mcp_req_key() { printf '%s' "$1" | cksum | awk '{print $1 "-" $2}'; }
+
+# Send the final message of a worker unless the request was cancelled
+_mcp_finish() {
+  _mcp_lock
+  if [[ ! -f "$REQ_CANCEL_FILE" ]]; then
+    printf '%s\n' "$1" >&3
+  fi
+  rm -f "$REQ_DIR.pid"
+  _mcp_unlock
+}
+
+# Build the tools/call result from a tool's output + status; redacted.
+_mcp_tool_result() {
+  local raw="$1" ok="$2" red msg text
+  red=$(printf '%s' "$raw" | _mcp_redact) || {
+    jq -cn '{content: [{type: "text", text: "Output withheld: redaction failed (jq missing?)."}], isError: true}'
+    return
+  }
+  if printf '%s' "$red" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    text=$(printf '%s' "$red" | jq .)
+    if [[ "$ok" == "true" ]]; then
+      jq -cn --argjson s "$red" --arg t "$text" '{content: [{type: "text", text: $t}], structuredContent: $s, isError: false}'
     else
-      paths_json="${paths_json},"
+      msg=$(printf '%s' "$red" | jq -r '.message // .error.message // .summary.result // "The command failed" | tostring')
+      jq -cn --argjson s "$red" --arg m "$msg" --arg t "$text" \
+        '{content: [{type: "text", text: ("Error: " + $m)}, {type: "text", text: $t}], structuredContent: $s, isError: true}'
     fi
-    paths_json="${paths_json}$(json_str "$p_svc"):{$(json_str "$p_type"):$(json_str "$p_path")}"
-    i=$((i + 1))
+  else
+    jq -cn --arg t "$red" --argjson e "$([[ "$ok" == "true" ]] && echo false || echo true)" \
+      '{content: [{type: "text", text: $t}], structuredContent: {output: $t}, isError: $e}'
+  fi
+}
+
+_mcp_worker_tool() {
+  local name="$1" fn out ok=true is_action
+  fn="tool_${name}"
+  is_action=$(printf '%s' "$MCP_TOOLS_ALL" | jq -r --arg n "$name" '.[] | select(.name == $n) | ._action')
+  _mcp_notify_log debug "tools/call ${name}"
+  if [[ "$is_action" == "true" && "$MCP_ALLOW_ACTIONS" != "true" ]]; then
+    out=$(_mcp_actions_disabled "$name")
+    ok=false
+  else
+    out=$("$fn") || ok=false
+  fi
+  [[ -z "$out" ]] && { out='{"error":"empty","message":"The command produced no output"}'; ok=false; }
+  [[ "$ok" == "true" ]] || _mcp_notify_log warning "${name} failed: $(printf '%s' "$out" | jq -r '.message // empty' 2>/dev/null | head -c 300)"
+  _mcp_finish "$(_mcp_result_json "$REQ_ID" "$(_mcp_tool_result "$out" "$ok")" "$REQ_ERA")"
+}
+
+_mcp_worker_resource() {
+  local uri="$1" body rc=0 red
+  case "$uri" in muster://logs/*) RES_MIME="text/plain" ;; *) RES_MIME="application/json" ;; esac
+  body=$(_mcp_resource_body "$uri") || rc=$?
+  if ((rc == 2)); then
+    if [[ "$REQ_ERA" == "modern" ]]; then
+      _mcp_finish "$(_mcp_error_json "$REQ_ID" -32602 "Resource not found" "$(jq -cn --arg u "$uri" '{uri: $u}')")"
+    else
+      _mcp_finish "$(_mcp_error_json "$REQ_ID" -32002 "Resource not found" "$(jq -cn --arg u "$uri" '{uri: $u}')")"
+    fi
+    return
+  fi
+  if ((rc != 0)) && [[ "$RES_MIME" == "application/json" ]] && printf '%s' "$body" | jq -e '.error' >/dev/null 2>&1; then
+    _mcp_finish "$(_mcp_error_json "$REQ_ID" -32603 "$(printf '%s' "$body" | jq -r '.message // .error')" "$(jq -cn --arg u "$uri" '{uri: $u}')")"
+    return
+  fi
+  red=$(printf '%s' "$body" | _mcp_redact) || {
+    _mcp_finish "$(_mcp_error_json "$REQ_ID" -32603 "Redaction failed; output withheld")"
+    return
+  }
+  [[ "$RES_MIME" == "application/json" ]] && red=$(printf '%s' "$red" | jq . 2>/dev/null || printf '%s' "$red")
+  _mcp_finish "$(_mcp_result_json "$REQ_ID" "$(jq -cn --arg u "$uri" --arg m "$RES_MIME" --arg t "$red" '{contents: [{uri: $u, mimeType: $m, text: $t}]}')" "$REQ_ERA")"
+}
+
+_mcp_worker_prompt() {
+  local name="$1" args="$2" out red
+  if ! out=$(_mcp_prompt_get "$name" "$args"); then
+    _mcp_finish "$(_mcp_error_json "$REQ_ID" -32602 "$out")"
+    return
+  fi
+  red=$(printf '%s' "$out" | _mcp_redact) || red=""
+  if [[ -z "$red" ]] || ! printf '%s' "$red" | jq -e . >/dev/null 2>&1; then
+    _mcp_finish "$(_mcp_error_json "$REQ_ID" -32603 "Redaction failed; prompt withheld")"
+    return
+  fi
+  _mcp_finish "$(_mcp_result_json "$REQ_ID" "$red" "$REQ_ERA")"
+}
+
+# Run a handler in the background (own process group so cancel kills its tree)
+_mcp_spawn() {
+  local key
+  key=$(_mcp_req_key "$REQ_ID")
+  REQ_DIR="$MCP_STATE/req/$key"
+  REQ_CANCEL_FILE="$REQ_DIR.cancelled"
+  rm -rf "$REQ_DIR" "$REQ_CANCEL_FILE"
+  mkdir -p "$REQ_DIR"
+  (
+    trap 'exit 130' TERM
+    "$@"
+    rm -rf "$REQ_DIR"
+  ) </dev/null &
+  printf '%s' "$!" >"$REQ_DIR.pid"
+}
+
+# Cancel: SIGTERM the muster processes the request started (they clean up
+# after themselves, like Ctrl+C), or the worker when it runs none. A
+# watchdog hard-kills whatever is left after 15s.
+_mcp_cancel() {
+  local id_json="$1" key pid mp dir any=false
+  key=$(_mcp_req_key "$id_json")
+  [[ -f "$MCP_STATE/req/$key.pid" ]] || return 0
+  pid=$(cat "$MCP_STATE/req/$key.pid" 2>/dev/null)
+  dir="$MCP_STATE/req/$key"
+  : >"$MCP_STATE/req/$key.cancelled"
+  _mcp_log_stderr "cancelling request ${id_json}"
+  if [[ -f "$dir/muster.pids" ]]; then
+    while IFS= read -r mp; do
+      [[ -n "$mp" ]] || continue
+      kill -0 "$mp" 2>/dev/null || continue
+      { kill -TERM -- "-$mp" 2>/dev/null || kill -TERM "$mp" 2>/dev/null; } && any=true
+    done <"$dir/muster.pids"
+  fi
+  [[ "$any" == "true" || -z "$pid" ]] || kill -TERM "$pid" 2>/dev/null
+  (
+    sleep 15
+    if [[ -f "$dir/muster.pids" ]]; then
+      while IFS= read -r mp; do [[ -n "$mp" ]] && _kill_tree_hard "$mp"; done <"$dir/muster.pids"
+    fi
+    [[ -n "$pid" ]] && _kill_tree_hard "$pid"
+  ) </dev/null >/dev/null 2>&1 3>&- &
+}
+
+_mcp_kill_all() {
+  local f pid mp
+  for f in "$MCP_STATE"/req/*/muster.pids; do
+    [[ -f "$f" ]] || continue
+    while IFS= read -r mp; do [[ -n "$mp" ]] && { kill -TERM -- "-$mp" 2>/dev/null || kill -TERM "$mp" 2>/dev/null; }; done <"$f"
   done
-  paths_json="${paths_json}}"
-
-  # Stack string
-  local stack_json
-  if [[ -n "$_SCAN_STACK" ]]; then
-    stack_json=$(json_str "$_SCAN_STACK")
-  else
-    stack_json="null"
-  fi
-
-  # Compose final JSON via jq for correctness (merges duplicate service keys in paths)
-  printf '%s\n' "{\"files\":${files_json},\"services\":${services_json},\"stack\":${stack_json},\"paths\":${paths_json}}" | jq -c '
-    # Merge paths: group entries by service key, combine type objects
-    .paths as $p |
-    .paths = (reduce ($p | to_entries[]) as $e ({}; .[$e.key] = ((.[$e.key] // {}) + $e.value))) |
-    .
-  '
+  for f in "$MCP_STATE"/req/*.pid; do
+    [[ -f "$f" ]] || continue
+    pid=$(cat "$f" 2>/dev/null)
+    [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null
+  done
 }
 
-tool_init_project() {
-  local dir="$1" config="$2"
-
-  if [[ ! -d "$dir" ]]; then
-    echo "Directory not found: ${dir}"
-    return 1
-  fi
-
-  # Validate JSON
-  if ! printf '%s\n' "$config" | jq . &>/dev/null; then
-    echo "Invalid JSON config"
-    return 1
-  fi
-
-  # Write muster.json
-  printf '%s\n' "$config" | jq . > "${dir}/muster.json"
-
-  # Create .muster structure
-  mkdir -p "${dir}/.muster/logs"
-
-  # Create hook directories for each service
-  local services
-  services=$(printf '%s\n' "$config" | jq -r '.services | keys[]' 2>/dev/null)
-  while IFS= read -r svc; do
-    [[ -z "$svc" ]] && continue
-    mkdir -p "${dir}/.muster/hooks/${svc}"
-  done <<< "$services"
-
-  # Update .gitignore
-  local gitignore="${dir}/.gitignore"
-  if [[ -f "$gitignore" ]]; then
-    if ! grep -q '.muster/logs' "$gitignore" 2>/dev/null; then
-      printf '\n# muster deploy logs\n.muster/logs/\n' >> "$gitignore"
-    fi
-  else
-    printf '# muster deploy logs\n.muster/logs/\n' > "$gitignore"
-  fi
-
-  local output="Created muster.json\nCreated .muster/logs/\n"
-  while IFS= read -r svc; do
-    [[ -z "$svc" ]] && continue
-    output="${output}Created .muster/hooks/${svc}/\n"
-  done <<< "$services"
-  output="${output}Updated .gitignore\n\nProject initialized. Write hook scripts with muster_write_hook."
-
-  printf '%b' "$output"
+# ── Completion ──
+_mcp_complete() {
+  local params="$1" arg val
+  arg=$(printf '%s' "$params" | jq -r '.argument.name // empty')
+  val=$(printf '%s' "$params" | jq -r '.argument.value // ""')
+  case "$arg" in
+    service | name | services)
+      _mcp_services | jq -R . | jq -sc --arg v "$val" \
+        '[.[] | select(startswith($v))] as $m | {completion: {values: $m[:100], total: ($m | length), hasMore: (($m | length) > 100)}}'
+      ;;
+    *) echo '{"completion":{"values":[],"total":0,"hasMore":false}}' ;;
+  esac
 }
 
-tool_write_hook() {
-  local dir="$1" service="$2" hook="$3" content="$4"
+# ── Dispatch ──
+# shellcheck disable=SC2016
+_MCP_PARSE_JQ='
+def nul: . + "\u0000";
+if type != "object" then ("invalid" | nul) + ("" | nul) + ("null" | nul) + ("" | nul) + ("" | nul) + ("" | nul) + ("{}" | nul)
+else
+  (if .jsonrpc != "2.0" then "invalid"
+   elif (.method | type) == "string" and has("id") then (if (.id | type) == "string" or (.id | type) == "number" then "request" else "invalid" end)
+   elif (.method | type) == "string" then "notification"
+   elif has("id") and (has("result") or has("error")) then "response"
+   else "invalid" end | nul)
+  + ((.method // "") | tostring | nul)
+  + ((if has("id") then .id else null end) | tojson | nul)
+  + ((.params._meta["io.modelcontextprotocol/protocolVersion"] // "") | tostring | nul)
+  + ((.params._meta.progressToken // null) | if . == null then "" else tojson end | nul)
+  + ((.params._meta["io.modelcontextprotocol/logLevel"] // "") | tostring | nul)
+  + ((.params // {}) | if type == "object" then . else {} end | tojson | nul)
+end'
 
-  # Validate hook name
-  case "$hook" in
-    deploy.sh|health.sh|rollback.sh|logs.sh|cleanup.sh) ;;
-    *) echo "Invalid hook: ${hook}. Must be deploy.sh, health.sh, rollback.sh, logs.sh, or cleanup.sh"; return 1 ;;
+_mcp_is_legacy_version() {
+  case " $MCP_LEGACY_VERSIONS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+_mcp_supported_json() {
+  printf '%s %s' "$MCP_MODERN_VERSION" "$MCP_LEGACY_VERSIONS" | tr ' ' '\n' | jq -R . | jq -sc .
+}
+
+_mcp_capabilities() {
+  printf '{"tools":{"listChanged":false},"resources":{"listChanged":false,"subscribe":false},"prompts":{"listChanged":false},"completions":{}%s}' "$1"
+}
+
+_mcp_dispatch() {
+  local msg="$1" kind="" method="" id="null" ver="" ptok="" llevel="" params="{}" f i=0
+  while IFS= read -r -d '' f; do
+    case $i in
+      0) kind="$f" ;; 1) method="$f" ;; 2) id="$f" ;; 3) ver="$f" ;;
+      4) ptok="$f" ;; 5) llevel="$f" ;; 6) params="$f" ;;
+    esac
+    i=$((i + 1))
+  done < <(printf '%s\n' "$msg" | jq -j "$_MCP_PARSE_JQ" 2>/dev/null)
+
+  if [[ -z "$kind" ]]; then
+    _mcp_fail null -32700 "Parse error"
+    return
+  fi
+  case "$kind" in
+    invalid)
+      [[ "$id" == "null" || "$id" == "" ]] && id=null
+      printf '%s' "$id" | jq -e 'type == "string" or type == "number"' >/dev/null 2>&1 || id=null
+      _mcp_fail "$id" -32600 "Invalid Request"
+      return
+      ;;
+    response) return ;;
+    notification)
+      case "$method" in
+        notifications/initialized) _mcp_log_stderr "client initialized" ;;
+        notifications/cancelled)
+          local rid
+          rid=$(printf '%s' "$params" | jq -c '.requestId // empty')
+          [[ -n "$rid" ]] && _mcp_cancel "$rid"
+          ;;
+      esac
+      return
+      ;;
   esac
 
-  local hook_dir="${dir}/.muster/hooks/${service}"
-  mkdir -p "$hook_dir"
-
-  local hook_file="${hook_dir}/${hook}"
-  printf '%s\n' "$content" > "$hook_file"
-  chmod +x "$hook_file"
-
-  echo "Wrote ${hook} for ${service} ($(wc -l < "$hook_file" | tr -d ' ') lines, executable)"
-}
-
-tool_read_hook() {
-  local dir="$1" service="$2" hook="$3"
-
-  local hook_file="${dir}/.muster/hooks/${service}/${hook}"
-  if [[ -f "$hook_file" ]]; then
-    echo "=== ${service}/${hook} ==="
-    cat "$hook_file"
-  else
-    echo "Hook not found: ${service}/${hook}"
-    # Show what hooks exist for this service
-    local hook_dir="${dir}/.muster/hooks/${service}"
-    if [[ -d "$hook_dir" ]]; then
-      local existing
-      existing=$(ls "$hook_dir" 2>/dev/null)
-      if [[ -n "$existing" ]]; then
-        echo "Existing hooks for ${service}: ${existing}"
-      else
-        echo "No hooks exist for ${service}"
-      fi
+  # ── Requests: decide the protocol era ──
+  local era="legacy"
+  if [[ -n "$ver" ]]; then
+    if [[ "$ver" == "$MCP_MODERN_VERSION" ]]; then
+      era="modern"
+    elif _mcp_is_legacy_version "$ver" && [[ -n "$MCP_SESSION_VERSION" ]]; then
+      era="legacy"
     else
-      echo "No hook directory for ${service}"
-    fi
-  fi
-}
-
-# ── Credential tools ──
-
-tool_set_credential() {
-  local service="$1" key="$2" value="$3"
-
-  # Update existing or add new
-  local entry="${service}:${key}"
-  local i=0
-  while (( i < ${#_CRED_KEYS[@]} )); do
-    if [[ "${_CRED_KEYS[$i]}" == "$entry" ]]; then
-      _CRED_VALS[$i]="$value"
-      echo "Updated credential ${key} for ${service}"
+      _mcp_fail "$id" -32022 "Unsupported protocol version" \
+        "$(jq -cn --argjson s "$(_mcp_supported_json)" --arg r "$ver" '{supported: $s, requested: $r}')"
       return
     fi
-    (( i++ ))
-  done
-
-  _CRED_KEYS[${#_CRED_KEYS[@]}]="$entry"
-  _CRED_VALS[${#_CRED_VALS[@]}]="$value"
-  echo "Stored credential ${key} for ${service}"
-}
-
-tool_list_credentials() {
-  if (( ${#_CRED_KEYS[@]} == 0 )); then
-    echo "No credentials stored"
+  elif [[ "$method" != "initialize" && "$method" != "server/discover" && "$method" != "ping" && -z "$MCP_SESSION_VERSION" ]]; then
+    _mcp_fail "$id" -32602 "Missing _meta[\"io.modelcontextprotocol/protocolVersion\"]: send server/discover (MCP ${MCP_MODERN_VERSION}) or initialize first" \
+      "$(jq -cn --argjson s "$(_mcp_supported_json)" '{supported: $s}')"
     return
   fi
 
-  local output=""
-  local last_svc=""
-  local keys_for_svc=""
-  local i=0
-  # Collect keys grouped by service
-  while (( i < ${#_CRED_KEYS[@]} )); do
-    local entry="${_CRED_KEYS[$i]}"
-    local svc="${entry%%:*}"
-    local key="${entry#*:}"
-    if [[ "$svc" != "$last_svc" ]]; then
-      if [[ -n "$last_svc" ]]; then
-        output="${output}${last_svc}: ${keys_for_svc}\n"
-      fi
-      last_svc="$svc"
-      keys_for_svc="$key"
-    else
-      keys_for_svc="${keys_for_svc}, ${key}"
-    fi
-    (( i++ ))
-  done
-  if [[ -n "$last_svc" ]]; then
-    output="${output}${last_svc}: ${keys_for_svc}\n"
-  fi
-
-  printf '%b' "$output"
-}
-
-tool_clear_credentials() {
-  local count=${#_CRED_KEYS[@]}
-  _CRED_KEYS=()
-  _CRED_VALS=()
-  echo "Cleared ${count} credential(s)"
-}
-
-# Export credentials as env vars for a service before running hooks
-_export_creds_for_service() {
-  local service="$1"
-  local i=0
-  while (( i < ${#_CRED_KEYS[@]} )); do
-    local entry="${_CRED_KEYS[$i]}"
-    local svc="${entry%%:*}"
-    local key="${entry#*:}"
-    if [[ "$svc" == "$service" ]]; then
-      export "MUSTER_CRED_${key}=${_CRED_VALS[$i]}"
-    fi
-    (( i++ ))
-  done
-}
-
-# Unexport credentials after hook runs
-_unexport_creds_for_service() {
-  local service="$1"
-  local i=0
-  while (( i < ${#_CRED_KEYS[@]} )); do
-    local entry="${_CRED_KEYS[$i]}"
-    local svc="${entry%%:*}"
-    local key="${entry#*:}"
-    if [[ "$svc" == "$service" ]]; then
-      unset "MUSTER_CRED_${key}"
-    fi
-    (( i++ ))
-  done
-}
-
-# ── Handle tools/call ──
-handle_call() {
-  local msg="$1" id="$2"
-  local tool_name project_dir
-  tool_name=$(printf '%s\n' "$msg" | jq -r '.params.name')
-  project_dir=$(printf '%s\n' "$msg" | jq -r '.params.arguments.project_dir // empty')
-
-  if [[ -z "$project_dir" ]]; then
-    json_error "$id" -32602 "project_dir is required"
-    return
-  fi
-
-  local result=""
-  case "$tool_name" in
-    muster_list_services)
-      result=$(tool_list_services "$project_dir" 2>&1) ;;
-    muster_status)
-      result=$(tool_status "$project_dir" 2>&1) ;;
-    muster_deploy)
-      local service
-      service=$(printf '%s\n' "$msg" | jq -r '.params.arguments.service // empty')
-      result=$(tool_deploy "$project_dir" "${service:-all}" 2>&1) ;;
-    muster_rollback)
-      local service
-      service=$(printf '%s\n' "$msg" | jq -r '.params.arguments.service // empty')
-      if [[ -z "$service" ]]; then
-        json_error "$id" -32602 "service is required for rollback"
-        return
-      fi
-      result=$(tool_rollback "$project_dir" "$service" 2>&1) ;;
-    muster_logs)
-      local service lines
-      service=$(printf '%s\n' "$msg" | jq -r '.params.arguments.service // empty')
-      lines=$(printf '%s\n' "$msg" | jq -r '.params.arguments.lines // 50')
-      if [[ -z "$service" ]]; then
-        json_error "$id" -32602 "service is required for logs"
-        return
-      fi
-      result=$(tool_logs "$project_dir" "$service" "$lines" 2>&1) ;;
-    muster_cleanup)
-      result=$(tool_cleanup "$project_dir" 2>&1) ;;
-    muster_config)
-      result=$(tool_config "$project_dir" 2>&1) ;;
-    muster_scan_project)
-      result=$(tool_scan_project "$project_dir" 2>&1) ;;
-    muster_init_project)
-      local config
-      config=$(printf '%s\n' "$msg" | jq -r '.params.arguments.config // empty')
-      if [[ -z "$config" ]]; then
-        json_error "$id" -32602 "config is required for init_project"
-        return
-      fi
-      result=$(tool_init_project "$project_dir" "$config" 2>&1) ;;
-    muster_write_hook)
-      local service hook content
-      service=$(printf '%s\n' "$msg" | jq -r '.params.arguments.service // empty')
-      hook=$(printf '%s\n' "$msg" | jq -r '.params.arguments.hook // empty')
-      content=$(printf '%s\n' "$msg" | jq -r '.params.arguments.content // empty')
-      if [[ -z "$service" ]] || [[ -z "$hook" ]] || [[ -z "$content" ]]; then
-        json_error "$id" -32602 "service, hook, and content are required for write_hook"
-        return
-      fi
-      result=$(tool_write_hook "$project_dir" "$service" "$hook" "$content" 2>&1) ;;
-    muster_read_hook)
-      local service hook
-      service=$(printf '%s\n' "$msg" | jq -r '.params.arguments.service // empty')
-      hook=$(printf '%s\n' "$msg" | jq -r '.params.arguments.hook // empty')
-      if [[ -z "$service" ]] || [[ -z "$hook" ]]; then
-        json_error "$id" -32602 "service and hook are required for read_hook"
-        return
-      fi
-      result=$(tool_read_hook "$project_dir" "$service" "$hook" 2>&1) ;;
-    muster_set_credential)
-      local service key value
-      service=$(printf '%s\n' "$msg" | jq -r '.params.arguments.service // empty')
-      key=$(printf '%s\n' "$msg" | jq -r '.params.arguments.key // empty')
-      value=$(printf '%s\n' "$msg" | jq -r '.params.arguments.value // empty')
-      if [[ -z "$service" ]] || [[ -z "$key" ]] || [[ -z "$value" ]]; then
-        json_error "$id" -32602 "service, key, and value are required for set_credential"
-        return
-      fi
-      # Run directly (not in subshell) so array changes persist
-      local entry="${service}:${key}"
-      local _i=0 _found=false
-      while (( _i < ${#_CRED_KEYS[@]} )); do
-        if [[ "${_CRED_KEYS[$_i]}" == "$entry" ]]; then
-          _CRED_VALS[$_i]="$value"
-          _found=true
-          break
-        fi
-        (( _i++ ))
-      done
-      if [[ "$_found" == "false" ]]; then
-        _CRED_KEYS[${#_CRED_KEYS[@]}]="$entry"
-        _CRED_VALS[${#_CRED_VALS[@]}]="$value"
-      fi
-      if [[ "$_found" == "true" ]]; then
-        json_tool_result "$id" "Updated credential ${key} for ${service}"
-      else
-        json_tool_result "$id" "Stored credential ${key} for ${service}"
-      fi
-      return ;;
-    muster_list_credentials)
-      result=$(tool_list_credentials 2>&1) ;;
-    muster_clear_credentials)
-      # Run directly so array changes persist
-      local _count=${#_CRED_KEYS[@]}
-      _CRED_KEYS=()
-      _CRED_VALS=()
-      json_tool_result "$id" "Cleared ${_count} credential(s)"
-      return ;;
-    *)
-      json_error "$id" -32601 "Unknown tool: ${tool_name}"
-      return ;;
-  esac
-
-  json_tool_result "$id" "$result"
-}
-
-# ── Dispatch a single JSON-RPC message ──
-dispatch_message() {
-  local msg="$1"
-  local method id
-  method=$(printf '%s\n' "$msg" | jq -r '.method // empty')
-  id=$(printf '%s\n' "$msg" | jq -r '.id // "null"')
+  REQ_ID="$id"
+  REQ_ERA="$era"
+  REQ_PROGRESS="$ptok"
+  REQ_PROGRESS_N=0
+  REQ_LOG_LEVEL=""
+  [[ "$era" == "modern" ]] && REQ_LOG_LEVEL="$llevel"
 
   case "$method" in
     initialize)
-      json_response "$id" "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"muster\",\"version\":\"${MUSTER_VERSION}\"}}"
+      local want neg
+      want=$(printf '%s' "$params" | jq -r '.protocolVersion // empty | tostring')
+      if _mcp_is_legacy_version "$want"; then neg="$want"; else neg="$MCP_LATEST_LEGACY"; fi
+      MCP_SESSION_VERSION="$neg"
+      _mcp_log_stderr "initialize: client asked ${want:-?}, using ${neg}"
+      _mcp_respond "$id" "$(jq -cn --arg v "$neg" --argjson caps "$(_mcp_capabilities ',"logging":{}')" \
+        --argjson si "$(_mcp_server_info)" --arg ins "$MCP_INSTRUCTIONS" \
+        '{protocolVersion: $v, capabilities: $caps, serverInfo: $si, instructions: $ins}')"
       ;;
-    "notifications/initialized")
-      # No response needed
+    server/discover)
+      _mcp_respond "$id" "$(jq -cn --argjson s "$(_mcp_supported_json)" --argjson caps "$(_mcp_capabilities '')" \
+        --arg ins "$MCP_INSTRUCTIONS" \
+        '{supportedVersions: $s, capabilities: $caps, instructions: $ins, ttlMs: 3600000, cacheScope: "public"}')" modern
       ;;
-    "tools/list")
-      json_response "$id" "{\"tools\":${TOOLS_JSON}}"
-      ;;
-    "tools/call")
-      handle_call "$msg" "$id"
-      ;;
-    "ping")
-      json_response "$id" "{}"
-      ;;
-    *)
-      if [[ "$id" != "null" ]]; then
-        json_error "$id" -32601 "Method not found: ${method}"
+    ping) _mcp_respond "$id" '{}' "$era" ;;
+    logging/setLevel)
+      local lvl
+      lvl=$(printf '%s' "$params" | jq -r '.level // empty | tostring')
+      if [[ "$(_mcp_level_num "$lvl")" == "-1" ]]; then
+        _mcp_fail "$id" -32602 "Invalid log level: ${lvl:-missing} (debug, info, notice, warning, error, critical, alert, emergency)"
+      else
+        MCP_LOG_LEVEL="$lvl"
+        _mcp_respond "$id" '{}' "$era"
       fi
       ;;
+    tools/list) _mcp_respond "$id" "{\"tools\":${MCP_TOOLS_LIST}}" "$era" ;;
+    tools/call)
+      local name args errs is_action
+      name=$(printf '%s' "$params" | jq -r '.name // empty | tostring')
+      if ! printf '%s' "$MCP_TOOLS_ALL" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null; then
+        _mcp_fail "$id" -32602 "Unknown tool: ${name:-missing}"
+        return
+      fi
+      args=$(printf '%s' "$params" | jq -c '.arguments // {}')
+      # Input validation failures are tool execution errors (the model can fix them)
+      errs=$(jq -rn --argjson x "$args" --argjson schema "$(printf '%s' "$MCP_TOOLS_ALL" | jq -c --arg n "$name" '.[] | select(.name == $n) | .inputSchema')" \
+        '$x | '"$_MCP_VALIDATE_JQ" 2>&1)
+      if [[ -n "$errs" ]]; then
+        _mcp_respond "$id" "$(jq -cn --arg t "Invalid arguments for ${name}: $(printf '%s' "$errs" | tr '\n' ';' | sed 's/;$//; s/;/; /g')" \
+          '{content: [{type: "text", text: $t}], isError: true}')" "$era"
+        return
+      fi
+      is_action=$(printf '%s' "$MCP_TOOLS_ALL" | jq -r --arg n "$name" '.[] | select(.name == $n) | ._action')
+      _mcp_ensure_tokens "$is_action"
+      REQ_ARGS="$args"
+      _mcp_spawn _mcp_worker_tool "$name"
+      ;;
+    resources/list) _mcp_respond "$id" "$(_mcp_resource_list)" "$era" ;;
+    resources/templates/list) _mcp_respond "$id" "$(printf '%s' "$_MCP_TEMPLATES" | jq -c .)" "$era" ;;
+    resources/read)
+      local uri
+      uri=$(printf '%s' "$params" | jq -r '.uri // empty | tostring')
+      if [[ -z "$uri" ]]; then
+        _mcp_fail "$id" -32602 "Missing uri"
+        return
+      fi
+      _mcp_ensure_tokens false
+      _mcp_spawn _mcp_worker_resource "$uri"
+      ;;
+    prompts/list) _mcp_respond "$id" "$(printf '%s' "$_MCP_PROMPTS" | jq -c .)" "$era" ;;
+    prompts/get)
+      local pname pargs
+      pname=$(printf '%s' "$params" | jq -r '.name // empty | tostring')
+      pargs=$(printf '%s' "$params" | jq -c '.arguments // {} | if type == "object" then . else {} end')
+      if ! printf '%s' "$_MCP_PROMPTS" | jq -e --arg n "$pname" 'any(.prompts[]; .name == $n)' >/dev/null; then
+        _mcp_fail "$id" -32602 "Unknown prompt: ${pname:-missing}"
+        return
+      fi
+      _mcp_ensure_tokens false
+      _mcp_spawn _mcp_worker_prompt "$pname" "$pargs"
+      ;;
+    completion/complete) _mcp_respond "$id" "$(_mcp_complete "$params")" "$era" ;;
+    *) _mcp_fail "$id" -32601 "Method not found: ${method}" ;;
   esac
 }
 
-# ── Main protocol loop ──
-_log "started (v${MUSTER_VERSION})"
+# ── Main loop ──
+_mcp_shutdown() {
+  _mcp_kill_all
+  rm -rf "$MCP_STATE"
+  exit "${1:-0}"
+}
+trap '_mcp_shutdown 130' INT TERM
+trap 'rm -rf "$MCP_STATE"' EXIT
 
-while IFS= read -r line; do
-  [[ -z "$line" ]] && continue
+# Background workers get their own process group (cancellation kills the tree)
+set -m 2>/dev/null || true
 
-  # Check if input is a JSON-RPC batch (array of requests)
-  line_type=$(printf '%s\n' "$line" | jq -r 'type' 2>/dev/null)
+_mcp_log_stderr "started v${MUSTER_VERSION} (MCP ${MCP_MODERN_VERSION} + ${MCP_LEGACY_VERSIONS// /, }), project: ${MCP_ROOT:-none (${MCP_CWD})}, actions: ${MCP_ALLOW_ACTIONS}"
 
-  if [[ "$line_type" == "array" ]]; then
-    # Batch request: iterate over each element
-    count=$(printf '%s\n' "$line" | jq 'length')
-    i=0
-    while (( i < count )); do
-      msg=$(printf '%s\n' "$line" | jq -c ".[$i]")
-      dispatch_message "$msg"
-      (( i++ ))
-    done
-  else
-    dispatch_message "$line"
-  fi
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%$'\r'}"
+  [[ -z "${line//[[:space:]]/}" ]] && continue
+  case "$line" in
+    "["*)
+      # JSON-RPC batch (MCP 2025-03-26): handle each element
+      if ! printf '%s' "$line" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        _mcp_fail null -32600 "Invalid Request"
+        continue
+      fi
+      while IFS= read -r _el; do
+        _mcp_dispatch "$_el"
+      done < <(printf '%s' "$line" | jq -c '.[]')
+      ;;
+    *) _mcp_dispatch "$line" ;;
+  esac
 done
+
+# stdin closed: let running calls finish and answer (not cancel watchdogs), then exit
+for _f in "$MCP_STATE"/req/*.pid; do
+  [[ -f "$_f" ]] || continue
+  _p=$(cat "$_f" 2>/dev/null)
+  [[ -n "$_p" ]] && wait "$_p" 2>/dev/null
+done
+exit 0
