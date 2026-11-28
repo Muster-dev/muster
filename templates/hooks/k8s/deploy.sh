@@ -6,7 +6,7 @@ NAMESPACE="${MUSTER_K8S_NAMESPACE:-{{NAMESPACE}}}"
 SERVICE="${MUSTER_K8S_SERVICE:-{{SERVICE_NAME}}}"
 DEPLOY_NAME="${MUSTER_K8S_DEPLOYMENT:-{{K8S_DEPLOY_NAME}}}"
 REGISTRY="${DOCKER_REGISTRY:-localhost:5000}"
-TAG="${IMAGE_TAG:-latest}"
+TAG="${MUSTER_IMAGE_TAG:-${IMAGE_TAG:-latest}}"
 TIMEOUT="${MUSTER_DEPLOY_TIMEOUT:-120}"
 : "${SERVICE:?SERVICE is required}"
 : "${NAMESPACE:?NAMESPACE is required}"
@@ -114,9 +114,18 @@ else
   docker push "${REGISTRY}/${SERVICE}:${TAG}"
 
   echo "Updating deployment..."
-  kubectl set image "deployment/${DEPLOY_NAME}" \
-    "${SERVICE}=${REGISTRY}/${SERVICE}:${TAG}" \
-    -n "$NAMESPACE"
+  # Stamp the version on the pod template in the same change as the image
+  # (one ReplicaSet revision) so `muster status` can label each ReplicaSet.
+  _has_ctr=$(kubectl get "deployment/${DEPLOY_NAME}" -n "$NAMESPACE" \
+    -o "jsonpath={.spec.template.spec.containers[?(@.name=='${SERVICE}')].name}" 2>/dev/null || true)
+  if [[ -n "${MUSTER_DEPLOY_VERSION:-}" && "$_has_ctr" == "$SERVICE" ]]; then
+    kubectl patch "deployment/${DEPLOY_NAME}" -n "$NAMESPACE" --type=strategic -p \
+      "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"muster.dev/version\":\"${MUSTER_DEPLOY_VERSION}\"}},\"spec\":{\"containers\":[{\"name\":\"${SERVICE}\",\"image\":\"${REGISTRY}/${SERVICE}:${TAG}\"}]}}}}"
+  else
+    kubectl set image "deployment/${DEPLOY_NAME}" \
+      "${SERVICE}=${REGISTRY}/${SERVICE}:${TAG}" \
+      -n "$NAMESPACE"
+  fi
 fi
 
 # Wait for rollout with progress + early error detection

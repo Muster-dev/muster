@@ -104,7 +104,8 @@ _escape_single_quotes() {
 }
 
 # ── Copy template hooks for a service, replacing placeholders ──
-# Args: stack svc_key svc_name hook_dir [compose_file] [dockerfile] [k8s_dir] [namespace] [port] [k8s_deploy_name]
+# Args: stack svc_key svc_name hook_dir [compose_file] [dockerfile] [k8s_dir] [namespace] [port] [k8s_deploy_name] [start_cmd] [strategy]
+# strategy (rolling|blue-green|canary) picks templates/hooks/<stack>/<strategy>/ when it exists.
 _setup_copy_hooks() {
   local stack="$1" svc_key="$2" svc_name="$3" hook_dir="$4"
   local compose_path="${5:-docker-compose.yml}"
@@ -114,6 +115,7 @@ _setup_copy_hooks() {
   local port="${9:-8080}"
   local k8s_deploy_name="${10:-${svc_name}}"
   local start_cmd="${11:-}"
+  local strategy="${12:-rolling}"
   local template_dir="${MUSTER_ROOT}/templates/hooks/${stack}"
 
   # Use infrastructure templates for known infra services (skip build steps)
@@ -121,6 +123,8 @@ _setup_copy_hooks() {
   if _is_infra_service "$svc_name" && [[ -d "${template_dir}/infra" ]]; then
     template_dir="${template_dir}/infra"
     svc_image=$(_infra_default_image "$svc_name")
+  elif [[ "$strategy" != "rolling" && -d "${template_dir}/${strategy}" ]]; then
+    template_dir="${template_dir}/${strategy}"
   fi
 
   if [[ ! -d "$template_dir" ]]; then
@@ -164,6 +168,7 @@ _setup_copy_hooks() {
       -e "s|{{DOCKERFILE}}|${esc_dockerfile}|g" \
       -e "s|{{K8S_DIR}}|${esc_k8s_path}|g" \
       -e "s|{{START_CMD}}|${esc_start_cmd}|g" \
+      -e "s|{{STRATEGY}}|${strategy}|g" \
       "$f" > "${hook_dir}/${basename}"
     # Owner-writable so users can edit their own hooks. Edits are caught by
     # the per-machine approval check; `muster hooks lock` makes them read-only.

@@ -460,6 +460,12 @@ k8s_env_for_service() {
   if [[ -n "$deploy_timeout" && "$deploy_timeout" != "null" ]]; then
     echo "MUSTER_DEPLOY_TIMEOUT=${deploy_timeout}"
   fi
+  # Service that carries the traffic (blue-green/canary hooks), when set
+  local traffic_svc
+  traffic_svc=$(config_get ".services.${svc}.k8s.service")
+  if [[ -n "$traffic_svc" && "$traffic_svc" != "null" ]]; then
+    echo "MUSTER_K8S_TRAFFIC_SERVICE=${traffic_svc}"
+  fi
   local deploy_mode
   deploy_mode=$(config_get ".services.${svc}.deploy_mode")
   if [[ -n "$deploy_mode" && "$deploy_mode" != "null" ]]; then

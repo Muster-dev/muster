@@ -116,6 +116,11 @@ _setup_txn_merge_hooks() {
       if [[ "$edited" == "true" ]]; then
         if [[ "$_SETUP_TXN_MODE" == "update" ]]; then
           kept="${kept}${kept:+, }${rel}"
+          # Strategy switch: leave the new template next to the edited hook
+          if [[ -n "${_SETUP_STRATEGY_NEW:-}" ]]; then
+            cp -p "$f" "${dest}.strategy-new" 2>/dev/null && \
+              _setup_notice "Your edited ${rel} was kept; the strategy template is in ${rel}.strategy-new (wire in MUSTER_TARGET_DEPLOYMENT and MUSTER_IMAGE_TAG)"
+          fi
           continue
         fi
         if [[ -z "$backup_dir" ]]; then
