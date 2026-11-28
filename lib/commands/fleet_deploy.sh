@@ -27,12 +27,12 @@ _fleet_cmd_deploy() {
       --help|-h)
         echo "Usage: muster fleet deploy [target] [--parallel] [--sequential] [--rolling] [--dry-run] [--sync] [--json]"
         echo ""
-        echo "Deploy to fleet machines. Target can be a machine name, group name,"
-        echo "or omitted to deploy to all machines following deploy_order."
+        echo "Deploy to fleet servers. Target can be a server name, group name,"
+        echo "or omitted to deploy to all servers following deploy_order."
         echo ""
         echo "Options:"
-        echo "  --parallel      Deploy to all target machines in parallel"
-        echo "  --sequential    Deploy one machine at a time (default)"
+        echo "  --parallel      Deploy to all target servers in parallel"
+        echo "  --sequential    Deploy one server at a time (default)"
         echo "  --rolling       Deploy to one, verify health, then continue"
         echo "  --dry-run       Preview deploy plan without executing"
         echo "  --sync          Force sync hooks before deploy (regardless of hook_mode)"
@@ -77,7 +77,7 @@ _fleet_cmd_deploy() {
     else
       # Single machine
       if ! _fleet_load_machine "$target" 2>/dev/null; then
-        err "Unknown machine or group: ${target}"
+        err "Unknown server or group: ${target}"
         return 1
       fi
       machines[0]="$target"
@@ -116,7 +116,7 @@ _fleet_cmd_deploy() {
   fi
 
   if (( ${#machines[@]} == 0 )); then
-    warn "No machines to deploy to"
+    warn "No servers to deploy to"
     return 0
   fi
 
@@ -152,7 +152,7 @@ _fleet_cmd_deploy() {
   fi
 
   echo ""
-  printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Fleet Deploy${RESET} — ${total} machine(s)"
+  printf '%b\n' "  ${BOLD}${ACCENT_BRIGHT}Fleet Deploy${RESET} — $(_fleet_plural "$total" server)"
   echo ""
 
   # Fire fleet-level skill hooks
@@ -189,12 +189,12 @@ _fleet_deploy_dry_run() {
   local w=$(( TERM_COLS - 4 ))
   (( w > 50 )) && w=50
   (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
+  local inner=$w
 
   echo ""
 
   local label="Deploy Plan (dry-run)"
-  local label_pad_len=$(( w - ${#label} - 3 ))
+  local label_pad_len=$(( w - ${#label} - 2 ))
   (( label_pad_len < 1 )) && label_pad_len=1
   local label_pad
   printf -v label_pad '%*s' "$label_pad_len" ""
@@ -211,7 +211,12 @@ _fleet_deploy_dry_run() {
 
     local status_icon="○" status_color="$DIM" tag=""
 
-    if [[ "$_FM_MODE" == "muster" ]]; then
+    if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+      # Cloud servers don't use SSH pairing tokens: the relay authenticates
+      # (same as fleet list --json "paired": true)
+      host_str="cloud:${_FM_HOST}"
+      status_icon="●"; status_color="$GREEN"
+    elif [[ "$_FM_MODE" == "muster" ]]; then
       local token
       token=$(fleet_token_get "$machine")
       if [[ -n "$token" ]]; then
@@ -759,11 +764,11 @@ _fleet_deploy_rolling() {
   done
 
   if (( failed > 0 )); then
-    warn "${failed}/${total} machines had deploy failures"
+    warn "${failed}/$(_fleet_plural "$total" server) had deploy failures"
     return 1
   fi
 
-  ok "Rolling deploy complete — ${total} machines"
+  ok "Rolling deploy complete — $(_fleet_plural "$total" server)"
   return 0
 }
 
@@ -782,7 +787,7 @@ _fleet_deploy_parallel() {
   local tmp_dir="${TMPDIR:-/tmp}/muster-fleet-$$"
   mkdir -p "$tmp_dir"
 
-  info "Deploying to ${total} machines in parallel..."
+  info "Deploying to $(_fleet_plural "$total" server) in parallel..."
   echo ""
 
   # Spawn background processes (cap at 10 concurrent)
@@ -946,12 +951,12 @@ ${_ke}"
   local _rw=$(( TERM_COLS - 4 ))
   (( _rw > 50 )) && _rw=50
   (( _rw < 10 )) && _rw=10
-  local _rinner=$(( _rw - 2 ))
+  local _rinner=$_rw
 
   echo ""
 
   local _rlabel="Results"
-  local _rlabel_pad_len=$(( _rw - ${#_rlabel} - 3 ))
+  local _rlabel_pad_len=$(( _rw - ${#_rlabel} - 2 ))
   (( _rlabel_pad_len < 1 )) && _rlabel_pad_len=1
   local _rlabel_pad
   printf -v _rlabel_pad '%*s' "$_rlabel_pad_len" ""
@@ -1015,7 +1020,7 @@ ${_ke}"
 
   # Offer retry for failed machines
   if (( failed > 0 )); then
-    menu_select "Some machines failed. What do you want to do?" \
+    menu_select "Some servers failed. What do you want to do?" \
       "Retry failed" "View logs" "Continue"
 
     case "$MENU_RESULT" in

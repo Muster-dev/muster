@@ -583,3 +583,12 @@ _fleet_check_nonroot() {
     ok "Remote user is non-root (uid ${remote_uid})"
   fi
 }
+
+# "1 server" / "3 servers". Args: count noun
+_fleet_plural() {
+  if [[ "$1" == "1" ]]; then
+    printf '%s %s' "$1" "$2"
+  else
+    printf '%s %ss' "$1" "$2"
+  fi
+}

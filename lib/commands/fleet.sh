@@ -9,6 +9,7 @@ source "$MUSTER_ROOT/lib/tui/streambox.sh"
 source "$MUSTER_ROOT/lib/core/credentials.sh"
 source "$MUSTER_ROOT/lib/commands/history.sh"
 source "$MUSTER_ROOT/lib/commands/fleet_deploy.sh"
+source "$MUSTER_ROOT/lib/commands/fleet_remote.sh"
 
 cmd_fleet() {
   case "${1:-}" in
@@ -54,6 +55,14 @@ cmd_fleet() {
     rollback)
       shift
       _fleet_cmd_rollback "$@"
+      ;;
+    logs)
+      shift
+      _fleet_cmd_logs "$@"
+      ;;
+    restart)
+      shift
+      _fleet_cmd_restart "$@"
       ;;
     sync)
       shift
@@ -131,29 +140,33 @@ cmd_fleet() {
 _fleet_cmd_help() {
   echo "Usage: muster fleet <command>"
   echo ""
-  echo "Deploy one project to multiple machines via SSH or cloud tunnel."
+  echo "Deploy one project to multiple servers via SSH or cloud tunnel."
   echo ""
   echo "Setup:"
   echo "  init                          Create empty remotes.json"
-  echo "  add <name> user@host [opts]   Add a machine to the fleet"
-  echo "  remove <name>                 Remove a machine (+ stored token)"
-  echo "  pair <name> --token <token>   Manually pair a muster-mode machine"
-  echo "  group <name> <m1> [m2...]     Create or update a machine group"
+  echo "  add <name> user@host [opts]   Add a server to the fleet"
+  echo "  remove <name>                 Remove a server (+ stored token)"
+  echo "  pair <name> --token <token>   Manually pair a muster-mode server"
+  echo "  group <name> <s1> [s2...]     Create or update a server group"
   echo "  ungroup <name>                Remove a group"
   echo ""
   echo "Info:"
-  echo "  list [--json]                 Show machines, groups, status"
-  echo "  test [name|group]             Test connectivity (SSH or cloud)"
+  echo "  list [--json]                 Show servers, groups, status"
+  echo "  test [name|group] [--json]    Test connectivity (SSH or cloud)"
   echo ""
   echo "Operations:"
-  echo "  deploy [target] [--parallel]  Deploy to fleet machines"
+  echo "  deploy [target] [--parallel]  Deploy to fleet servers"
   echo "  deploy [target] --sync        Sync hooks before deploying"
   echo "  status [target] [--json]      Check health across fleet"
-  echo "  rollback [target]             Rollback fleet machines"
+  echo "  rollback [target]             Rollback fleet servers"
+  echo "  logs <server> <svc> [--tail N] [--json]"
+  echo "                                Last N log lines from a server (no --follow)"
+  echo "  restart <server> [svc...] [--yes] [--json]"
+  echo "                                Restart services on a server"
   echo ""
   echo "Hook Management:"
-  echo "  sync [target] [--dry-run]     Push local hooks to remote machines"
-  echo "  edit <name> [--sync|--manual] Change machine settings"
+  echo "  sync [target] [--dry-run]     Push local hooks to remote servers"
+  echo "  edit <name> [--sync|--manual] Change server settings"
   echo "  setup-user <name> [--user X]  Create dedicated deploy user on target"
   echo ""
   echo "Signing:"
@@ -174,7 +187,7 @@ _fleet_cmd_help() {
   echo "  remove-agent <name>           Remove agent from target"
   echo ""
   echo "Transport:"
-  echo "  SSH (default)     Direct SSH connection to each machine"
+  echo "  SSH (default)     Direct SSH connection to each server"
   echo "  Cloud             Route through cloud relay (--transport cloud)"
   echo "                    Requires muster-tunnel + muster-agent on remote"
   echo ""
@@ -202,7 +215,7 @@ _fleet_pick_machine() {
   done < <(fleet_machines)
 
   if [[ ${#_fpm_machines[@]} -eq 0 ]]; then
-    info "No machines configured"
+    info "No servers configured"
     return 1
   fi
 
@@ -1187,7 +1200,7 @@ _fleet_cmd_list() {
   local w=$(( TERM_COLS - 4 ))
   (( w > 50 )) && w=50
   (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
+  local inner=$w
 
   echo ""
 
@@ -1195,8 +1208,8 @@ _fleet_cmd_list() {
   machines=$(fleet_machines)
 
   # ── Machines box ──
-  local label="Machines"
-  local label_pad_len=$(( w - ${#label} - 3 ))
+  local label="Servers"
+  local label_pad_len=$(( w - ${#label} - 2 ))
   (( label_pad_len < 1 )) && label_pad_len=1
   local label_pad
   printf -v label_pad '%*s' "$label_pad_len" ""
@@ -1204,7 +1217,7 @@ _fleet_cmd_list() {
   printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$label" "${RESET}${ACCENT}" "$label_pad" "${RESET}"
 
   if [[ -z "$machines" ]]; then
-    local _empty="No machines configured"
+    local _empty="No servers configured"
     local _epad_len=$(( inner - ${#_empty} - 2 ))
     (( _epad_len < 0 )) && _epad_len=0
     local _epad
@@ -1275,7 +1288,7 @@ _fleet_cmd_list() {
   if [[ -n "$groups" ]]; then
     echo ""
     local glabel="Groups"
-    local glabel_pad_len=$(( w - ${#glabel} - 3 ))
+    local glabel_pad_len=$(( w - ${#glabel} - 2 ))
     (( glabel_pad_len < 1 )) && glabel_pad_len=1
     local glabel_pad
     printf -v glabel_pad '%*s' "$glabel_pad_len" ""
@@ -1330,10 +1343,36 @@ _fleet_cmd_list() {
 # ── test ──
 
 _fleet_cmd_test() {
-  local target="${1:-}"
+  local target="" json_mode=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_mode=true; shift ;;
+      --help|-h)
+        echo "Usage: muster fleet test [server|group] [--json]"
+        echo ""
+        echo "Check connectivity (SSH or cloud relay) and, for muster-mode servers,"
+        echo "that muster answers there."
+        return 0
+        ;;
+      --*)
+        err "Unknown flag: $1"
+        return 1
+        ;;
+      *) target="$1"; shift ;;
+    esac
+  done
+
+  if [[ "$json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
+  fi
 
   if ! fleet_load_config; then
-    err "No remotes.json found"
+    if [[ "$json_mode" == "true" ]]; then
+      printf '{"servers":[],"passed":0,"failed":0}\n'
+      return 0
+    fi
+    err "No fleet configured. Run: muster fleet init"
     return 1
   fi
 
@@ -1357,104 +1396,41 @@ _fleet_cmd_test() {
     fi
   fi
 
+  if [[ "$json_mode" == "true" ]]; then
+    _fleet_test_json ${machines_to_test[@]+"${machines_to_test[@]}"}
+    return $?
+  fi
+
   local w=$(( TERM_COLS - 4 ))
   (( w > 50 )) && w=50
   (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
+  local inner=$w
 
   echo ""
 
   local label="Connectivity"
-  local label_pad_len=$(( w - ${#label} - 3 ))
+  local label_pad_len=$(( w - ${#label} - 2 ))
   (( label_pad_len < 1 )) && label_pad_len=1
   local label_pad
   printf -v label_pad '%*s' "$label_pad_len" ""
   label_pad="${label_pad// /─}"
   printf '  %b┌─%b%s%b─%s┐%b\n' "${ACCENT}" "${BOLD}" "$label" "${RESET}${ACCENT}" "$label_pad" "${RESET}"
 
-  local pass=0 fail=0
-  local i=0
-  while (( i < ${#machines_to_test[@]} )); do
-    local machine="${machines_to_test[$i]}"
-    _fleet_load_machine "$machine"
-
-    local status_icon status_color tag=""
-
-    if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
-      # Cloud transport test: relay ping, then (muster mode) a real
-      # allowlisted command to prove muster answers on the agent
-      if fleet_check "$machine"; then
-        status_icon="●"; status_color="$GREEN"
-        tag=" cloud ok"
-        if [[ "$_FM_MODE" == "muster" ]]; then
-          source "$MUSTER_ROOT/lib/core/cloud.sh"
-          if _cloud_status_json "$(_fleet_cloud_agent "$machine")" "$_FM_PROJECT_DIR" >/dev/null; then
-            tag=" cloud ok, muster ok"
-            pass=$(( pass + 1 ))
-          else
-            status_icon="●"; status_color="$RED"
-            tag=" cloud ok, muster fail"
-            fail=$(( fail + 1 ))
-          fi
-        else
-          pass=$(( pass + 1 ))
-        fi
-      else
-        source "$MUSTER_ROOT/lib/core/cloud.sh"
-        if ! _fleet_cloud_available; then
-          status_icon="●"; status_color="$YELLOW"
-          tag=" no tunnel"
-        else
-          status_icon="●"; status_color="$RED"
-          tag=" cloud fail"
-        fi
-        fail=$(( fail + 1 ))
-      fi
-    elif fleet_check "$machine"; then
-      # SSH test passed
-      status_icon="●"; status_color="$GREEN"
-      tag=" SSH ok"
-
-      # Token test (muster mode only)
-      if [[ "$_FM_MODE" == "muster" ]]; then
-        local token
-        token=$(fleet_token_get "$machine")
-        if [[ -z "$token" ]]; then
-          status_icon="●"; status_color="$YELLOW"
-          tag=" unpaired"
-        elif fleet_verify_pair "$machine"; then
-          tag=" SSH ok, token ok"
-        else
-          status_icon="●"; status_color="$RED"
-          tag=" SSH ok, token fail"
-          fail=$(( fail + 1 ))
-          i=$(( i + 1 ))
-
-          # Render line before continue
-          local _display="$machine"
-          local _tag_len=${#tag}
-          local _max=$(( inner - 4 - _tag_len ))
-          (( _max < 5 )) && _max=5
-          (( ${#_display} > _max )) && _display="${_display:0:$((_max - 3))}..."
-          local _clen=$(( 4 + ${#_display} + _tag_len ))
-          local _plen=$(( inner - _clen ))
-          (( _plen < 0 )) && _plen=0
-          local _pad
-          printf -v _pad '%*s' "$_plen" ""
-          printf '  %b│%b  %b%s%b %s%s%b%s%b%b│%b\n' \
-            "${ACCENT}" "${RESET}" "$status_color" "$status_icon" "${RESET}" \
-            "$_display" "$_pad" "$RED" "$tag" "${RESET}" "${ACCENT}" "${RESET}"
-          continue
-        fi
-      fi
-
+  local pass=0 fail=0 machine notes=()
+  for machine in ${machines_to_test[@]+"${machines_to_test[@]}"}; do
+    if _fleet_test_one "$machine"; then
       pass=$(( pass + 1 ))
     else
-      status_icon="●"; status_color="$RED"
-      tag=" SSH fail"
       fail=$(( fail + 1 ))
     fi
 
+    local status_color="$RED"
+    case "$_FT_LEVEL" in
+      ok) status_color="$GREEN" ;;
+      warn) status_color="$YELLOW" ;;
+    esac
+
+    local tag="$_FT_TAG"
     local display="$machine"
     local tag_len=${#tag}
     local max_display=$(( inner - 4 - tag_len ))
@@ -1469,15 +1445,12 @@ _fleet_cmd_test() {
     local pad
     printf -v pad '%*s' "$pad_len" ""
 
-    local tag_color="$GREEN"
-    (( fail > 0 )) && [[ "$status_color" == "$RED" ]] && tag_color="$RED"
-    [[ "$status_color" == "$YELLOW" ]] && tag_color="$YELLOW"
-
-    printf '  %b│%b  %b%s%b %s%s%b%s%b%b│%b\n' \
-      "${ACCENT}" "${RESET}" "$status_color" "$status_icon" "${RESET}" \
-      "$display" "$pad" "$tag_color" "$tag" "${RESET}" "${ACCENT}" "${RESET}"
-
-    i=$(( i + 1 ))
+    printf '  %b│%b  %b●%b %s%s%b%s%b%b│%b\n' \
+      "${ACCENT}" "${RESET}" "$status_color" "${RESET}" \
+      "$display" "$pad" "$status_color" "$tag" "${RESET}" "${ACCENT}" "${RESET}"
+    if [[ "$_FT_OK" != "true" && -n "$_FT_ERROR" ]]; then
+      notes[${#notes[@]}]="${machine}: ${_FT_ERROR}"
+    fi
   done
 
   local bottom
@@ -1485,9 +1458,14 @@ _fleet_cmd_test() {
   bottom="${bottom// /─}"
   printf '  %b└%s┘%b\n' "${ACCENT}" "$bottom" "${RESET}"
 
+  local _note
+  for _note in ${notes[@]+"${notes[@]}"}; do
+    printf '%b\n' "  ${DIM}${_note}${RESET}"
+  done
+
   echo ""
   if (( fail == 0 )); then
-    ok "All ${pass} machine(s) passed"
+    ok "All $(_fleet_plural "$pass" server) passed"
   else
     warn "${pass} passed, ${fail} failed"
   fi
@@ -1501,12 +1479,12 @@ _fleet_cmd_group() {
   shift 2>/dev/null || true
 
   if [[ -z "$group_name" ]]; then
-    err "Usage: muster fleet group <name> <machine1> [machine2...]"
+    err "Usage: muster fleet group <name> <server1> [server2...]"
     return 1
   fi
 
   if [[ $# -eq 0 ]]; then
-    err "Usage: muster fleet group <name> <machine1> [machine2...]"
+    err "Usage: muster fleet group <name> <server1> [server2...]"
     return 1
   fi
 
@@ -1613,12 +1591,12 @@ _fleet_cmd_status() {
   local w=$(( TERM_COLS - 4 ))
   (( w > 50 )) && w=50
   (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
+  local inner=$w
 
   echo ""
 
   local label="Fleet Status"
-  local label_pad_len=$(( w - ${#label} - 3 ))
+  local label_pad_len=$(( w - ${#label} - 2 ))
   (( label_pad_len < 1 )) && label_pad_len=1
   local label_pad
   printf -v label_pad '%*s' "$label_pad_len" ""
@@ -1717,7 +1695,7 @@ _fleet_status_json() {
   for machine in "$@"; do
     [[ -z "$machine" ]] && continue
     _fleet_load_machine "$machine"
-    local reachable=false services="null" healthy="null" total="null" error=""
+    local reachable=false services="null" healthy="null" total="null" error="" version=""
     if fleet_check "$machine" >/dev/null 2>&1; then
       reachable=true
       local remote_status=""
@@ -1739,6 +1717,8 @@ _fleet_status_json() {
         services=$(printf '%s' "$remote_status" | jq -c '[.services | to_entries[] | {service: .key} + .value]')
         total=$(printf '%s' "$remote_status" | jq '.services | length')
         healthy=$(printf '%s' "$remote_status" | jq '[.services[] | select(.status == "healthy")] | length')
+        # muster 0.7.0 and older don't report a version in status --json ("")
+        version=$(printf '%s' "$remote_status" | jq -r '.muster_version // "" | strings' 2>/dev/null)
       elif [[ "$_FM_MODE" == "muster" && -z "$error" ]]; then
         error="no status"
       fi
@@ -1746,7 +1726,7 @@ _fleet_status_json() {
       error="unreachable"
     fi
     [[ -n "$out" ]] && out="${out},"
-    out="${out}{\"machine\":$(_json_str "$machine"),\"host\":$(_json_str "$_FM_HOST"),\"user\":$(_json_str "$_FM_USER"),\"port\":$(_json_int "$_FM_PORT" 22),\"transport\":$(_json_str "${_FM_TRANSPORT:-ssh}"),\"mode\":$(_json_str "$_FM_MODE"),\"reachable\":${reachable},\"services\":${services},\"healthy\":${healthy},\"total\":${total},\"error\":$(_json_str_or_null "$error")}"
+    out="${out}{\"machine\":$(_json_str "$machine"),\"host\":$(_json_str "$_FM_HOST"),\"user\":$(_json_str "$_FM_USER"),\"port\":$(_json_int "$_FM_PORT" 22),\"transport\":$(_json_str "${_FM_TRANSPORT:-ssh}"),\"mode\":$(_json_str "$_FM_MODE"),\"reachable\":${reachable},\"services\":${services},\"healthy\":${healthy},\"total\":${total},\"error\":$(_json_str_or_null "$error"),\"muster_version\":$(_json_str "$version")}"
   done
   printf '{"status":[%s]}\n' "$out"
 }
@@ -2074,7 +2054,7 @@ _fleet_cmd_rollback() {
         echo ""
         echo "  --service, -s <svc>   Roll back only this service (repeatable)."
         echo "                        Default: every service in deploy order."
-        echo "  --parallel            Roll back machines in parallel (max 10 concurrent)."
+        echo "  --parallel            Roll back servers in parallel (max 10 concurrent)."
         return 0
         ;;
       --*)
@@ -2117,7 +2097,7 @@ _fleet_cmd_rollback() {
 
   local total=${#machines[@]}
   if (( total == 0 )); then
-    warn "No machines to roll back"
+    warn "No servers to roll back"
     return 0
   fi
 
@@ -2127,7 +2107,7 @@ _fleet_cmd_rollback() {
   mkdir -p "$log_dir"
 
   echo ""
-  printf '%b\n' "  ${BOLD}${YELLOW}Fleet Rollback${RESET} — ${total} machine(s)"
+  printf '%b\n' "  ${BOLD}${YELLOW}Fleet Rollback${RESET} — $(_fleet_plural "$total" server)"
   echo ""
 
   # Resolve fleet name for skill hooks
@@ -2149,7 +2129,7 @@ _fleet_cmd_rollback() {
     local tmp_dir="${TMPDIR:-/tmp}/muster-fleet-rb-$$"
     mkdir -p "$tmp_dir"
 
-    info "Rolling back ${total} machines in parallel..."
+    info "Rolling back $(_fleet_plural "$total" server) in parallel..."
     echo ""
 
     local max_concurrent=10
