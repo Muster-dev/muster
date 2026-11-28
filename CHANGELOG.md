@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-28
+
+### Added
+- `muster fleet logs <server> <service> [--tail N] [--json]`: read a server's logs over SSH or Fleet Cloud.
+- `muster fleet restart <server> [service...] [--yes] [--json]`: restart services on a server (asks first).
+- `muster fleet test --json`: per-server connectivity results with latency, for muster-tui and scripts.
+- `status --json` and `fleet status --json` report `muster_version`.
+
+### Changed
+- Fleet output says "server"/"servers" instead of "machine(s)".
+- `muster cloud login` names the login after this computer and its OS, says "Personal account", and lists the next steps; Fleet Cloud wording matches the dashboard (Servers, Access).
+- `fleet deploy --dry-run` no longer lists cloud servers as unpaired.
+
+### Fixed
+- `muster ask` retries transient network and server errors instead of ending the conversation.
+- The `forbidden` scope error in `--json` mode is valid JSON.
+- Misaligned borders on fleet list, test, status and results boxes.
+
 ## [0.7.0] - 2026-11-26
 
 ### Added
