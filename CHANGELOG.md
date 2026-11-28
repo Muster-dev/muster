@@ -10,10 +10,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `muster ci init github|gitlab` writes a deploy workflow for the project (dry run on pull requests, deploy on main, environment + concurrency); `muster ci env` lists the secrets it needs; `muster ci run` is the CI engine for any CI system.
 - Releases publish `muster-X.Y.Z.tar.gz` and `checksums.txt`.
 - Fleet Cloud reads `MUSTER_CLOUD_TOKEN` (and `MUSTER_CLOUD_RELAY` / `MUSTER_CLOUD_ORG`) from the environment.
+- `muster env`: config, encrypted secrets and feature flags kept in the repo (`.muster/env`, `muster.env.schema.json`). `init` (imports an existing `.env`), `set` (hidden prompt for secrets), `get`, `unset`, `list`, `diff`, `edit`, `history`, `check` (CI gate), `pull`, `example`, `keygen`, `recipient`, `rekey`. Secrets are encrypted per value to each recipient with hybrid X25519 + ML-KEM-768 by the new `muster-crypt` helper; removing a recipient rotates the data key. See docs/env.md.
+- `muster run [--env E] -- <cmd>`: run a command with config, secrets and flags injected; nothing is written to disk.
+- `muster flag set|get|list|toggle|unset|reset [--local]`: simple feature flags in flagd's format, delivered as `MUSTER_FLAG_*` env vars and `MUSTER_FLAGS_FILE`.
+- `muster env codegen ts|py|go`: zero-dependency typed readers that validate every key at startup and keep secrets out of logs (`[REDACTED]`).
+- `muster env guard install`: pre-commit hook that blocks `.env` files, muster keys, unencrypted secrets files and any file containing a secret's value.
+- Deploy hooks get the selected env in memory (`env.source: "muster"` in muster.json, or automatically when there is no `.env`). Secret values are masked in deploy logs and in `muster ask`.
+- Installer: optional `muster-crypt` (prompt, or `MUSTER_WITH_CRYPT=1`), pinned and checksum-verified.
 
 ### Changed
 - On CI without a TTY: colours are off unless `FORCE_COLOR` is set, failed hooks and health checks produce GitHub annotations (`MUSTER_GITHUB_ANNOTATIONS=off` to disable), and SSH host keys are checked strictly (`MUSTER_SSH_HOSTKEY_CHECK=yes`; set `accept-new` to opt out).
 - Service credentials are read from `MUSTER_CRED_<KEY>` when set, before the keychain or a prompt.
+- Global flags (`-q`, `--verbose`, …) after `--` are passed through to the wrapped command instead of being consumed by muster.
 
 ### Fixed
 - A deploy without a TTY could hang on a password prompt reading an open stdin (SSH password auth). Prompts now refuse to read without a TTY, hooks get `/dev/null` as stdin, and `fleet add`, `fleet setup-user` and `fleet skill configure` no longer read stdin without a terminal.

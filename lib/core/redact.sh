@@ -10,7 +10,12 @@
 # Masks: values of secret-looking keys (KEY=VALUE, JSON, YAML, HTTP headers),
 # bearer/basic credentials, mst_* tokens, AWS access keys, GitHub tokens,
 # Slack tokens and webhooks, Discord webhooks, JWTs, PEM blocks, passwords in
-# URLs (user:pass@host), and literal values from the project's .env file.
+# URLs (user:pass@host), muster env keys (mstsec1/mstrec1) and ciphertexts,
+# literal values from the project's .env file, and literal values of the
+# muster env secrets loaded in this process (_MUSTER_ENV_SECRET_LITS, set by
+# lib/core/env_store.sh; never exported or written to disk).
+#
+# Literal values reach jq through a pipe (--rawfile /dev/fd/N), never argv.
 #
 # Fails closed: without jq it prints nothing and returns 1, so callers
 # never send unredacted text by accident.
@@ -36,6 +41,8 @@ def mask: $mark;
 | gsub("https://(?:canary\\.|ptb\\.)?discord(?:app)?\\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+"; mask)
 # Well-known token formats
 | gsub("\\bmst_[A-Za-z0-9_]{6,}"; mask)
+| gsub("\\bmst(?:sec|rec)1[02-9ac-hj-np-z]{20,}"; mask)
+| gsub("ENC\\[muster:v1,[^\\]]+\\]"; mask)
 | gsub("\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b"; mask)
 | gsub("\\bgh[pousr]_[A-Za-z0-9]{20,}"; mask)
 | gsub("\\bgithub_pat_[A-Za-z0-9_]{20,}"; mask)
@@ -102,8 +109,57 @@ redact_text() {
   fi
   local lits
   lits=$(_redact_env_literals "$env_file")
-  jq -Rrs --arg keyre "$_REDACT_KEY_RE" --arg mark "$REDACT_MARK" --arg lits "$lits" \
+  if [[ -n "${_MUSTER_ENV_SECRET_LITS:-}" ]]; then
+    lits="${lits}"$'\n'"${_MUSTER_ENV_SECRET_LITS}"
+  fi
+  # Longest first, so a secret containing another is masked whole
+  jq -Rrs --arg keyre "$_REDACT_KEY_RE" --arg mark "$REDACT_MARK" \
+    --rawfile lits <(printf '%s\n' "$lits" | awk '{ print length($0) "\t" $0 }' | sort -rn | cut -f2-) \
     "$_REDACT_JQ"
+}
+
+# Mask the loaded muster env secret values in $1 (pure bash: no subprocess,
+# no argv). Result in _REDACTED.
+_redact_env_secrets() {
+  _REDACTED="$1"
+  [[ -n "${_MUSTER_ENV_SECRET_LITS:-}" ]] || return 0
+  local lit
+  local IFS=$'\n'
+  for lit in $_MUSTER_ENV_SECRET_LITS; do
+    [[ -n "$lit" ]] && _REDACTED="${_REDACTED//"$lit"/$REDACT_MARK}"
+  done
+}
+
+# Rewrite one file with the loaded secret values masked (in place).
+_redact_scrub_file() {
+  local f="$1" tmp line changed=0
+  [[ -f "$f" && -n "${_MUSTER_ENV_SECRET_LITS:-}" ]] || return 0
+  tmp=$(mktemp "${f}.XXXXXX") || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    _redact_env_secrets "$line"
+    [[ "$_REDACTED" != "$line" ]] && changed=1
+    printf '%s\n' "$_REDACTED"
+  done <"$f" >"$tmp"
+  _REDACTED=""
+  if ((changed)); then
+    chmod "$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null || echo 644)" "$tmp" 2>/dev/null
+    mv -f "$tmp" "$f"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# Mask loaded secret values in every *.log under dir newer than mark.
+_redact_scrub_logs() {
+  local dir="$1" mark="$2" f
+  [[ -d "$dir" && -n "${_MUSTER_ENV_SECRET_LITS:-}" ]] || return 0
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && _redact_scrub_file "$f"
+  done < <(find "$dir" -type f -name '*.log' -newer "$mark" 2>/dev/null)
+  # Same-second writes are not "newer": check files touched this minute too
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && _redact_scrub_file "$f"
+  done < <(find "$dir" -type f -name '*.log' -mmin -1 2>/dev/null)
 }
 
 # Redact a string argument (convenience wrapper)

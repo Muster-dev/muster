@@ -86,6 +86,15 @@ _clean "commit hash" "deployed commit 3f9a1c2b7e4d5f6a8b9c0d1e2f3a4b5c6d7e8f90"
 _clean "UUID" "request id 550e8400-e29b-41d4-a716-446655440000 done"
 _clean "redacted twice is stable" "API_KEY=‹redacted›"
 
+echo "  muster env"
+_leak "muster secret key" "key=mstsec1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0" "mstsec1qpzry9x8gf2tvdw0"
+_leak "muster ciphertext" 'value ENC[muster:v1,alg:xchacha20poly1305,iv:AAAA,ct:BBBB] here' "iv:AAAA"
+_MUSTER_ENV_SECRET_LITS="plain-looking-value-123"
+_leak "loaded env secret literal" "connecting with plain-looking-value-123 now" "plain-looking-value-123"
+_redact_env_secrets "x plain-looking-value-123 y"
+_test_eq "_redact_env_secrets (pure bash)" "x $R y" "$_REDACTED"
+_MUSTER_ENV_SECRET_LITS=""
+
 echo "  Fails closed"
 out=$(PATH="/nonexistent" redact_text <<<"API_KEY=abc123def456" 2>/dev/null) && rc=0 || rc=$?
 _test_eq "no jq → exit 1" "1" "$rc"

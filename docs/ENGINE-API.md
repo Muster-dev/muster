@@ -57,6 +57,7 @@ CI drive muster through these commands; this page is the contract. Tests:
 | `group list --json`, `group status <group> --json` | read | document |
 | `projects --json` | read | document |
 | `verify --json` | — | document |
+| `env list\|get\|diff\|history\|check --json`, `flag list\|get --json` | none (local) | document / array |
 
 ---
 
@@ -498,6 +499,34 @@ the machine that deploys a push server), `remote_failed`. A remote
  "relay": "https://relay.getmuster.dev", "relay_reachable": true,
  "tunnel_installed": true, "tunnel_path": "/usr/local/bin/muster-tunnel"}
 ```
+
+## env and flags
+
+`muster env` and `muster flag` ([env.md](env.md)) are local developer and CI commands. They are **not** gated by
+`MUSTER_TOKEN`, so CI can run `env check --json` without an API token; the gate comes in Phase 2 with the muster-tui
+screen. Secret values never appear in this output except with `env get --reveal`.
+
+- `env list [--env E] [--show-values] --json` →
+  `{"env","keys":[{"key","type","source","secret","value","fingerprint","description"}]}`.
+  `value` is `null` for secrets unless you pass `--show-values`.
+  Required keys that aren't set are listed with `"source":"(not set)"`.
+- `env get KEY [--env E] --json` → `{"key","env","value","type","source","secret"}`. For a secret without `--reveal`:
+  `{"key","env","secret":true,"fingerprint":"hmac:…"}`.
+- `env diff A B --json` → `{"a","b","locked":[reasons],"keys":[{"key","status","secret","a","b"}]}`.
+  `status` is `added|removed|changed|same|unknown`; `unknown` means a secret that couldn't be decrypted.
+  `a`/`b` are `null` for secrets.
+- `env history [KEY] [--env E] --json` → array of events
+  `{"ts","actor","source":"cli","action","env","message"?,"git_sha"?,"changes":[{"key","kind":"config|secret|flag","op","before","after"}]}`.
+  For secrets, `before`/`after` are `{"fp":"hmac:…"}`.
+- `env check [--env E] [--strict] [--no-decrypt] [--fail-on-stale] --json` →
+  `{"ok","env","decrypted","errors":[{"code","key"?,"message"}],"warnings":[…]}`. Exits 1 when `errors` is non-empty.
+  - Error codes: `missing`, `invalid`, `plaintext_secret`, `undeclared`, `integrity`, `secrets_invalid`,
+    `not_initialized`, `stale_flag` (with `--fail-on-stale`).
+  - Warning codes: `no_key`, `no_crypt`, `stale_flag`.
+- `flag list [--env E] --json` →
+  `{"env","flags":[{"name","state","variant","value","variants","type","env_var","source","description"}]}`.
+  `source` is `env|base|local override`.
+- `flag get NAME [--env E] --json` → one element of `flags`.
 
 ## Other documents
 

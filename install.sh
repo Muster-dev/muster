@@ -70,6 +70,7 @@ printf '  %b  Optional:%b\n' "$_W" "$_R"
 printf '    %b%s/muster-tui%b     %b← TUI frontend (if chosen)%b\n' "$_M" "$BIN_DIR" "$_R" "$_D" "$_R"
 printf '    %b%s/muster-tunnel%b  %b← cloud transport (if chosen)%b\n' "$_M" "$BIN_DIR" "$_R" "$_D" "$_R"
 printf '    %b%s/muster-agent%b   %b← cloud agent (if chosen)%b\n' "$_M" "$BIN_DIR" "$_R" "$_D" "$_R"
+printf '    %b%s/muster-crypt%b   %b← muster env secrets (if chosen, or MUSTER_WITH_CRYPT=1)%b\n' "$_M" "$BIN_DIR" "$_R" "$_D" "$_R"
 echo ""
 
 if [[ "$_interactive" = true ]]; then
@@ -181,6 +182,61 @@ _write_manifest() {
 }
 
 _write_manifest "muster" "${_ver:-unknown}" "${BIN_DIR}/muster"
+
+# ── muster-crypt (optional: encryption helper for `muster env` secrets) ──
+# Opt-in only: interactive prompt below, or MUSTER_WITH_CRYPT=1. Pinned to a
+# muster-fleet-cloud release and checksum-verified before it is installed.
+CRYPT_REPO="Muster-dev/muster-fleet-cloud"
+CRYPT_VERSION="${MUSTER_CRYPT_VERSION:-0.6.0}"
+# sha256 per platform for CRYPT_VERSION, filled in at release time. When a
+# platform has no entry here, the release's checksums.txt is used instead.
+_crypt_pinned_sha() {
+  case "$1" in
+    # linux-amd64) echo "<sha256>" ;;
+    *) echo "" ;;
+  esac
+}
+_crypt_installed=false
+_install_crypt() {
+  local os arch plat url tmp want got
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+  esac
+  plat="${os}-${arch}"
+  url="https://github.com/${CRYPT_REPO}/releases/download/v${CRYPT_VERSION}"
+  if ! command -v curl >/dev/null 2>&1; then
+    printf '  %b!%b muster-crypt needs curl to download.\n' "$_Y" "$_R"
+    return 1
+  fi
+  tmp="$(mktemp -d)"
+  printf '  %bDownloading muster-crypt v%s (%s)...%b\n' "$_D" "$CRYPT_VERSION" "$plat" "$_R"
+  if ! curl -fsSL "${url}/muster-crypt-${plat}" -o "${tmp}/muster-crypt" 2>/dev/null; then
+    printf '  %b!%b No muster-crypt v%s build for %s.\n' "$_Y" "$_R" "$CRYPT_VERSION" "$plat"
+    printf '  %bBuild it: git clone https://github.com/%s && cd muster-fleet-cloud && make crypt%b\n' "$_D" "$CRYPT_REPO" "$_R"
+    rm -rf "$tmp"
+    return 1
+  fi
+  want="$(_crypt_pinned_sha "$plat")"
+  if [[ -z "$want" ]]; then
+    want="$(curl -fsSL "${url}/checksums.txt" 2>/dev/null | awk -v f="muster-crypt-${plat}" '$2 == f {print $1}')"
+  fi
+  got="$(shasum -a 256 "${tmp}/muster-crypt" 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$want" || "$want" != "$got" ]]; then
+    printf '  %b✗%b muster-crypt checksum did not match; not installed.\n' "$_RD" "$_R"
+    rm -rf "$tmp"
+    return 1
+  fi
+  mkdir -p "$BIN_DIR"
+  install -m 755 "${tmp}/muster-crypt" "${BIN_DIR}/muster-crypt"
+  rm -rf "$tmp"
+  printf '  %b✓%b muster-crypt %b(v%s, sha256 verified)%b\n' "$_G" "$_R" "$_D" "$CRYPT_VERSION" "$_R"
+  _summary_items[${#_summary_items[@]}]="muster-crypt v${CRYPT_VERSION}"
+  _write_manifest "muster-crypt" "$CRYPT_VERSION" "${BIN_DIR}/muster-crypt"
+  _crypt_installed=true
+}
 
 # Set update_mode to release so future updates use the release channel
 _settings_file="${INSTALL_DIR}/settings.json"
@@ -445,6 +501,26 @@ if [[ "$_interactive" = true ]]; then
     *)
       ;;
   esac
+
+  # ── muster-crypt ──
+  if [[ "${MUSTER_WITH_CRYPT:-}" != "1" ]]; then
+    _hr
+    echo ""
+    if command -v muster-crypt >/dev/null 2>&1 || [[ -x "${BIN_DIR}/muster-crypt" ]]; then
+      printf '  %b%bmuster-crypt%b already installed. %b1)%b Keep    %b2)%b Update to v%s\n' "$_B" "$_M" "$_R" "$_M" "$_R" "$_M" "$_R" "$CRYPT_VERSION"
+    else
+      printf '  %b%bmuster-crypt%b %b— encryption for muster env (secrets stored encrypted in your repo).%b\n' "$_B" "$_M" "$_R" "$_D" "$_R"
+      printf '  %b1)%b Skip — config and flags still work    %b2)%b Install\n' "$_M" "$_R" "$_M" "$_R"
+    fi
+    printf '  %bChoose [1/2]:%b ' "$_M" "$_R"
+    read -r _crypt_choice </dev/tty || _crypt_choice=1
+    [[ "${_crypt_choice:-1}" == "2" ]] && _install_crypt || true
+  fi
+fi
+
+# Non-interactive opt-in (CI, scripts): MUSTER_WITH_CRYPT=1
+if [[ "${MUSTER_WITH_CRYPT:-}" == "1" && "$_crypt_installed" != "true" ]]; then
+  _install_crypt || true
 fi
 
 # ═══════════════════════════════════════════════
