@@ -295,6 +295,21 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/restart.sh"
     cmd_restart "$@"
     ;;
+  rollout)
+    shift
+    source "$MUSTER_ROOT/lib/commands/rollout.sh"
+    cmd_rollout "$@"
+    ;;
+  promote)
+    shift
+    source "$MUSTER_ROOT/lib/commands/rollout.sh"
+    cmd_promote "$@"
+    ;;
+  abort)
+    shift
+    source "$MUSTER_ROOT/lib/commands/rollout.sh"
+    cmd_abort "$@"
+    ;;
   dev)
     shift
     source "$MUSTER_ROOT/lib/commands/dev.sh"
@@ -411,6 +426,9 @@ case "${1:-}" in
     echo "  logs        Stream service logs"
     echo "  rollback    Revert last deploy"
     echo "  restart     Restart a service without redeploying (restart <service>)"
+    echo "  rollout     Rollout status: versions, replicas, traffic (rollout status [svc] --watch)"
+    echo "  promote     Continue a paused blue-green/canary rollout (promote <svc> [--to N|--full])"
+    echo "  abort       Stop a rollout, 100% traffic back to stable (abort <svc>)"
     echo "  diff        Show what changed since last deploy (<service> or all)"
     echo "  history     Show deploy/rollback history (--all, <service>)"
     echo "  hooks       List and inspect hook scripts (hooks <svc> <hook>)"

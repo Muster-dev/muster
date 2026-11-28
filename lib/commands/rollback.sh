@@ -50,6 +50,21 @@ cmd_rollback() {
 
   load_config
 
+  # Blue-green / canary: abort a rollout in progress, or switch a completed
+  # blue-green back to the previous colour — never `rollout undo` the wrong
+  # Deployment (docs/rollouts.md).
+  if [[ -n "${1:-}" ]]; then
+    source "$MUSTER_ROOT/lib/core/rollout_k8s.sh"
+    local _ro_mode
+    _ro_mode=$(_rollout_rollback_mode "$1" 2>/dev/null)
+    if [[ "$_ro_mode" == "abort" || "$_ro_mode" == "bg" ]]; then
+      _load_env_file
+      source "$MUSTER_ROOT/lib/commands/rollout.sh"
+      _rollout_cmd_rollback "$1" "$_ro_mode" "$_json_mode"
+      return $?
+    fi
+  fi
+
   if [[ "$_json_mode" == "true" ]]; then
     source "$MUSTER_ROOT/lib/commands/rollback_json.sh"
     _rollback_json "${1:-}" "$_approve_hooks"
