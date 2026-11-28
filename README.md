@@ -395,53 +395,17 @@ See [docs/skills/skills.md](docs/skills/skills.md) for the full skill authoring 
 
 ## MCP Integration
 
-muster includes an MCP (Model Context Protocol) tool so LLMs can deploy, check status, rollback, and manage your services directly. Pure bash, runs locally over stdio.
+`muster-mcp` is a full [Model Context Protocol](https://modelcontextprotocol.io) server, so Claude Code, Claude Desktop, Cursor and VS Code can check, explain, deploy and roll back your services. It's pure bash plus `jq` and runs locally over stdio. It speaks MCP 2026-07-28 (`server/discover`) and the older `initialize` handshake (2025-11-25 back to 2024-11-05).
 
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "muster": {
-      "command": "muster-mcp"
-    }
-  }
-}
+```bash
+muster mcp doctor                    # check the server works here
+muster mcp install claude            # print `claude mcp add …`
+muster mcp install cursor --write    # or claude-desktop / vscode; shows the diff, then writes
 ```
 
-### Claude Code
+It's read-only by default. Pass `--allow-actions` to enable `deploy` (dry run by default), `rollback`, `restart`, `hooks_approve` and the fleet actions. Every tool goes through muster's `--json` engine API with a scoped local token, so hook approvals, locks and redaction apply exactly as on the CLI.
 
-Add to `.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "muster": {
-      "command": "muster-mcp"
-    }
-  }
-}
-```
-
-### Available tools
-
-| Tool | Description |
-|------|-------------|
-| `muster_scan_project` | Detect project files and suggest services |
-| `muster_init_project` | Create muster.json and hook directories |
-| `muster_write_hook` | Write a hook script (deploy, health, rollback, etc.) |
-| `muster_read_hook` | Read an existing hook script |
-| `muster_status` | Health check all services |
-| `muster_deploy` | Deploy all or a specific service |
-| `muster_rollback` | Rollback a service |
-| `muster_logs` | Get recent deploy logs |
-| `muster_cleanup` | Clean up old logs and run cleanup hooks |
-| `muster_list_services` | List services with hook availability |
-| `muster_config` | Get the full muster.json |
-
-An LLM can scan your project, create the config, write all the hook scripts, then deploy — all through conversation. Requires `jq`.
+There are 21 tools (`project_info`, `status`, `logs`, `history`, `explain`, `doctor`, `hooks_status`, `setup_preview`, `config_get`, `fleet_*` …), resources (`muster://project`, `muster://services/{name}`, `muster://logs/{service}` …) and prompts (`diagnose_failure`, `deploy_checklist`, `rollback_plan`). See [docs/mcp.md](docs/mcp.md).
 
 ## Supported Platforms
 
