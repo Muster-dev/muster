@@ -7,6 +7,7 @@ MODE env:
   402       POST /sessions -> 402 payment_required
   401       POST /sessions -> 401
   dropped   stream ends without turn_end
+  remote    (muster ask --server) every read tool, then every action tool
 Every request body is appended to $LOG as {"path", "auth", "body"} lines.
 """
 import json
@@ -110,6 +111,32 @@ class H(BaseHTTPRequestHandler):
                     return self.stream([ev({"type": "tool_request", "tool_use_id": i, "name": nm, "kind": "read",
                                             "summary": nm, "input": inp}) for i, nm, inp in reqs] + [end("tool_use")])
                 return self.stream([text("ok"), end("end_turn")])
+            if MODE == "remote":
+                def req(i, nm, inp, kind="read"):
+                    return ev({"type": "tool_request", "tool_use_id": i, "name": nm, "kind": kind,
+                               "summary": nm + " " + json.dumps(inp), "input": inp})
+                if n == 1:
+                    return self.stream([
+                        req("s1", "muster_status", {}),
+                        req("s2", "muster_logs", {"service": "web", "lines": 20}),
+                        req("s3", "muster_history", {"service": "web", "limit": 1}),
+                        req("s4", "muster_hooks_status", {}),
+                        req("s5", "muster_diagnose", {"service": "web"}),
+                        req("s6", "read_config", {}),
+                        req("s7", "read_hook", {"service": "web", "hook": "deploy"}),
+                        req("s8", "muster_doctor", {}),
+                        req("s9", "muster_logs", {"service": "nope", "lines": 5}),
+                        req("s10", "muster_deploy", {"services": ["web"], "dry_run": True}),
+                        end("tool_use")])
+                if n == 2:
+                    return self.stream([
+                        req("a1", "muster_restart", {"service": "web"}, "action"),
+                        req("a2", "muster_rollback", {"service": "web"}, "action"),
+                        req("a3", "muster_deploy", {"services": ["web"]}, "action"),
+                        req("a4", "propose_hook_edit", {"service": "web", "hook": "deploy", "reason": "x",
+                                                        "new_content": "#!/usr/bin/env bash\n"}, "action"),
+                        end("tool_use")])
+                return self.stream([text("All good on the server."), end("end_turn")])
             if MODE == "badtools":
                 if n == 1:
                     return self.stream([

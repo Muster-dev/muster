@@ -20,6 +20,8 @@ _ASK_MAX_ROUNDS=25
 _ASK_READ_TOOLS=" muster_status muster_logs muster_history muster_doctor muster_diagnose muster_hooks_status read_config read_hook "
 _ASK_ACTION_TOOLS=" muster_deploy muster_rollback muster_restart propose_hook_edit "
 _ASK_HOOKS=" deploy health rollback logs cleanup "
+# Tools that need the project's files on this computer (remote mode refuses them)
+_ASK_REMOTE_UNAVAILABLE=" muster_doctor read_config read_hook propose_hook_edit "
 
 _ASK_JSON=false
 _ASK_TTY=false
@@ -29,6 +31,11 @@ _ASK_TMP=""
 _ASK_PROJECT=""
 _ASK_SESSION=""
 _ASK_BASE=""
+# Remote mode (--server): tools run on that fleet server
+_ASK_SERVER=""
+_ASK_SERVER_TRANSPORT=""
+# .env whose values are masked in results ("" in remote mode)
+_ASK_ENV_FILE=""
 
 # ── Output helpers ──
 
@@ -68,16 +75,23 @@ _ask_interrupt() {
 
 _ask_help() {
   echo "Usage: muster ask [flags] [question]"
+  echo "       muster ask --server <name> [flags] [question]"
   echo ""
   echo "Ask the Muster Assistant about this project: why a deploy failed, what a"
   echo "log means, how to fix a hook. It can read status, logs, history and hooks"
   echo "on this machine, and propose actions (deploy, rollback, restart, hook"
   echo "edits) that only run after you approve them."
   echo ""
+  echo "With --server it asks about a fleet server instead, from any directory:"
+  echo "status, logs, history and hook approvals are read on that server (cloud"
+  echo "or SSH muster mode), and deploy/rollback/restart run there after you"
+  echo "approve them. Config, hook files and doctor aren't available remotely."
+  echo ""
   echo "Requires a Fleet Cloud login (muster cloud login). Logs, config and hook"
   echo "contents are redacted on this machine before anything is sent."
   echo ""
   echo "Flags:"
+  echo "  --server <name>   Ask about a fleet server (muster fleet list)"
   echo "  --yes, -y         Consent to sending redacted project data (non-interactive)"
   echo "  --allow-actions   Without a terminal, approve action tools automatically"
   echo "  --read-only       Decline every action tool (only read tools run)"
@@ -89,6 +103,7 @@ _ask_help() {
   echo "Examples:"
   echo "  muster ask \"why did api fail?\""
   echo "  muster ask                      # interactive, uses the last failed deploy"
+  echo "  muster ask --server prod-1 \"why is web slow?\""
   echo ""
   echo "Turn it off on this machine: muster settings --global assistant off"
 }
@@ -572,7 +587,7 @@ _ask_muster() {
     _ASK_LOCAL_TOKEN=$(_ask_local_token 2>/dev/null) || _ASK_LOCAL_TOKEN=""
   fi
   (
-    cd "$_ASK_PROJECT" || exit 1
+    cd "${_ASK_PROJECT:-.}" || exit 1
     export NO_COLOR=1 MUSTER_MINIMAL=true MUSTER_NO_VERIFY=true MUSTER_DEPLOY_SOURCE="assistant"
     [[ -n "$_ASK_LOCAL_TOKEN" ]] && export MUSTER_TOKEN="$_ASK_LOCAL_TOKEN"
     unset MUSTER_ASK_FAILURE_SERVICE MUSTER_ASK_FAILURE_EXIT MUSTER_ASK_FAILURE_LOG
@@ -835,7 +850,11 @@ _ask_validate() {
     muster_logs | muster_diagnose | read_hook | muster_rollback | muster_restart | propose_hook_edit)
       svc=$(printf '%s' "$input" | jq -r '.service // "" | tostring')
       if ! _ask_valid_service "$svc"; then
-        printf 'Unknown service: %s (services in muster.json:%s)' "$svc" "${_ASK_SERVICES% }"
+        if [[ -n "$_ASK_SERVER" ]]; then
+          printf 'Unknown service: %s (services on %s:%s)' "$svc" "$_ASK_SERVER" "${_ASK_SERVICES% }"
+        else
+          printf 'Unknown service: %s (services in muster.json:%s)' "$svc" "${_ASK_SERVICES% }"
+        fi
         return 1
       fi
       ;;
@@ -955,14 +974,20 @@ _ask_approve() {
   fi
   if [[ "$_ASK_JSON" == "true" ]]; then
     _ask_emit "$(jq -cn --arg id "$id" --arg n "$name" --arg s "$summary" --argjson in "$input" --arg diff "$diff_text" \
+      --arg srv "$_ASK_SERVER" \
       '{type: "approval_needed", tool_use_id: $id, name: $n, summary: $s, input: ($in | if has("new_content") then del(.new_content) else . end)}
-       + (if $diff == "" then {} else {diff: $diff} end)')"
+       + (if $diff == "" then {} else {diff: $diff} end)
+       + (if $srv == "" then {} else {server: $srv} end)')"
     _ask_json_decision "$id"
     return
   fi
   if [[ "$_ASK_TTY" == "true" ]]; then
     local ans=""
-    printf '  %b?%b %bRun this?%b [y/N] ' "$YELLOW" "$RESET" "$BOLD" "$RESET"
+    if [[ -n "$_ASK_SERVER" ]]; then
+      printf '  %b?%b %bRun this on %s?%b [y/N] ' "$YELLOW" "$RESET" "$BOLD" "$_ASK_SERVER" "$RESET"
+    else
+      printf '  %b?%b %bRun this?%b [y/N] ' "$YELLOW" "$RESET" "$BOLD" "$RESET"
+    fi
     IFS= read -r ans || ans=""
     case "$ans" in
       y | Y | yes | YES | Yes) return 0 ;;
@@ -995,7 +1020,7 @@ _ask_add_result() {
 # Redact + cap a tool result
 _ask_prepare_content() {
   local text="$1" out
-  out=$(printf '%s' "$text" | redact_text "${_ASK_PROJECT}/.env") || {
+  out=$(printf '%s' "$text" | redact_text "$_ASK_ENV_FILE") || {
     printf '(result withheld: redaction unavailable)'
     return 1
   }
@@ -1018,6 +1043,13 @@ _ask_run_tool() {
   if ! verr=$(_ask_validate "$name" "$input"); then
     [[ "$_ASK_JSON" == "true" ]] || printf '  %b! Refused %s: %s%b\n' "$YELLOW" "$name" "$verr" "$RESET"
     _ask_add_result "$id" "$verr" true "$name"
+    return 0
+  fi
+
+  if [[ -n "$_ASK_SERVER" && "$_ASK_REMOTE_UNAVAILABLE" == *" $name "* ]]; then
+    local unavail="${name} is not available for remote servers yet — run muster ask inside the project on ${_ASK_SERVER} for that."
+    [[ "$_ASK_JSON" == "true" ]] || printf '  %b%s isn'"'"'t available for %s (remote)%b\n' "$DIM" "$name" "$_ASK_SERVER" "$RESET"
+    _ask_add_result "$id" "$unavail" true "$name"
     return 0
   fi
 
@@ -1064,6 +1096,9 @@ _ask_run_tool() {
   fi
 
   local out rc=0 lines limit
+  if [[ -n "$_ASK_SERVER" ]]; then
+    out=$(_ask_remote_run "$name" "$input" "$svc" "$kind") || rc=$?
+  else
   case "$name" in
     muster_status) out=$(_ask_muster 60 status --json) || rc=$? ;;
     muster_logs)
@@ -1095,6 +1130,7 @@ _ask_run_tool() {
       out=$(_ask_apply_hook_edit "$svc" "$(printf '%s' "$input" | jq -r '.hook')" "$new_file") || rc=$?
       ;;
   esac
+  fi
 
   local is_error=false
   if [[ "$kind" == "action" || "$name" == "read_hook" || "$name" == "muster_logs" ]]; then
@@ -1120,6 +1156,170 @@ _ask_run_tool() {
   fi
 
   _ask_add_result "$id" "$content" "$is_error" "$name"
+}
+
+# ── Remote mode (--server): tools run on a fleet server ──
+
+# Run `muster <args…>` on the server. Output (stdout+stderr) on stdout;
+# returns the remote exit code.
+_ask_remote() {
+  local timeout="$1"
+  shift
+  (
+    cd "${_ASK_PROJECT:-.}" || exit 1
+    export NO_COLOR=1
+    _run_with_timeout "$timeout" _fleet_remote_muster "$_ASK_SERVER" "$@"
+  ) </dev/null 2>&1
+}
+
+# The first JSON document in mixed output (drops preamble lines)
+_ask_json_doc() {
+  local doc
+  doc=$(printf '%s\n' "$1" | sed -n '/^[[{]/,$p')
+  [[ -n "$doc" ]] && printf '%s' "$doc" | jq -e . >/dev/null 2>&1 || return 1
+  printf '%s\n' "$doc"
+}
+
+# `muster status --json` on the server (per-service detail)
+_ask_remote_status() {
+  local out rc=0 doc
+  out=$(_ask_remote 60 status --json) || rc=$?
+  if doc=$(_ask_json_doc "$out") && printf '%s' "$doc" | jq -e '.services' >/dev/null 2>&1; then
+    printf '%s\n' "$doc"
+    return 0
+  fi
+  printf '%s\n' "$out"
+  ((rc == 0)) && rc=1
+  return "$rc"
+}
+
+_ask_remote_history() {
+  local svc="$1" limit="$2" out rc=0 doc
+  if [[ -n "$svc" ]]; then
+    out=$(_ask_remote 60 history --json "$svc") || rc=$?
+  else
+    out=$(_ask_remote 60 history --json) || rc=$?
+  fi
+  if doc=$(_ask_json_doc "$out"); then
+    printf '%s' "$doc" | jq -c --argjson n "$limit" 'if type == "array" then .[-$n:] else . end'
+  else
+    printf '%s\n' "$out"
+  fi
+  return "$rc"
+}
+
+# No remote diagnose command: assemble status + last failure + log tail
+_ask_remote_diagnose() {
+  local svc="$1" st="" hist="" logs="" doc
+  if st=$(_ask_remote_status 2>/dev/null); then
+    st=$(printf '%s' "$st" | jq -c --arg s "$svc" '.services[$s] // null')
+  else
+    st="null"
+  fi
+  if doc=$(_ask_json_doc "$(_ask_remote 60 history --json "$svc")"); then
+    hist=$(printf '%s' "$doc" | jq -c 'if type == "array" then ([.[] | select(.status == "failed")] | last) else null end')
+  fi
+  [[ -z "$hist" ]] && hist="null"
+  logs=$(_ask_muster 60 fleet logs "$_ASK_SERVER" "$svc" --tail 80 2>/dev/null) || true
+  jq -n --arg svc "$svc" --arg srv "$_ASK_SERVER" --argjson st "$st" --argjson ev "$hist" --arg tail "$logs" '{
+      service: $svc,
+      server: $srv,
+      status: $st,
+      last_failure: $ev,
+      log_tail: ($tail | split("\n")),
+      k8s_diagnosis: null,
+      note: ("Assembled from status, history and logs on " + $srv + " (no remote diagnose command).")
+    }'
+}
+
+# Run one (validated, approved) tool on the server
+_ask_remote_run() {
+  local name="$1" input="$2" svc="$3" kind="$4" lines limit doc out rc=0
+  case "$name" in
+    muster_status) _ask_remote_status ;;
+    muster_logs)
+      lines=$(printf '%s' "$input" | jq -r '(.lines // 100) | tonumber? // 100 | floor | if . < 1 then 1 elif . > 500 then 500 else . end')
+      _ask_muster 60 fleet logs "$_ASK_SERVER" "$svc" --tail "$lines"
+      ;;
+    muster_history)
+      limit=$(printf '%s' "$input" | jq -r '(.limit // 20) | tonumber? // 20 | floor | if . < 1 then 1 elif . > 200 then 200 else . end')
+      _ask_remote_history "$svc" "$limit"
+      ;;
+    muster_hooks_status)
+      out=$(_ask_remote 60 hooks status --json) || rc=$?
+      if doc=$(_ask_json_doc "$out"); then printf '%s\n' "$doc"; else printf '%s\n' "$out"; fi
+      return "$rc"
+      ;;
+    muster_diagnose) _ask_remote_diagnose "$svc" ;;
+    muster_deploy)
+      local dargs=() s
+      while IFS= read -r s; do
+        [[ -n "$s" ]] && dargs[${#dargs[@]}]="$s"
+      done < <(printf '%s' "$input" | jq -r '.services // [] | .[]')
+      [[ "$kind" == "read" ]] && dargs[${#dargs[@]}]="--dry-run"
+      _ask_remote 1800 deploy "${dargs[@]+"${dargs[@]}"}"
+      ;;
+    muster_rollback) _ask_remote 900 rollback "$svc" ;;
+    muster_restart) _ask_muster 600 fleet restart "$_ASK_SERVER" "$svc" --yes ;;
+    *)
+      printf '%s is not available for remote servers yet — run muster ask inside the project on %s for that.\n' "$name" "$_ASK_SERVER"
+      return 1
+      ;;
+  esac
+}
+
+# Validate --server and load it from the fleet config (no network)
+_ask_remote_setup() {
+  local name="$_ASK_SERVER"
+  if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    _ask_fail "invalid_server" "Invalid server name: ${name}"
+    return 1
+  fi
+  source "$MUSTER_ROOT/lib/core/fleet.sh"
+  source "$MUSTER_ROOT/lib/commands/fleet_remote.sh"
+  if [[ -z "${CONFIG_FILE:-}" ]]; then
+    CONFIG_FILE=$(find_config 2>/dev/null) || CONFIG_FILE=""
+  fi
+  if ! fleet_load_config; then
+    _ask_fail "no_fleet" "No fleet configured on this computer, so there is no server '${name}'."
+    [[ "$_ASK_JSON" == "true" ]] || printf '  %bAdd it with: muster fleet add %s user@host --mode muster%b\n' "$DIM" "$name" "$RESET"
+    return 1
+  fi
+  if ! _fleet_machine_exists "$name" || ! _fleet_load_machine "$name"; then
+    _ask_fail "unknown_server" "No server named '${name}' in the fleet (see: muster fleet list)"
+    return 1
+  fi
+  _ASK_SERVER_TRANSPORT="${_FM_TRANSPORT:-ssh}"
+  if [[ "$_FM_MODE" != "muster" ]]; then
+    _ask_fail "push_mode" "${name} is a push-mode server: muster ask --server needs muster installed there (muster mode)."
+    return 1
+  fi
+  if [[ "$_ASK_SERVER_TRANSPORT" == "cloud" ]]; then
+    source "$MUSTER_ROOT/lib/core/cloud.sh"
+    if ! _fleet_cloud_available; then
+      _ask_fail "no_tunnel" "muster-tunnel is not installed on this computer, so cloud server ${name} can't be reached."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+_ask_build_remote_context() {
+  local status_json="$1" os services rver
+  os="${MUSTER_OS:-$(uname -s)} $(uname -m 2>/dev/null)"
+  services=$(printf '%s' "$status_json" | jq -c '.services | keys' 2>/dev/null || echo '[]')
+  rver=$(printf '%s' "$status_json" | jq -r '.muster_version // "" | strings' 2>/dev/null)
+  jq -cn --arg v "${MUSTER_VERSION:-dev}" --arg os "$os" --argjson services "$services" \
+    --arg srv "$_ASK_SERVER" --arg t "$_ASK_SERVER_TRANSPORT" --arg rv "$rver" \
+    --arg un "$(printf '%s' "${_ASK_REMOTE_UNAVAILABLE# }" | sed 's/ $//')" '{
+      muster_version: $v, os: $os, surface: "cli", services: $services,
+      remote: {
+        server: $srv, transport: $t, mode: "muster",
+        muster_version: (if $rv == "" then null else $rv end),
+        unavailable_tools: ($un | split(" "))
+      },
+      note: ("Remote session: the user is asking about fleet server " + $srv + " (" + $t + "). Every tool runs on that server, not on the computer the user is typing on. read_config, read_hook, muster_doctor and propose_hook_edit are not available remotely.")
+    }'
 }
 
 # ── Session context ──
@@ -1196,6 +1396,15 @@ cmd_ask() {
       --json) _ASK_JSON=true ;;
       --allow-actions) _ASK_ALLOW_ACTIONS=true ;;
       --read-only) _ASK_READ_ONLY=true ;;
+      --server)
+        if [[ $# -lt 2 || -z "$2" ]]; then
+          err "--server needs a server name (see: muster fleet list)"
+          return 1
+        fi
+        _ASK_SERVER="$2"
+        shift
+        ;;
+      --server=*) _ASK_SERVER="${1#--server=}" ;;
       --)
         shift
         question="${question:+$question }$*"
@@ -1225,18 +1434,22 @@ cmd_ask() {
     return 1
   fi
 
-  local config
-  if ! config=$(find_config 2>/dev/null); then
-    _ask_fail "no_project" "No muster project here. Run muster ask inside a project (muster setup creates one)."
-    return 1
+  local config="" project_name="" s
+  if [[ -n "$_ASK_SERVER" ]]; then
+    _ask_remote_setup || return 1
+  else
+    if ! config=$(find_config 2>/dev/null); then
+      _ask_fail "no_project" "No muster project here. Run muster ask inside a project (muster setup creates one), or ask about a fleet server with --server <name>."
+      return 1
+    fi
+    # shellcheck disable=SC2034  # read by config helpers
+    CONFIG_FILE="$config"
+    _ASK_PROJECT="$(cd "$(dirname "$config")" && pwd)"
+    _ASK_ENV_FILE="${_ASK_PROJECT}/.env"
+    while IFS= read -r s; do
+      [[ -n "$s" ]] && _ASK_SERVICES="${_ASK_SERVICES}${s} "
+    done < <(jq -r '.services // {} | keys[]' "$config" 2>/dev/null)
   fi
-  # shellcheck disable=SC2034  # read by config helpers
-  CONFIG_FILE="$config"
-  _ASK_PROJECT="$(cd "$(dirname "$config")" && pwd)"
-  local s
-  while IFS= read -r s; do
-    [[ -n "$s" ]] && _ASK_SERVICES="${_ASK_SERVICES}${s} "
-  done < <(jq -r '.services // {} | keys[]' "$config" 2>/dev/null)
 
   local token
   token=$(_assistant_token)
@@ -1246,34 +1459,80 @@ cmd_ask() {
     return 1
   fi
 
-  # Consent (per project)
-  local project_name
-  project_name=$(jq -r '.project // .name // empty' "$config" 2>/dev/null)
-  [[ -z "$project_name" ]] && project_name=$(basename "$_ASK_PROJECT")
-  if ! _assistant_has_consent "$_ASK_PROJECT"; then
-    if [[ "$give_consent" != "true" ]]; then
-      if [[ "$_ASK_TTY" == "true" ]]; then
-        echo ""
-        printf '  Send redacted logs and config from %b%s%b to the Muster Assistant? [y/N] ' "$BOLD" "$project_name" "$RESET"
-        local ans=""
-        IFS= read -r ans || ans=""
-        case "$ans" in
-          y | Y | yes | YES | Yes) ;;
-          *)
-            info "Nothing was sent."
-            return 1
-            ;;
-        esac
-      else
-        _ask_fail "consent_required" "Sending project data to the Muster Assistant needs your consent for ${project_name}."
-        [[ "$_ASK_JSON" == "true" ]] || printf '  %bRun muster ask once in a terminal, or pass --yes.%b\n' "$DIM" "$RESET"
-        return 1
+  # Consent: per project, or per server in remote mode
+  if [[ -n "$_ASK_SERVER" ]]; then
+    if ! _assistant_server_has_consent "$_ASK_SERVER"; then
+      if [[ "$give_consent" != "true" ]]; then
+        if [[ "$_ASK_TTY" == "true" ]]; then
+          echo ""
+          printf '  Send redacted status, logs and history from server %b%s%b to the Muster Assistant? [y/N] ' "$BOLD" "$_ASK_SERVER" "$RESET"
+          local sans=""
+          IFS= read -r sans || sans=""
+          case "$sans" in
+            y | Y | yes | YES | Yes) ;;
+            *)
+              info "Nothing was sent."
+              return 1
+              ;;
+          esac
+        else
+          _ask_fail "consent_required" "Sending data from server ${_ASK_SERVER} to the Muster Assistant needs your consent."
+          [[ "$_ASK_JSON" == "true" ]] || printf '  %bRun muster ask --server %s once in a terminal, or pass --yes.%b\n' "$DIM" "$_ASK_SERVER" "$RESET"
+          return 1
+        fi
       fi
+      _assistant_save_server_consent "$_ASK_SERVER" || {
+        _ask_fail "consent_write_failed" "Couldn't save consent to ~/.muster/assistant/servers.json"
+        return 1
+      }
     fi
-    _assistant_save_consent "$_ASK_PROJECT" || {
-      _ask_fail "consent_write_failed" "Couldn't save consent to .muster/assistant.json"
+  else
+    project_name=$(jq -r '.project // .name // empty' "$config" 2>/dev/null)
+    [[ -z "$project_name" ]] && project_name=$(basename "$_ASK_PROJECT")
+    if ! _assistant_has_consent "$_ASK_PROJECT"; then
+      if [[ "$give_consent" != "true" ]]; then
+        if [[ "$_ASK_TTY" == "true" ]]; then
+          echo ""
+          printf '  Send redacted logs and config from %b%s%b to the Muster Assistant? [y/N] ' "$BOLD" "$project_name" "$RESET"
+          local ans=""
+          IFS= read -r ans || ans=""
+          case "$ans" in
+            y | Y | yes | YES | Yes) ;;
+            *)
+              info "Nothing was sent."
+              return 1
+              ;;
+          esac
+        else
+          _ask_fail "consent_required" "Sending project data to the Muster Assistant needs your consent for ${project_name}."
+          [[ "$_ASK_JSON" == "true" ]] || printf '  %bRun muster ask once in a terminal, or pass --yes.%b\n' "$DIM" "$RESET"
+          return 1
+        fi
+      fi
+      _assistant_save_consent "$_ASK_PROJECT" || {
+        _ask_fail "consent_write_failed" "Couldn't save consent to .muster/assistant.json"
+        return 1
+      }
+    fi
+  fi
+
+  # Remote: the server's services (validates tool inputs) and project name.
+  # Fails before a session is started, so an unreachable server costs nothing.
+  local remote_status=""
+  if [[ -n "$_ASK_SERVER" ]]; then
+    [[ "$_ASK_JSON" == "true" ]] || printf '  %bConnecting to %s (%s)…%b\n' "$DIM" "$_ASK_SERVER" "$_ASK_SERVER_TRANSPORT" "$RESET"
+    if ! remote_status=$(_ask_remote_status); then
+      local why
+      why=$(printf '%s\n' "$remote_status" | sed $'s/\033\\[[0-9;]*[A-Za-z]//g' | grep -v '^[[:space:]]*$' | tail -1)
+      _ask_fail "server_unreachable" "Couldn't get status from ${_ASK_SERVER}${why:+: ${why}}"
+      [[ "$_ASK_JSON" == "true" ]] || printf '  %bCheck it with: muster fleet test %s%b\n' "$DIM" "$_ASK_SERVER" "$RESET"
       return 1
-    }
+    fi
+    while IFS= read -r s; do
+      [[ -n "$s" ]] && _ASK_SERVICES="${_ASK_SERVICES}${s} "
+    done < <(printf '%s' "$remote_status" | jq -r '.services // {} | keys[]' 2>/dev/null)
+    project_name=$(printf '%s' "$remote_status" | jq -r '.project // empty | strings' 2>/dev/null)
+    [[ -z "$project_name" ]] && project_name="$_ASK_SERVER"
   fi
 
   _ASK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/muster-ask.XXXXXX") || return 1
@@ -1285,7 +1544,7 @@ cmd_ask() {
   _ASK_RESULTS_FILE="$_ASK_TMP/results"
 
   local failure=""
-  failure=$(_ask_find_failure) || failure=""
+  [[ -z "$_ASK_SERVER" ]] && { failure=$(_ask_find_failure) || failure=""; }
 
   # Question
   if [[ -z "$question" ]]; then
@@ -1308,7 +1567,15 @@ cmd_ask() {
 
   # Session
   local ctx
-  if ! ctx=$(_ask_build_context "$failure") || [[ -z "$ctx" ]]; then
+  if [[ -n "$_ASK_SERVER" ]]; then
+    ctx=$(_ask_build_remote_context "$remote_status") || ctx=""
+    # Names only, but everything that leaves the machine goes through redaction
+    [[ -n "$ctx" ]] && { ctx=$(printf '%s' "$ctx" | redact_text "") || ctx=""; }
+    printf '%s' "$ctx" | jq -e . >/dev/null 2>&1 || ctx=""
+  elif ! ctx=$(_ask_build_context "$failure"); then
+    ctx=""
+  fi
+  if [[ -z "$ctx" ]]; then
     _ask_fail "context_failed" "Couldn't build the (redacted) project context"
     _ask_cleanup
     return 1
@@ -1333,13 +1600,18 @@ cmd_ask() {
   remaining=$(printf '%s' "$_ASK_HTTP_BODY" | jq -r '.remaining_sessions // empty' 2>/dev/null)
   plan=$(printf '%s' "$_ASK_HTTP_BODY" | jq -r '.plan // empty' 2>/dev/null)
   if [[ "$_ASK_JSON" == "true" ]]; then
-    _ask_emit "$(printf '%s' "$_ASK_HTTP_BODY" | jq -c '{type: "session", session_id, plan, remaining_sessions}')"
+    _ask_emit "$(printf '%s' "$_ASK_HTTP_BODY" | jq -c --arg srv "$_ASK_SERVER" --arg t "$_ASK_SERVER_TRANSPORT" \
+      '{type: "session", session_id, plan, remaining_sessions}
+       + (if $srv == "" then {} else {server: $srv, transport: $t} end)')"
   else
     echo ""
     printf '  %bMuster Assistant%b' "${BOLD}${ACCENT_BRIGHT}" "$RESET"
     [[ -n "$plan" ]] && printf '  %b%s plan%b' "$DIM" "$plan" "$RESET"
     [[ -n "$remaining" ]] && printf '  %b· %s sessions left%b' "$DIM" "$remaining" "$RESET"
     printf '\n'
+    if [[ -n "$_ASK_SERVER" ]]; then
+      printf '  %bServer %s (%s) · tools run on that server%b\n' "$DIM" "$_ASK_SERVER" "$_ASK_SERVER_TRANSPORT" "$RESET"
+    fi
     if [[ -n "$failure" && -z "${MUSTER_ASK_FAILURE_SERVICE:-}" ]]; then
       printf '  %bIncluding the last failed deploy (%s) as context%b\n' "$DIM" "${failure%%|*}" "$RESET"
     fi
