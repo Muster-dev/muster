@@ -380,6 +380,11 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/ask.sh"
     cmd_ask "$@"
     ;;
+  mcp)
+    shift
+    source "$MUSTER_ROOT/lib/commands/mcp.sh"
+    cmd_mcp "$@"
+    ;;
   trust)
     shift
     source "$MUSTER_ROOT/lib/commands/trust.sh"
@@ -429,6 +434,7 @@ case "${1:-}" in
     echo ""
     echo "Assistant:"
     echo "  ask         Ask the Muster Assistant why a deploy failed, what to do next"
+    echo "  mcp         MCP server for Claude, Cursor, VS Code (mcp install <client>, mcp doctor)"
     echo ""
     echo "Other:"
     echo "  skill       Manage addon skills (add, create, remove, list, run)"
