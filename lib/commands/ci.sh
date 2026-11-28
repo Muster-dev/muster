@@ -656,7 +656,7 @@ _ci_cmd_run() {
   esac
   local _vw
   for _vw in "$target" "$from" "${services[@]+"${services[@]}"}"; do
-    if [[ -n "$_vw" && ! "$_vw" =~ ^[A-Za-z0-9._@:-]+$ ]]; then
+    if [[ -n "$_vw" && ! "$_vw" =~ ^[A-Za-z0-9_.@:-]+$ ]]; then
       err "Invalid name: ${_vw}"
       return 1
     fi

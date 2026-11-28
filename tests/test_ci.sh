@@ -264,6 +264,8 @@ _test_contains "explains how to approve" "approve-hooks" "$log"
 _test_eq "unknown command rejected" "1" "$rc"
 "$M" ci run deploy --services 'api;rm' </dev/null >/dev/null 2>&1 && rc=0 || rc=$?
 _test_eq "unsafe service name rejected" "1" "$rc"
+out=$("$M" ci run deploy --dry-run --services 'api_v1' </dev/null 2>&1) || true
+_test_not_contains "underscored service names pass validation" "Invalid name" "$out"
 
 : > "$OUT"
 GITHUB_OUTPUT="$OUT" "$M" ci run status --services api </dev/null >/dev/null 2>&1 && rc=0 || rc=$?
