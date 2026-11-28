@@ -124,8 +124,8 @@ cmd_status() {
     fi
     local _dl_active=false
     [[ "$_dl_json" != "null" ]] && _dl_active=true
-    printf '{"project":%s,"checked_at":%s,"deploying":%s,"deploy_lock":%s,"services":{' \
-      "$(_json_str "$project")" "$(_json_str "$(_engine_now_iso)")" "$_dl_active" "$_dl_json"
+    printf '{"project":%s,"muster_version":%s,"checked_at":%s,"deploying":%s,"deploy_lock":%s,"services":{' \
+      "$(_json_str "$project")" "$(_json_str "${MUSTER_VERSION:-}")" "$(_json_str "$(_engine_now_iso)")" "$_dl_active" "$_dl_json"
   fi
 
   while IFS= read -r svc; do
