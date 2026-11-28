@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # muster/lib/core/utils.sh — Shared utility functions
 
+# CI detection + GitHub annotations (_ci_*), used across commands
+if ! declare -f _ci_annotate >/dev/null 2>&1 && [[ -n "${MUSTER_ROOT:-}" && -f "$MUSTER_ROOT/lib/core/ci.sh" ]]; then
+  # shellcheck source=lib/core/ci.sh
+  source "$MUSTER_ROOT/lib/core/ci.sh"
+fi
+
 # Terminal size (updated on SIGWINCH)
 TERM_COLS=80
 # shellcheck disable=SC2034
@@ -410,9 +416,20 @@ _run_hook() {
   if _hook_has_shebang "$_h"; then
     local _exec="$_h"
     [[ "$_exec" != */* ]] && _exec="./${_exec}"
-    "$_exec" "$@"
+    _hook_stdin_guard "$_exec" "$@"
   else
-    bash "$_h" "$@"
+    _hook_stdin_guard bash "$_h" "$@"
+  fi
+}
+
+# Run a command; without a TTY, give it /dev/null as stdin so a hook that
+# reads (read, ssh/docker prompts, apt) gets EOF instead of hanging on an
+# open pipe — CI runners, muster-tui, `muster ask` tool calls.
+_hook_stdin_guard() {
+  if [[ -t 0 ]]; then
+    "$@"
+  else
+    "$@" </dev/null
   fi
 }
 
@@ -444,7 +461,7 @@ _run_with_timeout() {
 
   # No timeout (0 or empty) — run directly
   if [[ -z "$_timeout_secs" || "$_timeout_secs" == "0" ]]; then
-    "$@"
+    _hook_stdin_guard "$@"
     return $?
   fi
 
@@ -466,7 +483,7 @@ _run_with_timeout() {
     local _to_pid _to_rc _to_prev_int _to_prev_term
     _to_prev_int=$(trap -p INT)
     _to_prev_term=$(trap -p TERM)
-    "$_to_bin" "$_timeout_secs" "$@" &
+    "$_to_bin" "$_timeout_secs" "$@" </dev/null &
     _to_pid=$!
     # shellcheck disable=SC2064
     trap "kill -TERM -- -${_to_pid} 2>/dev/null; kill -TERM ${_to_pid} 2>/dev/null; _MUSTER_CANCELLED=1" INT TERM
@@ -483,7 +500,8 @@ _run_with_timeout() {
   fi
 
   # Fallback: bash background process + watchdog (macOS bash 3.2 compatible)
-  "$@" &
+  # (Background jobs get /dev/null as stdin anyway; explicit for clarity.)
+  "$@" </dev/null &
   local _cmd_pid=$!
 
   # Watchdog: sleep then kill the command if still running

@@ -145,6 +145,7 @@ ${k8s_env}"
     else
       printf '{"event":"done","service":%s,"status":"failed","exit_code":%d}\n' "$(_json_str "$target")" "$rc"
     fi
+    _ci_annotate_failure "$target" "rollback" "$rc"
     _history_log_event "$target" "rollback" "failed"
     k8s_diagnose_json "$target" 2>/dev/null
     export MUSTER_DEPLOY_STATUS="failed"

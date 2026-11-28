@@ -1693,7 +1693,7 @@ _group_cmd_deploy() {
                       # Save to keychain
                       _cred_keychain_save "groups" "$_cred_key" "$_GP_PASSWORD" 2>/dev/null || true
                       # Rebuild SSH opts without BatchMode for password
-                      _GROUPS_SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+                      _GROUPS_SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new}"
                       [[ "$_GP_PORT" != "22" ]] && _GROUPS_SSH_OPTS="${_GROUPS_SSH_OPTS} -p ${_GP_PORT}"
                       export SSHPASS="$_GP_PASSWORD"
                       # shellcheck disable=SC2086
@@ -3177,7 +3177,7 @@ _group_edit_remote_fields() {
   # Test connectivity with new settings
   echo ""
   printf '  %bTesting connection...%b ' "${DIM}" "${RESET}"
-  local _test_opts="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new"
+  local _test_opts="-o ConnectTimeout=5 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new}"
   local _test_transport="ssh"
   [[ "$new_cloud" == "true" ]] && _test_transport="cloud"
 

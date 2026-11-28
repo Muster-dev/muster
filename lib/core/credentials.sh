@@ -54,6 +54,14 @@ _cred_prompt_password() {
   local label="$1"
   local password=""
 
+  # Never read a secret from a pipe or CI runner: a non-TTY stdin may stay
+  # open forever (the deploy would hang) or hold unrelated data.
+  if [[ ! -t 0 ]]; then
+    printf '  %b✗%b %s needs an interactive terminal (no TTY). Provide it via the environment instead.\n' \
+      "${RED}" "${RESET}" "$label" >&2
+    return 1
+  fi
+
   # Prompt to stderr so $() only captures the password on stdout
   printf '  %b?%b %s %b(hidden)%b: ' "${ACCENT}" "${RESET}" "$label" "${DIM}" "${RESET}" >&2
 
@@ -64,6 +72,12 @@ _cred_prompt_password() {
   printf '\n' >&2
 
   printf '%s' "$password"
+}
+
+# No TTY and no value: say which env var provides it
+_cred_missing_hint() {
+  printf '  %b✗%b %s: credential %s is not set. Without a terminal (CI), export %s (e.g. from a secret).\n' \
+    "${RED}" "${RESET}" "$1" "$2" "$3" >&2
 }
 
 # Get a session-cached credential
@@ -165,19 +179,34 @@ cred_env_for_service() {
   local name
   name=$(config_get ".services.${svc}.name")
 
+  # Collect the keys first: prompting inside a `while read … <<<` loop would
+  # read the password from the here-string instead of the terminal.
+  local _cev_keys=() cred_key
   while IFS= read -r cred_key; do
-    [[ -z "$cred_key" ]] && continue
+    [[ -n "$cred_key" ]] && _cev_keys[${#_cev_keys[@]}]="$cred_key"
+  done <<< "$required"
+
+  for cred_key in "${_cev_keys[@]+"${_cev_keys[@]}"}"; do
     local upper_key
     upper_key=$(printf '%s' "$cred_key" | tr '[:lower:]' '[:upper:]')
     local env_name="MUSTER_CRED_${upper_key}"
     local val=""
+
+    # Already in the environment (CI secret, exported in the shell): use it
+    if [[ "$env_name" =~ ^[A-Z_][A-Z0-9_]*$ && -n "${!env_name:-}" ]]; then
+      printf '%s=%s\n' "$env_name" "${!env_name}"
+      continue
+    fi
 
     case "$mode" in
       save)
         # Try keychain first
         val=$(_cred_keychain_get "$svc" "$cred_key" 2>/dev/null) || true
         if [[ -z "$val" ]]; then
-          val=$(_cred_prompt_password "${name} ${cred_key}")
+          if ! val=$(_cred_prompt_password "${name} ${cred_key}"); then
+            _cred_missing_hint "$name" "$cred_key" "$env_name"
+            continue
+          fi
           # Save to keychain
           _cred_keychain_save "$svc" "$cred_key" "$val" 2>/dev/null || true
         fi
@@ -188,13 +217,19 @@ cred_env_for_service() {
         # Try session cache first
         val=$(_cred_session_get "${svc}_${cred_key}" 2>/dev/null) || true
         if [[ -z "$val" ]]; then
-          val=$(_cred_prompt_password "${name} ${cred_key}")
+          if ! val=$(_cred_prompt_password "${name} ${cred_key}"); then
+            _cred_missing_hint "$name" "$cred_key" "$env_name"
+            continue
+          fi
           _cred_session_set "${svc}_${cred_key}" "$val"
         fi
         ;;
       always)
         # Always prompt
-        val=$(_cred_prompt_password "${name} ${cred_key}")
+        if ! val=$(_cred_prompt_password "${name} ${cred_key}"); then
+          _cred_missing_hint "$name" "$cred_key" "$env_name"
+          continue
+        fi
         ;;
       *)
         # Mode off or unknown, skip
@@ -203,5 +238,5 @@ cred_env_for_service() {
     esac
 
     printf '%s=%s\n' "$env_name" "$val"
-  done <<< "$required"
+  done
 }

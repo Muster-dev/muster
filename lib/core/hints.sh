@@ -932,6 +932,7 @@ hints_show_for_failure() {
     echo ""
   fi
   hints_record_failure "$svc" "$action" "$rc" "$log"
+  declare -f _ci_annotate_failure >/dev/null 2>&1 && _ci_annotate_failure "$svc" "$action" "$rc"
   return 0
 }
 

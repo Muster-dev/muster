@@ -61,8 +61,14 @@ _muster_apply_color_mode() {
       want_color=true
       ;;
     *)
-      # auto: disable if not a TTY
+      # auto: FORCE_COLOR wins; CI logs get plain text; otherwise only on a TTY
+      case "${FORCE_COLOR:-}" in
+        ""|0|false|no) ;;
+        *) return 0 ;;
+      esac
       if [[ ! -t 1 ]]; then
+        want_color=false
+      elif [[ "${GITHUB_ACTIONS:-}" == "true" || "${CI:-}" == "true" || "${CI:-}" == "1" ]]; then
         want_color=false
       fi
       ;;

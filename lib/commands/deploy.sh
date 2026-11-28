@@ -935,6 +935,9 @@ ${_k8s_env_lines}"
           else
             _svc_health="unhealthy"
             printf '{"event":"health","service":"%s","status":"unhealthy"}\n' "$svc"
+            # shellcheck disable=SC2034  # read by _ci_annotate_health
+            HINT_ID=""
+            _ci_annotate_health "$svc"
           fi
         fi
       else
@@ -948,6 +951,7 @@ ${_k8s_env_lines}"
           printf '{"event":"hint","service":"%s","hint":%s}\n' "$svc" "$(hints_json)"
         fi
         hints_record_failure "$svc" "deploy" "$_deploy_rc" "$log_file"
+        _ci_annotate_failure "$svc" "deploy" "$_deploy_rc"
         _history_log_event "$svc" "deploy" "failed" ""
         # k8s: structured diagnosis (ImagePullBackOff, OOMKilled, …)
         k8s_diagnose_json "$svc" 2>/dev/null
@@ -1303,6 +1307,7 @@ ${_k8s_env_lines}"
               _svc_health="unhealthy"
               if hints_health "$svc"; then hints_print "  "; fi
               hints_record_failure "$svc" "health" "1" ""
+              _ci_annotate_health "$svc"
               if [[ ! -t 0 ]]; then
                 # Non-interactive: log and continue
                 warn "Continuing despite health check failure (non-interactive)"
