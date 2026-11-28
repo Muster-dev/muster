@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `muster env`: config, encrypted secrets and feature flags kept in the repo (`.muster/env`, `muster.env.schema.json`). `init` (imports an existing `.env`), `set` (hidden prompt for secrets), `get`, `unset`, `list`, `diff`, `edit`, `history`, `check` (CI gate), `pull`, `example`, `keygen`, `recipient`, `rekey`. Secrets are encrypted per value to each recipient with hybrid X25519 + ML-KEM-768 by the new `muster-crypt` helper; removing a recipient rotates the data key. See docs/env.md.
+- `muster run [--env E] -- <cmd>`: run a command with config, secrets and flags injected; nothing is written to disk.
+- `muster flag set|get|list|toggle|unset|reset [--local]`: simple feature flags in flagd's format, delivered as `MUSTER_FLAG_*` env vars and `MUSTER_FLAGS_FILE`.
+- `muster env codegen ts|py|go`: zero-dependency typed readers that validate every key at startup and keep secrets out of logs (`[REDACTED]`).
+- `muster env guard install`: pre-commit hook that blocks `.env` files, muster keys, unencrypted secrets files and any file containing a secret's value.
+- Deploy hooks get the selected env in memory (`env.source: "muster"` in muster.json, or automatically when there is no `.env`). Secret values are masked in deploy logs and in `muster ask`.
+- Installer: optional `muster-crypt` (prompt, or `MUSTER_WITH_CRYPT=1`), pinned and checksum-verified.
+
+### Changed
+- Global flags (`-q`, `--verbose`, …) after `--` are passed through to the wrapped command instead of being consumed by muster.
+
 ## [0.7.3] - 2026-11-28
 
 ### Added

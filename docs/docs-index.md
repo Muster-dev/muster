@@ -11,6 +11,10 @@
 - [Setup Wizard](deploy/setup-wizard.md) -- Interactive and non-interactive setup, scanning, K8s introspection, re-running safely
 - [Troubleshooting](troubleshooting.md) -- Every failure pattern muster recognizes, what it means, and the fix (`muster explain`)
 
+## Config, secrets & flags
+
+- [muster env](env.md) -- Config, encrypted secrets and feature flags in the repo: `muster env`, `muster run`, `muster flag`, codegen, CI check, security model
+
 ## Fleet
 
 - [Fleet](fleet/fleet.md) -- Multi-machine deployment, transports, strategies, groups

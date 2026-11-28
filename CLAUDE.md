@@ -78,6 +78,18 @@ muster fleet pair <name> --token <t>  # manual auth pairing
 muster group create <name>     # create project group
 muster group add <name> <project> <path>  # add project to group
 muster group deploy <name>     # deploy all projects in group
+muster env init [--from .env]  # config + encrypted secrets in .muster/env (schema: muster.env.schema.json)
+muster env set KEY[=VALUE]     # omit =VALUE → hidden prompt; secrets encrypted via muster-crypt
+muster env get KEY [--reveal]  # secrets masked as ‹secret:fp› unless --reveal
+muster env list|diff A B|history|edit|pull|example [--json]
+muster env check [--env E] [--strict] [--json]  # CI gate: required keys, types, MAC
+muster env codegen ts|py|go|all [--check]       # zero-dependency typed readers
+muster env keygen [--ci NAME --envs a,b]        # your key / a CI key (MUSTER_ENV_KEY)
+muster env recipient list|add|remove|sync       # who can decrypt which env (remove rotates)
+muster env guard install       # pre-commit hook blocking plaintext secrets
+muster run [--env E] -- <cmd>  # run with env injected (exec, nothing on disk)
+muster flag set NAME on|off|VALUE [--env E] [--local]  # flagd-format flags → MUSTER_FLAG_*
+muster flag list|get|toggle|unset|reset --local
 muster skill add <url>  # install a skill addon
 muster skill list       # list installed skills
 muster skill remove <n> # remove a skill
@@ -92,15 +104,16 @@ muster --minimal deploy api   # build context warnings as stderr comments
 muster/
 ├── bin/muster                     ← entry point (routes commands, startup integrity check)
 ├── bin/muster-mcp                 ← MCP stdio transport (uses shared scanner)
-├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn
+├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn, env_store
 ├── lib/tui/                       ← menu, checklist, spinner, progress, streambox, dashboard, order
-├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart/history), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain
+├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart/history), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain, env (+env_guard, env_codegen; also `muster run`), flag
 ├── lib/agent/muster-agent.sh     ← standalone fleet monitoring daemon (no lib dependencies)
 ├── lib/skills/manager.sh          ← skill lifecycle (reads name from skill.json)
 ├── templates/deploy.example.json  ← example config
 ├── templates/hooks/               ← stack-specific hook templates (k8s, compose, docker, bare, dev)
 │   ├── {k8s,compose,docker}/infra/ ← infrastructure service variants (pull-only, no build)
 │   └── dev/                       ← local dev stack (PID-managed processes, docker compose infra)
+├── docs/env.md                    ← muster env / run / flag: quickstart, security model, roadmap
 ├── docs/ENGINE-API.md             ← --json contract (every command/event shape; muster-tui relies on it)
 ├── docs/troubleshooting.md        ← generated from the rule table (make docs)
 ├── docs/fleet/fleet.md            ← fleet deployment guide
@@ -114,11 +127,14 @@ muster/
 ```
 your-project/
 ├── muster.json        ← config: services, health checks, deploy order
+├── muster.env.schema.json ← (optional, muster env) typed keys + flags
 ├── .env               ← (optional) auto-loaded env vars for deploys
 ├── .musterignore      ← (optional) patterns to exclude from scanning
 └── .muster/
     ├── hooks/<svc>/   ← deploy.sh, health.sh, rollback.sh, logs.sh, cleanup.sh
     ├── logs/          ← deploy logs (gitignored); .last_failure feeds explain/Next step
+    ├── env/           ← (muster env) <env>.config/.secrets/.flags.json, recipients.json, history.jsonl
+    ├── runtime/       ← generated, gitignored (flags.<env>.json for MUSTER_FLAGS_FILE)
     ├── .template_hashes ← checksums of generated hooks (edit detection on re-run)
     ├── .menu_state    ← remembered picker choices
     └── pids/          ← PID files for dev stack (gitignored)
@@ -263,6 +279,18 @@ Key files: `lib/core/fleet.sh` (config reader, SSH primitives, token storage), `
 Remote mode (`muster ask --server <name>`): no project needed; the server must be muster-mode (cloud or SSH). Consent per server in `~/.muster/assistant/servers.json` (0600). Status is fetched first (`server_unreachable` before any session). Tools map to `_fleet_remote_muster` (lib/commands/fleet_remote.sh: status/history/hooks status/deploy/rollback), `muster fleet logs` and `muster fleet restart`; `read_config`/`read_hook`/`muster_doctor`/`propose_hook_edit` return "not available for remote servers yet". Context carries `surface: "cli"` + `remote: {server, transport, …}`.
 
 `muster cloud connect` (`lib/commands/cloud.sh`) installs or updates muster-agent (≥ 0.4.0 for `pair`), runs `muster-agent pair`, offers `install-service` (sudo, or `--user-service`), then polls `muster-agent status --connected`.
+
+## muster env (config, secrets, flags)
+
+Guide: `docs/env.md`. Store layer `lib/core/env_store.sh`; commands `lib/commands/env.sh` (+ `env_guard.sh`, `env_codegen.sh`), `lib/commands/flag.sh`.
+
+- **Crypto:** all of it is in `muster-crypt` (Go, muster-fleet-cloud `cmd/muster-crypt` + `pkg/envcrypt`, contract in its `docs/ENVCRYPT.md`). Requests go as JSON on stdin and results come back as JSON on stdout; exit 3 = no key, 4 = integrity. Found via `$MUSTER_CRYPT_BIN`, then PATH, then `~/.muster/bin`. Keys live in `~/.muster/env-keys/` (0600) or `$MUSTER_ENV_KEY` (CI).
+- **No secrets in argv or temp files:** feed secrets to `_env_crypt`/`jq` through process substitution (`< <(…)`, `--rawfile v <(printf …)`). Never use `--arg`, never here-strings (bash 3.2 writes those to temp files), and never pipe into `_env_crypt`: a pipeline runs it in a subshell and loses `_ENV_CRYPT_OUT`/`_ENV_CRYPT_ERR`. Call `_env_decrypt` directly, not in `$(…)`.
+- **Resolution:** `_env_resolve root env required|optional|none` sets `_ENV_RESOLVED` (`{KEY:{value,source,type,secret}}`). Precedence: schema default < base < env config < secrets < flags (`MUSTER_FLAG_*`) < local override (local only) < existing env vars (unless `muster run --override`).
+- **Deploy:** `_load_env_file` (utils.sh) loads the store when `muster.json` has `env.source: "muster"`, or when there's no `.env` and `.muster/env` exists. Values are exported in memory only. `_env_name_blocked` refuses PATH/LD_*/NODE_OPTIONS and the like. `_unload_env_file` scrubs secret values from logs written meanwhile (`_redact_scrub_logs`), and deploy `--json` masks each line (`_redact_env_secrets`).
+- **Redaction:** `redact_text` also masks `_MUSTER_ENV_SECRET_LITS` (set by `_env_resolve`, never exported), `mstsec1`/`mstrec1` keys and `ENC[muster:v1,…]`.
+- **Flags:** `.muster/env/<env>.flags.json` is flagd JSON (`state`, `variants`, `defaultVariant`). `--local` writes `local.override.json`. `muster run` exports `MUSTER_FLAGS_FILE=.muster/runtime/flags.<env>.json`.
+- **Tests:** `tests/test_env.sh`. Set `MUSTER_CRYPT_BIN` or have a muster-fleet-cloud checkout next to the repo; without one, only the config/flag tests run.
 
 ## Groups
 
