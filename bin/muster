@@ -195,6 +195,14 @@ source "$MUSTER_ROOT/lib/core/platform.sh"
 source "$MUSTER_ROOT/lib/core/registry.sh"
 source "$MUSTER_ROOT/lib/core/fleet_config.sh"
 
+# ── CI: never wait on a prompt ──
+# On a CI runner without a TTY every prompt is skipped (they already check
+# -t 0); git must not ask for credentials either.
+if _ci_noninteractive; then
+  export MUSTER_NONINTERACTIVE=1
+  export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
+fi
+
 # ── Apply persistent minimal setting ──
 if [[ "$MUSTER_MINIMAL" != "true" ]]; then
   _min_val=$(global_config_get "minimal" 2>/dev/null || true)
@@ -370,6 +378,11 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/group.sh"
     cmd_group "$@"
     ;;
+  ci)
+    shift
+    source "$MUSTER_ROOT/lib/commands/ci.sh"
+    cmd_ci "$@"
+    ;;
   cloud)
     shift
     source "$MUSTER_ROOT/lib/commands/cloud.sh"
@@ -418,6 +431,7 @@ case "${1:-}" in
     echo "  explain     Explain the last failure in plain words (<service>, --log FILE, --fix)"
     echo "  cleanup     Clean up stuck processes"
     echo "  settings    View and edit project/global settings"
+    echo "  ci          CI/CD: init github|gitlab (workflow files), env, run"
     echo "  uninstall   Remove muster from project (--system to uninstall muster itself)"
     echo ""
     echo "Fleet commands:"
