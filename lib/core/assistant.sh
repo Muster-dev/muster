@@ -71,3 +71,41 @@ _assistant_save_consent() {
     printf '%s\n' '.muster/assistant.json' > "$gi"
   fi
 }
+
+# ── Per-server consent (remote mode: muster ask --server <name>) ──
+# ~/.muster/assistant/servers.json (0600):
+#   {"servers": {"<name>": {"consent": true, "granted_at", "granted_by"}}}
+
+_assistant_servers_file() {
+  printf '%s/.muster/assistant/servers.json' "$HOME"
+}
+
+_assistant_server_has_consent() {
+  local f
+  f=$(_assistant_servers_file)
+  [[ -f "$f" ]] || return 1
+  [[ "$(jq -r --arg n "$1" '.servers[$n].consent // false' "$f" 2>/dev/null)" == "true" ]]
+}
+
+_assistant_save_server_consent() {
+  local name="$1" f dir who ts cur tmp
+  f=$(_assistant_servers_file)
+  dir=$(dirname "$f")
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  cur='{"servers":{}}'
+  if [[ -f "$f" ]] && jq -e 'type == "object"' "$f" >/dev/null 2>&1; then
+    cur=$(cat "$f")
+  fi
+  who=$(whoami 2>/dev/null || echo "")
+  ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  tmp="${f}.tmp.$$"
+  (umask 077 && printf '%s' "$cur" | jq --arg n "$name" --arg who "$who" --arg ts "$ts" \
+    '.servers = ((.servers // {}) | if type == "object" then . else {} end)
+     | .servers[$n] = {consent: true, granted_at: $ts, granted_by: $who}' > "$tmp") || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv "$tmp" "$f" || return 1
+  chmod 600 "$f" 2>/dev/null || true
+}

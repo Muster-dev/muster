@@ -20,6 +20,34 @@ Send redacted logs and config from shop to the Muster Assistant? [y/N]
 
 Your answer is stored in `.muster/assistant.json`. That file is per person and per machine, and muster adds it to `.gitignore`. In CI, pass `--yes` to give consent.
 
+## Asking about a fleet server (`--server`)
+
+```bash
+muster ask --server byricky "why is web slow?"     # from any directory
+```
+
+`--server <name>` asks about a server in your fleet config (`muster fleet list`) instead of a local project. It works outside any project. The server must be in **muster mode** (muster installed there), over Fleet Cloud (`--transport cloud`) or SSH. Push-mode servers are refused.
+
+- Before a session is started, muster fetches `muster status --json` from the server. If the server can't be reached, you get `Couldn't get status from <server>` and no assistant session is used.
+- Consent is per server, asked once: `Send redacted status, logs and history from server <name> to the Muster Assistant? [y/N]`. It is stored in `~/.muster/assistant/servers.json` (mode 0600). `--yes` gives it without a prompt. The global kill switch (`assistant off`) applies too.
+- The session context says the session is remote (`surface: "cli"`, `remote: {server, transport, mode, muster_version, unavailable_tools}`, and a note that every tool runs on that server). The services list comes from the server.
+- Every result still goes through `redact_text` before it is sent. The server's `.env` isn't on this computer, so its literal values can't be masked, but the pattern rules still apply.
+
+| Tool | Runs on the server |
+|------|--------------------|
+| `muster_status` | `muster status --json` (through the cloud relay, or SSH with the paired token) |
+| `muster_logs` | `muster fleet logs <server> <svc> --tail N` |
+| `muster_history` | `muster history --json [svc]` (the same as `muster fleet history <server> --json`) |
+| `muster_hooks_status` | `muster hooks status --json` |
+| `muster_diagnose` | status of the service, its last failed history event, and an 80-line log tail, combined (there's no remote diagnose command) |
+| `muster_deploy {dry_run: true}` | `muster deploy [svcs] --dry-run` (read) |
+| `muster_deploy` | `muster deploy [svcs]`, after approval |
+| `muster_rollback` | `muster rollback <svc>`, after approval |
+| `muster_restart` | `muster fleet restart <server> <svc> --yes`, after approval |
+| `read_config`, `read_hook`, `muster_doctor`, `propose_hook_edit` | Not available. The tool result is an error: "not available for remote servers yet — run muster ask inside the project on that server". A hook edit is refused before any approval prompt. |
+
+Approvals work the same as local mode: the prompt is `Run this on <server>? [y/N]`, or pass `--allow-actions` without a terminal, or send `{"approve": id}` in `--json` mode. Hooks must already be approved on the server itself (`muster hooks approve` there). muster never passes `--yes` to a remote deploy or rollback.
+
 ## A session
 
 ```
@@ -93,7 +121,8 @@ muster settings --global assistant off   # on to re-enable
 
 | Flag | Effect |
 |------|--------|
-| `--yes`, `-y` | Consent for this project without a prompt |
+| `--server <name>` | Ask about a fleet server instead of a local project (above) |
+| `--yes`, `-y` | Consent for this project (or `--server`) without a prompt |
 | `--allow-actions` | Without a terminal, approve action tools automatically |
 | `--read-only` | Decline every action tool (used by the deploy failure menu) |
 | `--json` | NDJSON on stdout, for muster-tui (below) |
@@ -105,6 +134,9 @@ muster settings --global assistant off   # on to re-enable
 | Not logged in, or token revoked (401/403) | `Sign in with: muster cloud login` |
 | Out of sessions (402) | `Upgrade to keep going: <upgrade_url>` |
 | Network problem | `Can't reach the Muster Assistant at …` |
+| `--server` with a bad or unknown name | `Invalid server name` / `No server named '…' in the fleet` (`invalid_server` / `unknown_server`) |
+| `--server` push-mode server, no fleet, no muster-tunnel | `push_mode` / `no_fleet` / `no_tunnel` |
+| `--server` unreachable | `Couldn't get status from <server>: …` (`server_unreachable`), no session used |
 | Stream cut off | `The connection dropped before the answer finished.` |
 | Ctrl+C | `Cancelled.`, exit 130 |
 
@@ -122,9 +154,9 @@ Every stdout line is a JSON object.
 
 - **Server events are passed through unchanged:** `text`, `thinking_summary`, `tool_request`, `turn_end`, `error`.
 - **Local events:**
-  - `{"type":"session","session_id","plan","remaining_sessions"}`
+  - `{"type":"session","session_id","plan","remaining_sessions","server"?,"transport"?}` (`server`/`transport` only with `--server`)
   - `{"type":"tool_running","tool_use_id","name","kind","summary"}`
-  - `{"type":"approval_needed","tool_use_id","name","summary","input","diff"?}` (`diff` is included for hook edits)
+  - `{"type":"approval_needed","tool_use_id","name","summary","input","diff"?,"server"?}` (`diff` is included for hook edits; `server` with `--server`, where the action will run)
   - `{"type":"tool_result","tool_use_id","name","is_error","content"}`: the redacted content as sent to the server
   - `{"type":"retrying","attempt"}`: a dropped connection, rate limit or busy server; the same turn is resent (up to 2 times). Text streamed before the retry may repeat.
   - `{"type":"awaiting_input"}`: the answer is finished

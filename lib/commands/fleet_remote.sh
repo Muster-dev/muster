@@ -582,3 +582,140 @@ _fleet_cmd_restart() {
   fi
   (( failed == 0 ))
 }
+
+# ── shared: run muster on a muster-mode server ──
+
+# Run `muster <args…>` in the server's project dir. Cloud servers get the
+# plain argv through the relay (the agent allowlist decides; read-only
+# `--json` commands need no token there); SSH servers get the paired token
+# as MUSTER_TOKEN so `--json` commands pass the remote token gate.
+# Output (stdout+stderr) on stdout; returns the remote exit code.
+# Args: server arg...   (call _fleet_remote_resolve first)
+_fleet_remote_muster() {
+  local server="$1"
+  shift
+  _fleet_load_machine "$server" || return 1
+  if [[ "$_FM_MODE" != "muster" ]]; then
+    printf '%s is a push-mode server (muster is not installed there)\n' "$server"
+    return 1
+  fi
+  if [[ "$_FM_TRANSPORT" == "cloud" ]]; then
+    source "$MUSTER_ROOT/lib/core/cloud.sh"
+    local _rc=0 _out
+    _out=$(mktemp "${TMPDIR:-/tmp}/muster-fleet-remote.XXXXXX") || return 1
+    _cloud_muster "$(_fleet_cloud_agent "$server")" "$_FM_PROJECT_DIR" "$@" > "$_out" 2>&1 || _rc=$?
+    cat "$_out"
+    if (( _rc != 0 )); then
+      _cloud_explain_failure "$server" "$_out" || true
+    fi
+    rm -f "$_out"
+    return "$_rc"
+  fi
+  local _cmd="" _q _a _tok
+  _tok=$(fleet_token_get "$server" 2>/dev/null)
+  if [[ -n "$_tok" ]]; then
+    printf -v _q '%q' "$_tok"
+    _cmd="MUSTER_TOKEN=${_q} "
+  fi
+  _cmd="${_cmd}muster"
+  for _a in "$@"; do
+    printf -v _q '%q' "$_a"
+    _cmd="${_cmd} ${_q}"
+  done
+  if [[ -n "$_FM_PROJECT_DIR" ]]; then
+    printf -v _q '%q' "$_FM_PROJECT_DIR"
+    _cmd="cd ${_q} && ${_cmd}"
+  fi
+  fleet_exec "$server" "$_cmd" 2>&1
+}
+
+# ── fleet history ──
+
+_fleet_history_help() {
+  echo "Usage: muster fleet history <server> [service] [--all] [--json]"
+  echo ""
+  echo "Deploy/rollback history of a muster-mode fleet server (runs"
+  echo "'muster history [service]' there)."
+  echo ""
+  echo "Options:"
+  echo "  --all, -a   Full history, not just recent events"
+  echo "  --json      JSON array (same shape as muster history --json)"
+}
+
+_fleet_cmd_history() {
+  local server="" svc="" json_mode=false all=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_mode=true; shift ;;
+      --all|-a) all=true; shift ;;
+      --help|-h) _fleet_history_help; return 0 ;;
+      -*)
+        err "Unknown flag: $1"
+        return 1
+        ;;
+      *)
+        if [[ -z "$server" ]]; then server="$1"
+        elif [[ -z "$svc" ]]; then svc="$1"
+        else
+          err "Too many arguments: $1"
+          return 1
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$json_mode" == "true" ]]; then
+    source "$MUSTER_ROOT/lib/core/auth.sh"
+    _json_auth_gate "read" || return 1
+  fi
+
+  local _usage_err=""
+  if [[ -z "$server" ]]; then
+    _usage_err="Usage: muster fleet history <server> [service] [--all] [--json]"
+  elif [[ -n "$svc" ]] && ! [[ "$svc" =~ $_FLEET_SVC_RE ]]; then
+    _usage_err="Invalid service name: ${svc}"
+  fi
+  if [[ -n "$_usage_err" ]]; then
+    if [[ "$json_mode" == "true" ]]; then _json_error "usage" "$_usage_err"; else err "$_usage_err"; fi
+    return 1
+  fi
+
+  _fleet_remote_resolve "$server" "$json_mode" || return 1
+  if [[ "$_FM_MODE" != "muster" ]]; then
+    local _m="${server} is a push-mode server: history is kept on the machine that deploys it"
+    if [[ "$json_mode" == "true" ]]; then _json_error "push_mode" "$_m"; else err "$_m"; fi
+    return 1
+  fi
+
+  local _rargs=(history)
+  [[ "$all" == "true" ]] && _rargs[${#_rargs[@]}]="--all"
+  [[ "$json_mode" == "true" ]] && _rargs[${#_rargs[@]}]="--json"
+  [[ -n "$svc" ]] && _rargs[${#_rargs[@]}]="$svc"
+
+  local tmp rc=0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/muster-fleet-history.XXXXXX") || return 1
+  _fleet_remote_muster "$server" "${_rargs[@]}" > "$tmp" || rc=$?
+  if [[ "$json_mode" != "true" ]]; then
+    cat "$tmp"
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  # The JSON array (or a remote {"error":…} document) on stdout, the rest on stderr
+  local _doc
+  _doc=$(sed -n '/^[[{]/,$p' "$tmp")
+  if [[ -n "$_doc" ]] && printf '%s' "$_doc" | jq -e . >/dev/null 2>&1; then
+    printf '%s\n' "$_doc" | jq -c .
+    sed '/^[[{]/,$d' "$tmp" >&2
+  else
+    cat "$tmp" >&2
+    local _why=""
+    [[ "$_FM_TRANSPORT" == "cloud" ]] && _why=$(_cloud_explain_failure "$server" "$tmp" 2>/dev/null | head -1)
+    [[ -z "$_why" ]] && _why=$(_fleet_last_line "$tmp")
+    [[ -z "$_why" ]] && _why="muster history failed on ${server} (exit ${rc})"
+    _json_error "remote_failed" "$_why"
+    (( rc == 0 )) && rc=1
+  fi
+  rm -f "$tmp"
+  return "$rc"
+}

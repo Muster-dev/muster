@@ -59,6 +59,7 @@ muster cloud login --qr        # also print a QR of the login URL (if qrencode i
 muster cloud connect           # pair this server: install muster-agent, code + QR, offer a service
 muster ask [question]          # Muster Assistant (Fleet Cloud): explain failures, propose approved actions
 muster ask --json              # NDJSON events for muster-tui; approvals via stdin
+muster ask --server <name> [q] # ask about a fleet server (works anywhere; tools run on that server)
 muster fleet init              # create fleet config
 muster fleet add <name> user@host  # add machine (--mode, --transport, --port, --path, --key)
 muster fleet remove <name>     # remove machine
@@ -71,6 +72,7 @@ muster fleet status [target]   # check health across fleet
 muster fleet rollback [target] # rollback across fleet (--service, --parallel)
 muster fleet logs <server> <svc> [--tail N] [--json]  # last N log lines from a server (no --follow)
 muster fleet restart <server> [svcs...] [--yes] [--json]  # restart services on a server
+muster fleet history <server> [svc] [--all] [--json]      # deploy history of a muster-mode server
 muster fleet sync [target]     # sync project files to fleet
 muster fleet pair <name> --token <t>  # manual auth pairing
 muster group create <name>     # create project group
@@ -92,7 +94,7 @@ muster/
 ├── bin/muster-mcp                 ← MCP stdio transport (uses shared scanner)
 ├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn
 ├── lib/tui/                       ← menu, checklist, spinner, progress, streambox, dashboard, order
-├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain
+├── lib/commands/                  ← setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart/history), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain
 ├── lib/agent/muster-agent.sh     ← standalone fleet monitoring daemon (no lib dependencies)
 ├── lib/skills/manager.sh          ← skill lifecycle (reads name from skill.json)
 ├── templates/deploy.example.json  ← example config
@@ -252,11 +254,13 @@ Stack type `dev` for local development. App services use PID-managed background 
 
 Multi-machine deployment via `muster fleet`. Config in `remotes.json` (per-project). Two transports: SSH (direct) and Cloud (WebSocket relay via `muster-tunnel`/`muster-agent`). Two deploy modes: `muster` (remote has muster installed) and `push` (pipe hooks via SSH). Auth tokens stored at `~/.muster/fleet-tokens.json` (600 perms). Auto-pairing for muster mode machines. Sequential or parallel deploy (max 10 concurrent). Dashboard integration shows fleet connectivity. Doctor checks fleet SSH access.
 
-Key files: `lib/core/fleet.sh` (config reader, SSH primitives, token storage), `lib/core/cloud.sh` (cloud transport helpers), `lib/core/groups.sh` (global fleet groups CRUD), `lib/commands/fleet.sh` (CLI handler), `lib/commands/fleet_deploy.sh` (deploy execution), `lib/commands/fleet_sync.sh` (file sync), `lib/commands/fleet_agent.sh` (agent monitoring), `lib/commands/fleet_remote.sh` (`fleet test --json`, `fleet logs`, `fleet restart`), `lib/agent/muster-agent.sh` (standalone daemon).
+Key files: `lib/core/fleet.sh` (config reader, SSH primitives, token storage), `lib/core/cloud.sh` (cloud transport helpers), `lib/core/groups.sh` (global fleet groups CRUD), `lib/commands/fleet.sh` (CLI handler), `lib/commands/fleet_deploy.sh` (deploy execution), `lib/commands/fleet_sync.sh` (file sync), `lib/commands/fleet_agent.sh` (agent monitoring), `lib/commands/fleet_remote.sh` (`fleet test --json`, `fleet logs`, `fleet restart`, `fleet history`, `_fleet_remote_muster`), `lib/agent/muster-agent.sh` (standalone daemon).
 
 ## Muster Assistant
 
 `muster ask` (`lib/commands/ask.sh`) is the client for the paid assistant (protocol: `docs/assistant-and-pairing.md`, guide: `docs/assistant.md`). It requires a Fleet Cloud login (token from `_fleet_cloud_token_get default`), per-project consent stored in `.muster/assistant.json` (gitignored; `--yes` gives consent without a prompt), and it obeys the global kill switch `assistant off`. It streams SSE with `curl -N` through a single `jq` filter, renders markdown in bash, and runs the server-requested tools locally. Read tools run immediately. Action tools need `Run this? [y/N]` (TTY), `--allow-actions` (no TTY) or a stdin `{"approve":id}` (`--json`). The client classifies read vs action itself, and it validates every input: known tool, service exists, no shell metacharacters. Every result and the context go through `lib/core/redact.sh` (`redact_text`, jq-based, fails closed). JSON tool backends run `bin/muster` with a local `muster-assistant` API token (`~/.muster/assistant/local-token`). `_ask_supports` checks for engine-API commands (`logs --tail`, `hooks status`, `rollback --json`, `restart`) and falls back gracefully when they're missing. The deploy failure menu adds "Explain with AI" via `lib/core/assistant.sh` `_assistant_available`.
+
+Remote mode (`muster ask --server <name>`): no project needed; the server must be muster-mode (cloud or SSH). Consent per server in `~/.muster/assistant/servers.json` (0600). Status is fetched first (`server_unreachable` before any session). Tools map to `_fleet_remote_muster` (lib/commands/fleet_remote.sh: status/history/hooks status/deploy/rollback), `muster fleet logs` and `muster fleet restart`; `read_config`/`read_hook`/`muster_doctor`/`propose_hook_edit` return "not available for remote servers yet". Context carries `surface: "cli"` + `remote: {server, transport, …}`.
 
 `muster cloud connect` (`lib/commands/cloud.sh`) installs or updates muster-agent (≥ 0.4.0 for `pair`), runs `muster-agent pair`, offers `install-service` (sudo, or `--user-service`), then polls `muster-agent status --connected`.
 

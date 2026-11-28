@@ -52,6 +52,7 @@ CI drive muster through these commands; this page is the contract. Tests:
 | `fleet test [target] --json` | read | document |
 | `fleet logs <server> <service> --json [--tail N]` | read | NDJSON |
 | `fleet restart <server> [service…] --json --yes` | deploy | document |
+| `fleet history <server> [service] --json [--all]` | read | array |
 | `cloud status --json` | read | document |
 | `group list --json`, `group status <group> --json` | read | document |
 | `projects --json` | read | document |
@@ -478,6 +479,17 @@ server, the cloud agent's allowlist refusing `muster restart`, or
 `push mode needs a restart hook`. Push servers run this project's
 `.muster/hooks/<service>/restart.sh` remotely. Restart hooks must be
 approved on the server itself (`muster hooks approve` there).
+
+## fleet history \<server\> [service] --json [--all]
+
+Runs `muster history [--all] --json [service]` on a muster-mode server and
+prints its array unchanged (same shape as `history --json`); other output
+goes to stderr. Cloud servers: plain argv through the relay, no token. SSH
+servers: with the paired token as `MUSTER_TOKEN`.
+
+Errors: `usage`, `no_fleet`, `unknown_server`, `push_mode` (history lives on
+the machine that deploys a push server), `remote_failed`. A remote
+`{"error":…}` document is passed through on stdout.
 
 ## cloud status --json
 

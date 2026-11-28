@@ -14,6 +14,7 @@ Paid AI assistant for troubleshooting and actions. Server: `https://cloud.getmus
 ## Endpoints
 `POST /api/assist/sessions` body `{"project": "acme-store", "context": {...}}` → `201 {"session_id","plan","remaining_sessions"}`.
   `context` (all optional, already redacted by the client): `{muster_version, os, stack, services:[...], failure: {service, exit_code, log_tail:[...], diagnosis:{...}}}`.
+  Remote sessions (`muster ask --server <name>`) send instead `{muster_version, os, surface: "cli", services:[...], remote: {server, transport: "cloud"|"ssh", mode: "muster", muster_version, unavailable_tools:[...]}, note}` — `project` is the server's project name (or the server name). The tools are the same; they run on that server, and `unavailable_tools` (`read_config`, `read_hook`, `muster_doctor`, `propose_hook_edit`) return an error result.
 
 `POST /api/assist/sessions/{id}/turns` (streams `text/event-stream`) body is ONE of:
   - `{"message": "why did api fail?"}` — a user message

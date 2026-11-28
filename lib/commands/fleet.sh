@@ -64,6 +64,10 @@ cmd_fleet() {
       shift
       _fleet_cmd_restart "$@"
       ;;
+    history)
+      shift
+      _fleet_cmd_history "$@"
+      ;;
     sync)
       shift
       source "$MUSTER_ROOT/lib/commands/fleet_sync.sh"
@@ -163,6 +167,8 @@ _fleet_cmd_help() {
   echo "                                Last N log lines from a server (no --follow)"
   echo "  restart <server> [svc...] [--yes] [--json]"
   echo "                                Restart services on a server"
+  echo "  history <server> [svc] [--json]"
+  echo "                                Deploy history of a muster-mode server"
   echo ""
   echo "Hook Management:"
   echo "  sync [target] [--dry-run]     Push local hooks to remote servers"
