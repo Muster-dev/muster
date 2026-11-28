@@ -1,0 +1,137 @@
+name: action-test
+
+# Runs the composite action in this repo (uses: ./) against a tiny bare-stack
+# fixture project with local no-op hooks, on Linux and macOS.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - action/**
+      - bin/**
+      - lib/**
+      - tests/fixtures/ci-project/**
+      - .github/workflows/action-test.yml
+  pull_request:
+    paths:
+      - action.yml
+      - action/**
+      - bin/**
+      - lib/**
+      - tests/fixtures/ci-project/**
+      - .github/workflows/action-test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  action:
+    name: action (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dry run (all services)
+        id: dry
+        uses: ./
+        with:
+          working-directory: tests/fixtures/ci-project
+          dry-run: true
+
+      - name: Check dry run
+        env:
+          RESULT: ${{ steps.dry.outputs.result }}
+          SUMMARY: ${{ steps.dry.outputs.summary-json }}
+          VERSION: ${{ steps.dry.outputs.muster-version }}
+        run: |
+          set -euo pipefail
+          test "$RESULT" = success
+          test -n "$VERSION"
+          printf '%s' "$SUMMARY" | jq -e '.dry_run == true and ([.services[] | .service + ":" + .result] == ["noop:planned", "broken:planned"])'
+
+      - name: Deploy the no-op service
+        id: deploy
+        uses: ./
+        with:
+          working-directory: tests/fixtures/ci-project
+          services: noop
+
+      - name: Check deploy
+        env:
+          RESULT: ${{ steps.deploy.outputs.result }}
+          DEPLOYED: ${{ steps.deploy.outputs.deployed }}
+          FAILED: ${{ steps.deploy.outputs.failed }}
+          SUMMARY: ${{ steps.deploy.outputs.summary-json }}
+          DURATION: ${{ steps.deploy.outputs.duration }}
+        run: |
+          set -euo pipefail
+          test "$RESULT" = success
+          test "$(printf '%s' "$DEPLOYED" | jq -c .)" = '["noop"]'
+          test "$(printf '%s' "$FAILED" | jq -c .)" = '[]'
+          test "$DURATION" -ge 0
+          printf '%s' "$SUMMARY" | jq -e '.services[0].health == "healthy" and .commit != ""'
+
+      - name: Deploy a failing service
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: tests/fixtures/ci-project
+          services: noop, broken
+          stop-on-failure: true
+
+      - name: Check failure
+        env:
+          OUTCOME: ${{ steps.broken.outcome }}
+          RESULT: ${{ steps.broken.outputs.result }}
+          FAILED: ${{ steps.broken.outputs.failed }}
+          EXIT_CODE: ${{ steps.broken.outputs.exit-code }}
+          EXPLAIN: ${{ steps.broken.outputs.explain-json }}
+          SUMMARY: ${{ steps.broken.outputs.summary-json }}
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = failure
+          test "$RESULT" = failure
+          test "$EXIT_CODE" = 1
+          test "$(printf '%s' "$FAILED" | jq -c .)" = '["broken"]'
+          printf '%s' "$EXPLAIN" | jq -e '.service == "broken" and .hint.id != null'
+          printf '%s' "$SUMMARY" | jq -e '[.hints[].service] == ["broken"]'
+
+      - name: Status
+        id: status
+        uses: ./
+        with:
+          working-directory: tests/fixtures/ci-project
+          command: status
+          services: noop
+
+      - name: Roll back the no-op service
+        id: rollback
+        uses: ./
+        with:
+          working-directory: tests/fixtures/ci-project
+          command: rollback
+          services: noop
+
+      - name: Check status and rollback
+        env:
+          STATUS: ${{ steps.status.outputs.result }}
+          ROLLBACK: ${{ steps.rollback.outputs.deployed }}
+        run: |
+          set -euo pipefail
+          test "$STATUS" = success
+          test "$(printf '%s' "$ROLLBACK" | jq -c .)" = '["noop"]'
+
+      - name: muster ci init github renders for the fixture
+        working-directory: tests/fixtures/ci-project
+        run: |
+          set -euo pipefail
+          muster ci init github --stdout > "$RUNNER_TEMP/wf.yml"
+          grep -q 'Muster-dev/muster@v0' "$RUNNER_TEMP/wf.yml"
+          ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$RUNNER_TEMP/wf.yml"

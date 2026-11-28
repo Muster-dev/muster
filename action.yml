@@ -1,0 +1,161 @@
+name: muster deploy
+description: Deploy, roll back, restart or check services with muster — locally, over SSH, or through Fleet Cloud.
+author: Muster-dev
+branding:
+  icon: upload-cloud
+  color: yellow
+
+inputs:
+  command:
+    description: "deploy | rollback | restart | status | fleet-deploy | fleet-rollback | fleet-restart | fleet-status"
+    required: false
+    default: deploy
+  services:
+    description: "Services, space or comma separated (empty = all for deploy/status)"
+    required: false
+    default: ""
+  server:
+    description: "Fleet server to target (deploy/rollback/restart/status become fleet-*)"
+    required: false
+    default: ""
+  group:
+    description: "Fleet group to target (deploy/rollback/status become fleet-*)"
+    required: false
+    default: ""
+  dry-run:
+    description: "Plan only (deploy / fleet-deploy)"
+    required: false
+    default: "false"
+  stop-on-failure:
+    description: "Stop at the first failed service; the rest are reported not_run"
+    required: false
+    default: "true"
+  from:
+    description: "Resume from this service in deploy order"
+    required: false
+    default: ""
+  working-directory:
+    description: "Directory containing muster.json"
+    required: false
+    default: "."
+  version:
+    description: "muster version to install (e.g. 0.7.3 or latest). Empty = the version of this action's ref"
+    required: false
+    default: ""
+  version-sha256:
+    description: "Optional SHA-256 of the muster release tarball, checked in addition to the release checksums.txt"
+    required: false
+    default: ""
+  approve-hooks:
+    description: "Approve the repository's hooks on the runner (the repo is the reviewed source)"
+    required: false
+    default: "true"
+  explain-on-failure:
+    description: "Run muster explain --json on failure and include it in the summary and outputs"
+    required: false
+    default: "true"
+  cloud-token:
+    description: "Fleet Cloud CLI token (mst_cli_…), exported as MUSTER_CLOUD_TOKEN. Installs muster-tunnel"
+    required: false
+    default: ""
+  cloud-relay:
+    description: "Fleet Cloud relay URL (default https://relay.getmuster.dev)"
+    required: false
+    default: ""
+  tunnel-version:
+    description: "muster-tunnel version (Muster-dev/muster-fleet-cloud release)"
+    required: false
+    default: "0.5.0"
+  ssh-key:
+    description: "Private key for SSH deploys/fleets. Loaded into ssh-agent, never written to the log"
+    required: false
+    default: ""
+  known-hosts:
+    description: "known_hosts lines for your servers (required with ssh-key; host keys are always checked)"
+    required: false
+    default: ""
+  args:
+    description: "Extra arguments passed to the muster command"
+    required: false
+    default: ""
+  github-token:
+    description: "Token for GitHub API calls (resolving version: latest)"
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: "success or failure"
+    value: ${{ steps.run.outputs.result }}
+  deployed:
+    description: "JSON array of services that deployed (rolled back / restarted)"
+    value: ${{ steps.run.outputs.deployed }}
+  failed:
+    description: "JSON array of services that failed or are unhealthy"
+    value: ${{ steps.run.outputs.failed }}
+  summary-json:
+    description: "Full run summary as JSON (services, durations, hints, errors, explain)"
+    value: ${{ steps.run.outputs.summary-json }}
+  duration:
+    description: "Total seconds"
+    value: ${{ steps.run.outputs.duration }}
+  exit-code:
+    description: "muster's exit code (0 ok, 1 failure, 124 timeout, 130 cancelled)"
+    value: ${{ steps.run.outputs.exit-code }}
+  explain-json:
+    description: "muster explain --json for the first failure, or null"
+    value: ${{ steps.run.outputs.explain-json }}
+  muster-version:
+    description: "Installed muster version"
+    value: ${{ steps.install.outputs.muster-version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install muster
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_VERSION_SHA256: ${{ inputs.version-sha256 }}
+        GH_API_TOKEN: ${{ inputs.github-token }}
+      run: bash "${{ github.action_path }}/action/install.sh"
+
+    - name: Install muster-tunnel
+      if: inputs.cloud-token != ''
+      shell: bash
+      env:
+        INPUT_TUNNEL_VERSION: ${{ inputs.tunnel-version }}
+      run: bash "${{ github.action_path }}/action/install-tunnel.sh"
+
+    - name: Set up SSH
+      if: inputs.ssh-key != ''
+      shell: bash
+      env:
+        INPUT_SSH_KEY: ${{ inputs.ssh-key }}
+        INPUT_KNOWN_HOSTS: ${{ inputs.known-hosts }}
+      run: bash "${{ github.action_path }}/action/setup-ssh.sh"
+
+    - name: muster ${{ inputs.command }}
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_SERVICES: ${{ inputs.services }}
+        INPUT_SERVER: ${{ inputs.server }}
+        INPUT_GROUP: ${{ inputs.group }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
+        INPUT_STOP_ON_FAILURE: ${{ inputs.stop-on-failure }}
+        INPUT_FROM: ${{ inputs.from }}
+        INPUT_APPROVE_HOOKS: ${{ inputs.approve-hooks }}
+        INPUT_EXPLAIN_ON_FAILURE: ${{ inputs.explain-on-failure }}
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_CLOUD_TOKEN: ${{ inputs.cloud-token }}
+        INPUT_CLOUD_RELAY: ${{ inputs.cloud-relay }}
+      run: bash "${{ github.action_path }}/action/run.sh"
+
+    - name: Clean up
+      if: always()
+      shell: bash
+      run: bash "${{ github.action_path }}/action/cleanup.sh"

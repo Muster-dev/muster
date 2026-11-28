@@ -369,7 +369,7 @@ _pf_check_ssh() {
     local key="${_REMOTE_USER}@${_REMOTE_HOST}:${_REMOTE_PORT}"
     [[ "$seen" == *" ${key} "* ]] && continue
     seen="${seen}${key} "
-    local opts="-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -p ${_REMOTE_PORT}"
+    local opts="-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} -p ${_REMOTE_PORT}"
     if [[ -n "$_REMOTE_IDENTITY" ]]; then
       local id="${_REMOTE_IDENTITY/#\~/$HOME}"
       opts="${opts} -i ${id}"

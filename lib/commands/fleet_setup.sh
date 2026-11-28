@@ -469,7 +469,7 @@ cmd_fleet_setup() {
                 echo ""
                 start_spinner "Hailing ${_im_name}..."
                 local _ssh_ok=false
-                local _sopts="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+                local _sopts="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} -o BatchMode=yes"
                 [[ -n "$_im_key" ]] && _sopts="${_sopts} -i ${_im_key/#\~/$HOME}"
                 [[ "$_im_port" != "22" ]] && _sopts="${_sopts} -p ${_im_port}"
                 # shellcheck disable=SC2086
@@ -610,7 +610,7 @@ cmd_fleet_setup() {
     echo ""
     start_spinner "Hailing ${_m_user}@${_m_hostname}..."
     local _ssh_ok=false
-    local _ssh_opts="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+    local _ssh_opts="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} -o BatchMode=yes"
     [[ -n "$_m_key" ]] && _ssh_opts="${_ssh_opts} -i ${_m_key}"
     [[ "$_m_port" != "22" ]] && _ssh_opts="${_ssh_opts} -p ${_m_port}"
     # shellcheck disable=SC2086

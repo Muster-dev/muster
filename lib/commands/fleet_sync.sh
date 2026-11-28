@@ -171,7 +171,7 @@ _fleet_sync_ssh() {
   _fleet_build_opts
 
   # Build scp options from SSH opts
-  local scp_opts="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+  local scp_opts="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} -o BatchMode=yes"
   if [[ -n "$_FM_IDENTITY" ]]; then
     local id_path="$_FM_IDENTITY"
     case "$id_path" in
@@ -258,7 +258,7 @@ _fleet_sync_pubkey() {
   ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
   # SCP pubkey to remote, then run a script to add it to authorized_keys
-  local scp_opts="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+  local scp_opts="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} -o BatchMode=yes"
   if [[ -n "$_FM_IDENTITY" ]]; then
     local id_path="$_FM_IDENTITY"
     case "$id_path" in
@@ -345,9 +345,13 @@ _fleet_cmd_setup_user() {
   printf '%b\n' "  ${DIM}  3. Set up SSH authorized_keys for ${username}${RESET}"
   echo ""
 
-  local reply
+  local reply=""
+  if [[ ! -t 0 ]]; then
+    err "setup-user needs an interactive terminal to confirm"
+    return 1
+  fi
   printf '  Continue? [y/N] '
-  read -r reply
+  read -r reply || reply=""
   case "$reply" in
     y|Y) ;;
     *)

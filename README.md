@@ -282,6 +282,33 @@ muster group deploy production                    # deploy all projects in order
 | **Config** | `remotes.json` (per-project) | `~/.muster/groups.json` (global) |
 | **Use case** | Scale horizontally | Monorepo, multi-service orchestration |
 
+## CI/CD — GitHub Actions & GitLab
+
+```yaml
+- uses: actions/checkout@v4
+- uses: Muster-dev/muster@v0
+  with:
+    command: deploy          # rollback | restart | status | fleet-deploy | …
+    services: api web        # empty = all
+```
+
+Grouped logs per service, a job summary table (result, duration, health,
+commit) with the **Likely cause / Try** for failures, `::error` annotations
+on the failing hook, and outputs (`result`, `deployed`, `failed`,
+`summary-json`, `duration`). SSH deploys take `ssh-key` + `known-hosts`
+(host keys are always checked); Fleet Cloud takes `cloud-token`.
+
+```bash
+muster ci init github --yes   # workflow: PR dry run, deploy on main, environment + concurrency
+muster ci init gitlab --yes   # .gitlab-ci.yml
+muster ci env                 # secrets/env vars your deploy needs
+muster ci run deploy          # the action's engine, for any CI
+```
+
+On CI without a TTY muster never waits for input, keeps output plain
+(`FORCE_COLOR` to override) and reads credentials from `MUSTER_CRED_<KEY>`.
+Guide: [docs/ci.md](docs/ci.md).
+
 ## Credentials
 
 Off by default. Three modes per service:
@@ -535,6 +562,7 @@ The startup check uses an inline bootstrap trust chain — it verifies the integ
 | **Security** | [Encryption](docs/security/encryption.md) · [Signing](docs/security/signing.md) · [Integrity](docs/security/integrity.md) |
 | **Agents** | [Agent Guide](docs/agent/agent.md) · [Installation](docs/agent/installation.md) |
 | **Assistant** | [muster ask & cloud connect](docs/assistant.md) · [Protocol](docs/assistant-and-pairing.md) |
+| **CI/CD** | [GitHub Actions, GitLab, generic CI](docs/ci.md) · [Engine API (`--json`)](docs/ENGINE-API.md) |
 
 See [docs/docs-index.md](docs/docs-index.md) for the full index.
 

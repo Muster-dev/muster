@@ -298,6 +298,15 @@ _groups_load_remote() {
 
 # Load cloud config from global settings into FLEET_CLOUD_* vars
 _groups_cloud_config() {
+  # CI / headless token (see _fleet_cloud_config)
+  if [[ -n "${MUSTER_CLOUD_TOKEN:-}" ]]; then
+    FLEET_CLOUD_TOKEN="$MUSTER_CLOUD_TOKEN"
+    FLEET_CLOUD_RELAY="${MUSTER_CLOUD_RELAY:-$(global_config_get "cloud.relay" 2>/dev/null)}"
+    FLEET_CLOUD_ORG="${MUSTER_CLOUD_ORG:-$(global_config_get "cloud.org_id" 2>/dev/null)}"
+    [[ -z "$FLEET_CLOUD_RELAY" || "$FLEET_CLOUD_RELAY" == "null" ]] && FLEET_CLOUD_RELAY="https://relay.getmuster.dev"
+    [[ "$FLEET_CLOUD_ORG" == "null" ]] && FLEET_CLOUD_ORG=""
+    return 0
+  fi
   FLEET_CLOUD_RELAY=$(global_config_get "cloud.relay" 2>/dev/null)
   FLEET_CLOUD_ORG=$(global_config_get "cloud.org_id" 2>/dev/null)
   FLEET_CLOUD_TOKEN=$(global_config_get "cloud.token" 2>/dev/null)
@@ -350,7 +359,7 @@ _groups_load_ssh_password() {
 
 # Build SSH options string from _GP_* vars
 _groups_build_ssh_opts() {
-  _GROUPS_SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+  _GROUPS_SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new}"
 
   if [[ "$_GP_AUTH_METHOD" != "password" ]]; then
     _GROUPS_SSH_OPTS="${_GROUPS_SSH_OPTS} -o BatchMode=yes"

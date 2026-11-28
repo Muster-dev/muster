@@ -428,7 +428,7 @@ fleet_remove_group() {
 # ── SSH execution ──
 
 _fleet_build_opts() {
-  _FLEET_SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+  _FLEET_SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} -o BatchMode=yes"
 
   if [[ -n "$_FM_IDENTITY" ]]; then
     local id_path="$_FM_IDENTITY"

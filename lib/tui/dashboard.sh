@@ -354,7 +354,7 @@ _dashboard_header() {
           [[ -z "$_p" || "$_p" == "null" ]] && _p="22"
           [[ "$_id" == "null" ]] && _id=""
 
-          local _sopts="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+          local _sopts="-o ConnectTimeout=5 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} -o BatchMode=yes"
           [[ -n "$_id" ]] && _sopts="${_sopts} -i ${_id/#\~/$HOME}"
           [[ "$_p" != "22" ]] && _sopts="${_sopts} -p ${_p}"
 
@@ -788,7 +788,7 @@ cmd_dashboard() {
           if [[ "$_fp_desc" != *"(cloud)"* ]]; then
             _groups_load_remote "$_fleet_key" "$_fi" 2>/dev/null || true
             if [[ -n "$_GP_HOST" ]]; then
-              ( ssh -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+              ( ssh -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new} \
                   -p "${_GP_PORT:-22}" "${_GP_USER}@${_GP_HOST}" "echo online" >"$_cache_file" 2>/dev/null \
                 || printf 'offline' >"$_cache_file" ) &
             fi

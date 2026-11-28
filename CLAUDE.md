@@ -81,6 +81,10 @@ muster group deploy <name>     # deploy all projects in group
 muster mcp install claude|claude-desktop|cursor|vscode [--allow-actions] [--write [--yes]]  # MCP client config
 muster mcp doctor [--json]     # start the MCP server, check handshake + tools
 muster mcp serve [flags]       # = muster-mcp [--project DIR] [--allow-actions] (stdio MCP server)
+muster ci init github [--yes]  # write .github/workflows/muster-deploy.yml (PR dry run, deploy on main, environment, concurrency)
+muster ci init gitlab [--yes]  # write .gitlab-ci.yml
+muster ci env [--json]         # secrets / env vars a CI deploy needs
+muster ci run deploy [--services "a b"] [--dry-run] [--approve-hooks] [--explain-on-failure]  # CI engine: grouped logs, GITHUB_OUTPUT, step summary, annotations
 muster skill add <url>  # install a skill addon
 muster skill list       # list installed skills
 muster skill remove <n> # remove a skill
@@ -95,9 +99,10 @@ muster --minimal deploy api   # build context warnings as stderr comments
 muster/
 ├── bin/muster                     ← entry point (routes commands, startup integrity check)
 ├── bin/muster-mcp                 ← MCP server (stdio; 2026-07-28 + initialize-era; tools call `muster … --json`)
-├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn
+├── action.yml + action/           ← GitHub Action (uses: Muster-dev/muster@v0): install.sh, install-tunnel.sh, setup-ssh.sh, run.sh (→ muster ci run), cleanup.sh
+├── lib/core/                      ← config, colors, logger, platform, utils, engine (JSON helpers), scanner, credentials, remote, k8s_diag, updater, build_context, fleet, cloud, groups, app_verify, payload_sign, trust, hook_security, relay_guard, redact, assistant, hints, preflight, suggest, nextstep, setup_txn, ci
 ├── lib/tui/                       ← menu, checklist, spinner, progress, streambox, dashboard, order
-├── lib/commands/                  ← mcp (install/doctor/serve), setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart/history), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain
+├── lib/commands/                  ← mcp (install/doctor/serve), setup (+setup_scan), deploy, dev, status, logs (+logs_api), rollback (+rollback_json), restart, history, doctor, cleanup, settings, uninstall, fleet, fleet_deploy, fleet_sync, fleet_agent, fleet_remote (test --json/logs/restart/history), group, verify, auth, trust, hooks (+hooks_api), diff, addon, projects, ask, cloud, explain, ci
 ├── lib/agent/muster-agent.sh     ← standalone fleet monitoring daemon (no lib dependencies)
 ├── lib/skills/manager.sh          ← skill lifecycle (reads name from skill.json)
 ├── templates/deploy.example.json  ← example config
@@ -105,6 +110,7 @@ muster/
 │   ├── {k8s,compose,docker}/infra/ ← infrastructure service variants (pull-only, no build)
 │   └── dev/                       ← local dev stack (PID-managed processes, docker compose infra)
 ├── docs/mcp.md                    ← MCP server: client setup, tools/resources/prompts, security model
+├── docs/ci.md                     ← GitHub Actions / GitLab / generic CI guide
 ├── docs/ENGINE-API.md             ← --json contract (every command/event shape; muster-tui relies on it)
 ├── docs/troubleshooting.md        ← generated from the rule table (make docs)
 ├── docs/fleet/fleet.md            ← fleet deployment guide
@@ -271,6 +277,14 @@ Remote mode (`muster ask --server <name>`): no project needed; the server must b
 ## MCP Server
 
 `bin/muster-mcp` (docs/mcp.md) is a dual-era stdio server: MCP 2026-07-28 (`server/discover`, per-request `_meta` version, `resultType`, `-32022`) plus the `initialize` handshake (2025-11-25 … 2024-11-05). Tools are thin wrappers over `muster … --json`, run with scoped local tokens (`muster-mcp-read` in `~/.muster/mcp/read-token`, `muster-mcp-deploy` only with `--allow-actions`/`MUSTER_MCP_ALLOW_ACTIONS=1`). It never runs hooks directly, never passes `--yes` to deploy/rollback and unsets `MUSTER_APPROVE_HOOKS`. Arguments are validated against each tool's `inputSchema` by a jq validator (`_MCP_VALIDATE_JQ`), then for service/fleet-name existence. Output goes through `redact_text`. Calls run as background workers (`_mcp_spawn`). Protocol output is on fd 3 behind a mkdir lock, `notifications/cancelled` SIGTERMs muster's process group (`muster.pids`), and `progressToken` streams NDJSON events as `notifications/progress`. Adding a tool: define it in `_MCP_TOOLS_JQ` (schema, outputSchema, annotations), write `tool_<name>` (print JSON, return 1 for a tool error), document it in docs/mcp.md and cover it in tests/test_mcp.sh. `muster mcp install|doctor|serve|tools` lives in lib/commands/mcp.sh.
+
+## CI/CD
+
+`lib/core/ci.sh` (sourced by utils.sh): `_ci_detected` (CI, GITHUB_ACTIONS, GITLAB_CI, …), `_ci_noninteractive` (CI + no TTY, or `MUSTER_NONINTERACTIVE=1`; bin/muster then exports `MUSTER_NONINTERACTIVE=1` and `GIT_TERMINAL_PROMPT=0`), `_ci_annotate`/`_ci_annotate_failure`/`_ci_annotate_health` (GitHub `::error`/`::warning` on stderr; called from `hints_show_for_failure`, deploy/rollback/restart JSON failure paths and health failures; `MUSTER_GITHUB_ANNOTATIONS=off` disables), and `_ci_ssh_hostkey_policy` (`MUSTER_SSH_HOSTKEY_CHECK`: `yes` on CI, `accept-new` otherwise; every `StrictHostKeyChecking=` uses it). Colours: `FORCE_COLOR` forces on, CI defaults off.
+
+No stdin reads without a TTY: `_cred_prompt_password` refuses without one; `cred_env_for_service` takes `MUSTER_CRED_<KEY>` from the environment first; `_hook_stdin_guard` gives hooks `/dev/null`. Any new prompt must check `[[ -t 0 ]]` and say which flag/env var replaces it (`tests/test_ci.sh` feeds an open FIFO as stdin to catch hangs).
+
+`muster ci` (`lib/commands/ci.sh`): `init github|gitlab` (from muster.json; secrets from `_ci_project_facts`), `env [--json]`, `run <command>` — runs the `--json` API with a one-off deploy-scope token (masked, revoked at the end), renders events with one jq filter (`_CIR_RENDER`, `::group::` per service), writes `GITHUB_OUTPUT` (result, deployed, failed, duration, exit-code, summary-json, explain-json), `GITHUB_STEP_SUMMARY` and annotations. The GitHub Action (`action.yml`, inputs as env vars, never interpolated into scripts) installs muster (action checkout, or release tarball verified against `checksums.txt`, tool-cached), muster-tunnel (pinned, checksum-verified) for `cloud-token`, loads `ssh-key` into ssh-agent (requires `known-hosts`), then calls `muster ci run`. `.github/workflows/action-test.yml` runs it on ubuntu + macos against `tests/fixtures/ci-project`. Guide: `docs/ci.md`.
 
 ## Groups
 

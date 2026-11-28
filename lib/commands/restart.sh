@@ -281,6 +281,7 @@ ${k8s_env}"
     fi
   else
     _history_log_event "$target" "restart" "failed"
+    _ci_annotate_failure "$target" "restart" "$rc"
     if [[ "$json" == "true" ]]; then
       if (( rc == 124 )); then
         printf '{"event":"done","service":%s,"status":"timeout","timeout":%d}\n' "$(_json_str "$target")" "$timeout"

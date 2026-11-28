@@ -323,10 +323,21 @@ _cloud_status() {
   [[ "$org" == "null" ]] && org=""
   [[ "$name" == "null" ]] && name=""
   token=$(_fleet_cloud_token_get default 2>/dev/null)
+  # CI / headless: a token from the environment counts as logged in
+  local from_env=false
+  if [[ -n "${MUSTER_CLOUD_TOKEN:-}" ]]; then
+    token="$MUSTER_CLOUD_TOKEN"
+    from_env=true
+    [[ -n "${MUSTER_CLOUD_RELAY:-}" ]] && relay="$MUSTER_CLOUD_RELAY"
+    [[ -n "${MUSTER_CLOUD_ORG:-}" ]] && org="$MUSTER_CLOUD_ORG"
+    [[ -z "$org" ]] && org="env"
+    [[ -z "$name" ]] && name="MUSTER_CLOUD_TOKEN"
+  fi
 
   if [[ "$json" == "true" ]]; then
     local logged_in=false reachable=false tunnel=false tunnel_path=""
     [[ -n "$token" && -n "$org" ]] && logged_in=true
+    if [[ "$from_env" == "true" && "$org" == "env" ]]; then org=""; fi
     [[ -z "$relay" ]] && relay="$MUSTER_CLOUD_DEFAULT_RELAY"
     base=$(_cloud_http_base "$relay")
     health_code=$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "${base}/healthz" 2>/dev/null)
@@ -342,7 +353,9 @@ _cloud_status() {
   fi
 
   echo ""
-  if [[ -n "$token" && -n "$org" ]]; then
+  if [[ "$from_env" == "true" ]]; then
+    printf '  %b●%b Using MUSTER_CLOUD_TOKEN from the environment\n' "$GREEN" "$RESET"
+  elif [[ -n "$token" && -n "$org" ]]; then
     printf '  %b●%b Logged in  %b%s%b\n' "$GREEN" "$RESET" "$DIM" "${name:-}" "$RESET"
     printf '  %bAccount:%b %s\n' "$DIM" "$RESET" "$(_cloud_org_label "$org")"
   else

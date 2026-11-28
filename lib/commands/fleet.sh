@@ -1007,9 +1007,13 @@ _fleet_cmd_add() {
     if [[ "$hook_mode" == "sync" ]]; then
       echo ""
       printf '%b\n' "  ${DIM}Hook mode: sync (dev machine pushes hooks)${RESET}"
-      printf '  Run initial sync now? [y/N] '
-      local _sync_reply
-      read -r _sync_reply
+      local _sync_reply=""
+      if [[ -t 0 ]]; then
+        printf '  Run initial sync now? [y/N] '
+        read -r _sync_reply || _sync_reply=""
+      else
+        printf '%b\n' "  ${DIM}Sync later with: muster fleet sync ${name}${RESET}"
+      fi
       case "$_sync_reply" in
         y|Y)
           source "$MUSTER_ROOT/lib/commands/fleet_sync.sh"
@@ -1915,6 +1919,10 @@ _fleet_skill_configure() {
 
   if [[ -z "$fleet_name" || -z "$skill_name" ]]; then
     err "Usage: muster fleet skill configure <fleet> <skill>"
+    return 1
+  fi
+  if [[ ! -t 0 ]]; then
+    err "fleet skill configure asks for values and needs an interactive terminal"
     return 1
   fi
 

@@ -1,0 +1,18 @@
+{
+  "project": "ci-fixture",
+  "version": "1",
+  "services": {
+    "noop": {
+      "name": "No-op",
+      "health": { "type": "command", "command": "true", "timeout": 5, "enabled": true },
+      "credentials": { "mode": "off" }
+    },
+    "broken": {
+      "name": "Broken",
+      "health": { "enabled": false },
+      "credentials": { "mode": "off" }
+    }
+  },
+  "deploy_order": ["noop", "broken"],
+  "skills": []
+}

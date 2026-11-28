@@ -55,7 +55,7 @@ _remote_load_ssh_password() {
     save)
       _REMOTE_PASSWORD=$(_cred_keychain_get "remote" "$cred_key" 2>/dev/null) || true
       if [[ -z "$_REMOTE_PASSWORD" ]]; then
-        _REMOTE_PASSWORD=$(_cred_prompt_password "SSH password for ${_REMOTE_USER}@${_REMOTE_HOST}")
+        _REMOTE_PASSWORD=$(_cred_prompt_password "SSH password for ${_REMOTE_USER}@${_REMOTE_HOST}") || return 1
         _cred_keychain_save "remote" "$cred_key" "$_REMOTE_PASSWORD" 2>/dev/null || true
       fi
       _cred_session_set "$cred_key" "$_REMOTE_PASSWORD"
@@ -63,7 +63,7 @@ _remote_load_ssh_password() {
     session)
       _REMOTE_PASSWORD=$(_cred_session_get "$cred_key" 2>/dev/null) || true
       if [[ -z "$_REMOTE_PASSWORD" ]]; then
-        _REMOTE_PASSWORD=$(_cred_prompt_password "SSH password for ${_REMOTE_USER}@${_REMOTE_HOST}")
+        _REMOTE_PASSWORD=$(_cred_prompt_password "SSH password for ${_REMOTE_USER}@${_REMOTE_HOST}") || return 1
         _cred_session_set "$cred_key" "$_REMOTE_PASSWORD"
       fi
       ;;
@@ -79,7 +79,7 @@ _remote_load_ssh_password() {
 # Build SSH options array
 # Sets: _SSH_OPTS (space-separated string of options)
 _remote_build_opts() {
-  _SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+  _SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=${MUSTER_SSH_HOSTKEY_CHECK:-accept-new}"
 
   # BatchMode=yes prevents password prompts — only for key/agent auth
   if [[ "$_REMOTE_AUTH_METHOD" != "password" ]]; then

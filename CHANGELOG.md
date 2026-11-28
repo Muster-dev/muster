@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- GitHub Action: `uses: Muster-dev/muster@v0` deploys, rolls back, restarts or checks services (locally, over SSH with `ssh-key` + `known-hosts`, or through Fleet Cloud with `cloud-token`). Grouped logs per service, a job summary table with the likely cause of failures, `::error` annotations, and outputs (`result`, `deployed`, `failed`, `summary-json`, `duration`).
+- `muster ci init github|gitlab` writes a deploy workflow for the project (dry run on pull requests, deploy on main, environment + concurrency); `muster ci env` lists the secrets it needs; `muster ci run` is the CI engine for any CI system.
+- Releases publish `muster-X.Y.Z.tar.gz` and `checksums.txt`.
+- Fleet Cloud reads `MUSTER_CLOUD_TOKEN` (and `MUSTER_CLOUD_RELAY` / `MUSTER_CLOUD_ORG`) from the environment.
+
+### Changed
+- On CI without a TTY: colours are off unless `FORCE_COLOR` is set, failed hooks and health checks produce GitHub annotations (`MUSTER_GITHUB_ANNOTATIONS=off` to disable), and SSH host keys are checked strictly (`MUSTER_SSH_HOSTKEY_CHECK=yes`; set `accept-new` to opt out).
+- Service credentials are read from `MUSTER_CRED_<KEY>` when set, before the keychain or a prompt.
+
+### Fixed
+- A deploy without a TTY could hang on a password prompt reading an open stdin (SSH password auth). Prompts now refuse to read without a TTY, hooks get `/dev/null` as stdin, and `fleet add`, `fleet setup-user` and `fleet skill configure` no longer read stdin without a terminal.
+- The credential prompt read from the key list instead of the terminal when a service needed more than one credential.
+
 ## [0.7.3] - 2026-11-28
 
 ### Added

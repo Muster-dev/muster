@@ -34,6 +34,29 @@ _fleet_cloud_config() {
   # Skip if already configured (allows callers to pre-populate from other sources)
   [[ -n "${FLEET_CLOUD_RELAY:-}" && -n "${FLEET_CLOUD_TOKEN:-}" ]] && return 0
 
+  # CI / headless: MUSTER_CLOUD_TOKEN (same variable muster-tunnel reads)
+  # wins over stored logins. Relay: MUSTER_CLOUD_RELAY, remotes.json, the
+  # login, then the public relay.
+  if [[ -n "${MUSTER_CLOUD_TOKEN:-}" ]]; then
+    FLEET_CLOUD_TOKEN="$MUSTER_CLOUD_TOKEN"
+    FLEET_CLOUD_RELAY="${MUSTER_CLOUD_RELAY:-}"
+    FLEET_CLOUD_ORG="${MUSTER_CLOUD_ORG:-}"
+    if [[ -z "$FLEET_CLOUD_RELAY" ]] && declare -f fleet_get >/dev/null 2>&1; then
+      FLEET_CLOUD_RELAY=$(fleet_get '.cloud.relay // ""' 2>/dev/null)
+    fi
+    if [[ -z "$FLEET_CLOUD_ORG" ]] && declare -f fleet_get >/dev/null 2>&1; then
+      FLEET_CLOUD_ORG=$(fleet_get '.cloud.org_id // ""' 2>/dev/null)
+    fi
+    if [[ -z "$FLEET_CLOUD_RELAY" || "$FLEET_CLOUD_RELAY" == "null" ]]; then
+      FLEET_CLOUD_RELAY=$(global_config_get "cloud.relay" 2>/dev/null)
+    fi
+    if [[ -z "$FLEET_CLOUD_RELAY" || "$FLEET_CLOUD_RELAY" == "null" ]]; then
+      FLEET_CLOUD_RELAY="https://relay.getmuster.dev"
+    fi
+    [[ "$FLEET_CLOUD_ORG" == "null" ]] && FLEET_CLOUD_ORG=""
+    return 0
+  fi
+
   # Per-project remotes.json .cloud section (fleet only)
   if declare -f fleet_get >/dev/null 2>&1; then
     FLEET_CLOUD_RELAY=$(fleet_get '.cloud.relay // ""' 2>/dev/null)
