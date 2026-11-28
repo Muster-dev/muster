@@ -3,6 +3,7 @@
 ## Engine API
 
 - [Engine API](ENGINE-API.md) -- Every `--json` command and event shape (the contract for muster-tui and scripts)
+- [CI/CD](ci.md) -- GitHub Action (`uses: Muster-dev/muster@v0`), `muster ci init/env/run`, GitLab, generic CI, how muster behaves on CI
 
 ## Deploy
 
