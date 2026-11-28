@@ -23,8 +23,15 @@ MUSTER_MINIMAL="${MUSTER_MINIMAL:-false}"
 MUSTER_NO_VERIFY="${MUSTER_NO_VERIFY:-false}"
 
 _muster_args=()
+_muster_passthru=false
 for _arg in "$@"; do
+  # Everything after "--" belongs to the wrapped command (muster run -- cmd -q)
+  if [[ "$_muster_passthru" == "true" ]]; then
+    _muster_args[${#_muster_args[@]}]="$_arg"
+    continue
+  fi
   case "$_arg" in
+    --) _muster_passthru=true; _muster_args[${#_muster_args[@]}]="$_arg" ;;
     --quiet|-q) MUSTER_QUIET=true ;;
     --verbose)  MUSTER_VERBOSE=true ;;
     --minimal)  MUSTER_MINIMAL=true ;;
@@ -33,7 +40,7 @@ for _arg in "$@"; do
   esac
 done
 set -- "${_muster_args[@]+"${_muster_args[@]}"}"
-unset _muster_args _arg
+unset _muster_args _arg _muster_passthru
 export MUSTER_QUIET MUSTER_VERBOSE MUSTER_MINIMAL MUSTER_NO_VERIFY
 
 # ── App integrity check (inline — no sourced deps for trust bootstrap) ──
@@ -375,6 +382,21 @@ case "${1:-}" in
     source "$MUSTER_ROOT/lib/commands/cloud.sh"
     cmd_cloud "$@"
     ;;
+  env)
+    shift
+    source "$MUSTER_ROOT/lib/commands/env.sh"
+    cmd_env "$@"
+    ;;
+  run)
+    shift
+    source "$MUSTER_ROOT/lib/commands/env.sh"
+    cmd_run "$@"
+    ;;
+  flag|flags)
+    shift
+    source "$MUSTER_ROOT/lib/commands/flag.sh"
+    cmd_flag "$@"
+    ;;
   ask)
     shift
     source "$MUSTER_ROOT/lib/commands/ask.sh"
@@ -419,6 +441,11 @@ case "${1:-}" in
     echo "  cleanup     Clean up stuck processes"
     echo "  settings    View and edit project/global settings"
     echo "  uninstall   Remove muster from project (--system to uninstall muster itself)"
+    echo ""
+    echo "Config, secrets & flags:"
+    echo "  env         Config + encrypted secrets in the repo (init, set, get, list, check, codegen…)"
+    echo "  run         Run a command with the env injected: muster run [--env E] -- npm run dev"
+    echo "  flag        Feature flags (set, get, list, toggle, --local overrides)"
     echo ""
     echo "Fleet commands:"
     echo "  fleet       Deploy one project to multiple machines (SSH or cloud)"
