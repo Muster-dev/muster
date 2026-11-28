@@ -5,11 +5,12 @@ source "$MUSTER_ROOT/lib/core/engine.sh"
 
 # ── Event logger ──
 # Appends a structured line to deploy-events.log
-# Usage: _history_log_event "service" "action" "status"
-#   action: deploy | rollback
-#   status: ok | failed
+# Usage: _history_log_event "service" "action" "status" [commit] [version] [image] [strategy]
+#   action: deploy | rollback | promote | abort
+#   status: ok | failed | cancelled
 _history_log_event() {
   local svc="$1" action="$2" status="$3" commit="${4:-}"
+  local version="${5:-}" image="${6:-}" strategy="${7:-}"
   local project_dir
   project_dir="$(dirname "$CONFIG_FILE")"
   local log_dir="${project_dir}/.muster/logs"
@@ -17,13 +18,14 @@ _history_log_event() {
   local ts
   ts=$(date '+%Y-%m-%d %H:%M:%S')
   local source="${MUSTER_DEPLOY_SOURCE:-}"
-  if [[ -n "$source" ]]; then
-    printf '{"ts":"%s","service":"%s","action":"%s","status":"%s","commit":"%s","source":"%s"}\n' \
-      "$ts" "$svc" "$action" "$status" "$commit" "$source" >> "${log_dir}/deploy-events.log"
-  else
-    printf '{"ts":"%s","service":"%s","action":"%s","status":"%s","commit":"%s"}\n' \
-      "$ts" "$svc" "$action" "$status" "$commit" >> "${log_dir}/deploy-events.log"
-  fi
+  local extra=""
+  [[ -n "$source" ]] && extra="${extra},\"source\":$(_json_str "$source")"
+  [[ -n "$version" ]] && extra="${extra},\"version\":$(_json_str "$version")"
+  [[ -n "$image" ]] && extra="${extra},\"image\":$(_json_str "$image")"
+  [[ -n "$strategy" ]] && extra="${extra},\"strategy\":$(_json_str "$strategy")"
+  printf '{"ts":"%s","service":%s,"action":%s,"status":%s,"commit":%s%s}\n' \
+    "$ts" "$(_json_str "$svc")" "$(_json_str "$action")" "$(_json_str "$status")" "$(_json_str "$commit")" "$extra" \
+    >> "${log_dir}/deploy-events.log"
 }
 
 # ── History display ──
@@ -93,6 +95,7 @@ cmd_history() {
   local statuses=()
   local commits=()
   local sources=()
+  local versions=() images=() strategies=()
 
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -101,18 +104,21 @@ cmd_history() {
 
     local commit=""
 
-    local source=""
+    local source="" version="" image="" strategy=""
 
     if [[ "$line" == "{"* ]]; then
       # NDJSON format
       local _parsed
-      _parsed=$(printf '%s' "$line" | jq -r '[.ts,.service,.action,.status,.commit,.source // ""] | join("|")' 2>/dev/null) || continue
+      _parsed=$(printf '%s' "$line" | jq -r '[.ts,.service,.action,.status,.commit // "",.source // "",.version // "",.image // "",.strategy // ""] | join("|")' 2>/dev/null) || continue
       [[ -z "$_parsed" ]] && continue
       ts="${_parsed%%|*}"; local _r="${_parsed#*|}"
       svc="${_r%%|*}"; _r="${_r#*|}"
       action="${_r%%|*}"; _r="${_r#*|}"
       status="${_r%%|*}"; _r="${_r#*|}"
-      commit="${_r%%|*}"; source="${_r#*|}"
+      commit="${_r%%|*}"; _r="${_r#*|}"
+      source="${_r%%|*}"; _r="${_r#*|}"
+      version="${_r%%|*}"; _r="${_r#*|}"
+      image="${_r%%|*}"; strategy="${_r#*|}"
     elif [[ "$line" == *"|"* ]]; then
       # Legacy pipe-delimited: YYYY-MM-DD HH:MM:SS|service|action|status[|commit]
       ts="${line%%|*}"
@@ -154,6 +160,9 @@ cmd_history() {
     statuses[${#statuses[@]}]="$status"
     commits[${#commits[@]}]="$commit"
     sources[${#sources[@]}]="$source"
+    versions[${#versions[@]}]="$version"
+    images[${#images[@]}]="$image"
+    strategies[${#strategies[@]}]="$strategy"
   done < "$log_file"
 
   local count=${#timestamps[@]}
@@ -192,9 +201,10 @@ cmd_history() {
       local _jst="${statuses[$i]}"
       local _jcm="${commits[$i]}"
       local _jsrc="${sources[$i]:-}"
-      printf '{"timestamp":%s,"service":%s,"action":%s,"status":%s,"commit":%s,"source":%s}' \
+      printf '{"timestamp":%s,"service":%s,"action":%s,"status":%s,"commit":%s,"source":%s,"version":%s,"image":%s,"strategy":%s}' \
         "$(_json_str "$_jts")" "$(_json_str "$_jsvc")" "$(_json_str "$_jact")" "$(_json_str "$_jst")" \
-        "$(_json_str "$_jcm")" "$(_json_str "${_jsrc:-local}")"
+        "$(_json_str "$_jcm")" "$(_json_str "${_jsrc:-local}")" "$(_json_str_or_null "${versions[$i]:-}")" \
+        "$(_json_str_or_null "${images[$i]:-}")" "$(_json_str_or_null "${strategies[$i]:-}")"
     done
     printf ']\n'
     return 0
@@ -222,6 +232,8 @@ cmd_history() {
     local action="${actions[$i]}"
     local st="${statuses[$i]}"
     local cm="${commits[$i]}"
+    # Version (strategy deploys, promote/abort) reads better than a bare SHA
+    [[ -n "${versions[$i]:-}" ]] && cm="${versions[$i]}"
 
     local color="$RESET"
     if [[ "$st" == "ok" ]]; then
