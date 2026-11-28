@@ -17,7 +17,7 @@ _fleet_cmd_sync() {
   done
 
   if [[ -z "$target" && "$sync_all" == "false" ]]; then
-    err "Usage: muster fleet sync <machine|group> [--dry-run] [--service svc]"
+    err "Usage: muster fleet sync <server|group> [--dry-run] [--service svc]"
     printf '%b\n' "  ${DIM}Or: muster fleet sync --all${RESET}"
     return 1
   fi
@@ -42,7 +42,7 @@ _fleet_cmd_sync() {
       local exists
       exists=$(jq -r --arg n "$target" '.machines[$n] // empty' "$FLEET_CONFIG_FILE" 2>/dev/null)
       if [[ -z "$exists" ]]; then
-        err "Machine or group '${target}' not found"
+        err "Server or group '${target}' not found"
         return 1
       fi
       machines="$target"
@@ -69,7 +69,7 @@ _fleet_cmd_sync() {
   if [[ "$dry_run" == "true" ]]; then
     printf '%b\n' "  ${DIM}Dry run — no files were transferred${RESET}"
   else
-    printf '%b\n' "  ${DIM}${success}/${total} synced${RESET}"
+    printf '%b\n' "  ${DIM}${success}/$(_fleet_plural "$total" server) synced${RESET}"
   fi
   echo ""
 

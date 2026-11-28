@@ -200,7 +200,7 @@ _test_not_contains "fleet add skips SSH auto-pairing" "pair" "$out"
 out=$(cli fleet test)
 show "fleet test" "$out"
 _test_contains "fleet test: relay ping + muster status" "cloud ok, muster ok" "$out"
-_test_contains "fleet test passes" "All 1 machine(s) passed" "$out"
+_test_contains "fleet test passes" "All 1 server passed" "$out"
 
 out=$(cli fleet status)
 show "fleet status" "$out"

@@ -210,6 +210,7 @@ _test_eq "health config" "false" "$(printf '%s' "$out" | jq -r .services.api.hea
 _test_eq "last_deploy" "ok" "$(printf '%s' "$out" | jq -r .services.api.last_deploy.status)"
 _test_eq "not locked" "null" "$(printf '%s' "$out" | jq -r .services.api.locked_by)"
 _test_eq "deploying flag" "false" "$(printf '%s' "$out" | jq -r .deploying)"
+_test_eq "muster_version" "$(grep -m1 'MUSTER_VERSION=' "$M" | sed 's/.*="//;s/"//')" "$(printf '%s' "$out" | jq -r .muster_version)"
 
 # ── doctor --json ──
 echo "  doctor --json"
@@ -241,6 +242,17 @@ EOF
 chmod +x "$TMP/bin/ssh"
 out=$(PATH="$TMP/bin:$PATH" "$M" fleet status --json 2>/dev/null)
 _test_eq "fleet status shape" "prod-1|false|unreachable" "$(printf '%s' "$out" | jq -r '.status[0] | "\(.machine)|\(.reachable)|\(.error)"')"
+_test_eq "fleet status muster_version" "string" "$(printf '%s' "$out" | jq -r '.status[0].muster_version | type')"
+out=$(PATH="$TMP/bin:$PATH" "$M" fleet test --json 2>/dev/null) && rc=0 || rc=$?
+_test_eq "fleet test --json exits 1 on failure" "1" "$rc"
+_test_eq "fleet test --json shape" "prod-1|ssh|muster|false|fail|skip|number|SSH connection failed|0|1" \
+  "$(printf '%s' "$out" | jq -r '.servers[0] as $s | "\($s.name)|\($s.transport)|\($s.mode)|\($s.ok)|\($s.connect)|\($s.muster)|\($s.latency_ms | type)|\($s.error)|\(.passed)|\(.failed)"')"
+out=$("$M" fleet logs ghost api --json 2>&1) && rc=0 || rc=$?
+_test_eq "fleet logs unknown server" "1|unknown_server" "$rc|$(printf '%s' "$out" | jq -r .error)"
+out=$("$M" fleet restart prod-1 api --json </dev/null 2>&1) && rc=0 || rc=$?
+_test_eq "fleet restart needs --yes without a TTY" "1|confirmation_required" "$rc|$(printf '%s' "$out" | jq -r .error)"
+out=$(MUSTER_TOKEN="$R" "$M" fleet restart prod-1 api --yes --json 2>&1) && rc=0 || rc=$?
+_test_eq "fleet restart needs deploy scope (valid JSON error)" "1|forbidden" "$rc|$(printf '%s' "$out" | jq -r .error)"
 rm -f remotes.json
 out=$("$M" cloud status --json 2>/dev/null)
 _test_eq "cloud status" "false|false|false" "$(printf '%s' "$out" | jq -r '"\(.logged_in)|\(.relay_reachable)|\(.tunnel_installed)"')"

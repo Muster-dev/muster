@@ -278,7 +278,7 @@ _json_auth_gate() {
     return 1
   fi
   if ! auth_check_scope "$AUTH_SCOPE" "$required_scope"; then
-    printf '{"error":"forbidden","message":"Token scope \"%s\" cannot access this command (requires \"%s\")"}\n' \
+    printf '{"error":"forbidden","message":"Token scope \\"%s\\" cannot access this command (requires \\"%s\\")"}\n' \
       "$AUTH_SCOPE" "$required_scope" >&2
     return 1
   fi

@@ -211,7 +211,7 @@ _fleet_box_top() {
   local w=$(( TERM_COLS - 4 ))
   (( w > 50 )) && w=50
   (( w < 10 )) && w=10
-  local label_pad_len=$(( w - ${#label} - 3 ))
+  local label_pad_len=$(( w - ${#label} - 2 ))
   (( label_pad_len < 1 )) && label_pad_len=1
   local label_pad
   printf -v label_pad '%*s' "$label_pad_len" ""
@@ -224,7 +224,7 @@ _fleet_box_row() {
   local w=$(( TERM_COLS - 4 ))
   (( w > 50 )) && w=50
   (( w < 10 )) && w=10
-  local inner=$(( w - 2 ))
+  local inner=$w
 
   local tag_len=${#tag}
   local max_text=$(( inner - 4 - tag_len ))
