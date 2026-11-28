@@ -337,3 +337,27 @@ Not implemented yet. This is the plan; details may change.
 - Muster Assistant / `bin/muster-mcp` tools `muster_rollout_status` (read) and
   approval-gated `muster_promote` / `muster_abort`; muster-agent allowlist for
   Fleet Cloud
+
+## Implementation notes (differences from the design spec)
+
+Phase 1 follows the internal design spec, with these deliberate changes:
+
+- The traffic Service defaults to the **Deployment name** (`k8s.service`
+  overrides it), not the service key; the state ConfigMap is
+  `muster-rollout-<deployment>`. Scanner keys are often prefix-stripped
+  (`waity-api` → `api`), and the Service usually keeps the full name.
+- `MUSTER_K8S_DEPLOYMENT` is also set to the candidate during a rollout, so
+  existing generated hooks work without edits.
+- The candidate is created at **0 replicas**; the hook only updates its image,
+  then the engine scales it and waits (with pod-failure detection). This avoids
+  starting the old image on the candidate first.
+- Rolling keeps `MUSTER_IMAGE_TAG` = `IMAGE_TAG` or `latest` (unchanged
+  registry behaviour); only blue-green/canary default it to the version.
+- `pod_stability` fails at once; only health failures count toward
+  `max_failures`. `analysis.interval_seconds` accepts 1-300 (spec: 5-300).
+- `promote`, `abort` and `rollout status` live in one file,
+  `lib/commands/rollout.sh`. `rollout pause|resume|init|history`, `--steps` /
+  `--pause` deploy flags, fleet rollout commands, muster-tui and the
+  Assistant/MCP tools are not part of this phase.
+- Version roles: `stable`, `canary`, `candidate` (blue-green preview colour
+  and the newest ReplicaSet of a rolling update).
