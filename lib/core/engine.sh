@@ -250,6 +250,24 @@ _engine_health_check() {
   return 1
 }
 
+# Like _engine_health_check, but keeps retrying for a while: right after a
+# restart or rollback the service is often still starting. Waits up to
+# MUSTER_HEALTH_WAIT seconds (default 30), checking every 2 seconds.
+# Usage: _engine_health_wait svc project_dir
+_engine_health_wait() {
+  local svc="$1" project_dir="$2" hrc=0
+  local wait="${MUSTER_HEALTH_WAIT:-30}"
+  [[ "$wait" =~ ^[0-9]+$ ]] || wait=30
+  local deadline=$(( $(date +%s) + wait ))
+  while true; do
+    hrc=0
+    _engine_health_check "$svc" "$project_dir" || hrc=$?
+    (( hrc != 1 )) && return "$hrc"
+    (( $(date +%s) >= deadline )) && return 1
+    sleep 2
+  done
+}
+
 # Emit health events after a successful action; echoes nothing else.
 # Sets _ENGINE_HEALTH to healthy|unhealthy|disabled.
 _ENGINE_HEALTH="disabled"
@@ -259,6 +277,7 @@ _engine_health_events() {
   _engine_health_check "$svc" "$project_dir" || hrc=$?
   (( hrc == 2 )) && return 0
   printf '{"event":"health","service":%s,"status":"checking"}\n' "$(_json_str "$svc")"
+  (( hrc == 1 )) && { hrc=0; _engine_health_wait "$svc" "$project_dir" || hrc=$?; }
   if (( hrc == 0 )); then
     _ENGINE_HEALTH="healthy"
   else

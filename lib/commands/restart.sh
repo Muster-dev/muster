@@ -272,7 +272,7 @@ ${k8s_env}"
     else
       ok "${name} restarted"
       local hrc=0
-      _engine_health_check "$target" "$project_dir" || hrc=$?
+      _engine_health_wait "$target" "$project_dir" || hrc=$?
       case "$hrc" in
         0) health="healthy"; ok "${name} is healthy" ;;
         1) health="unhealthy"; err "${name} failed its health check" ;;
