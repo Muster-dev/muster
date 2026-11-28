@@ -20,6 +20,10 @@
 - [Muster Assistant](assistant.md) -- `muster ask`, tools, approvals, redaction, `--json` for muster-tui, `muster cloud connect`
 - [Protocol contract](assistant-and-pairing.md) -- Assistant API and machine pairing (shared with server/relay)
 
+## MCP
+
+- [MCP server](mcp.md) -- `muster-mcp` for Claude Code / Desktop, Cursor, VS Code: setup, tools, resources, prompts, security model
+
 ## Skills
 
 - [Creating Skills](skills/skills.md) -- Skill authoring: structure, hooks, config, fleet hooks, publishing
