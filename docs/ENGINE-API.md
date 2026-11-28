@@ -12,7 +12,8 @@ CI drive muster through these commands; this page is the contract. Tests:
 - **Errors before any output** are one document on stderr:
   `{"error":"<code>","message":"…"}` and a non-zero exit. Common codes:
   `auth_required`, `auth_failed`, `forbidden`, `usage`, `unknown_service`,
-  `no_project`, `confirmation_required`, `dangerous_hooks`, `no_logs`.
+  `no_project`, `confirmation_required`, `dangerous_hooks`, `no_logs`,
+  `unknown_server`, `unpaired`, `remote_failed`.
 - **Errors inside a stream** are an event: `{"event":"error","reason":…}`
   followed by a `summary`.
 - **Exit codes:** `0` ok, `1` failure, `130` cancelled (Ctrl+C / SIGTERM).
@@ -48,6 +49,9 @@ CI drive muster through these commands; this page is the contract. Tests:
 | `logs <service> --json [--tail N] [--follow]` | read | NDJSON |
 | `fleet list --json` | read | document |
 | `fleet status [target] --json` | read | document |
+| `fleet test [target] --json` | read | document |
+| `fleet logs <server> <service> --json [--tail N]` | read | NDJSON |
+| `fleet restart <server> [service…] --json --yes` | deploy | document |
 | `cloud status --json` | read | document |
 | `group list --json`, `group status <group> --json` | read | document |
 | `projects --json` | read | document |
@@ -109,6 +113,7 @@ would configure. Writes nothing. Accepts `--path`, `--stack`,
 ```json
 {
   "project": "acme-store",
+  "muster_version": "0.7.1",
   "checked_at": "2026-11-26T13:40:05-05:00",
   "deploying": false,
   "deploy_lock": null,
@@ -140,6 +145,8 @@ would configure. Writes nothing. Accepts `--path`, `--stack`,
   deploy of this service is running (any terminal or machine).
 - Top-level `deploying` / `deploy_lock` (`{user, pid, started, services}`):
   a project-wide deploy or rollback holds the lock.
+- `muster_version`: the muster that answered (added after 0.7.0; older
+  versions omit it).
 - `replicas`: k8s only, when kubectl answers within 5s; otherwise null.
 
 ## history --json
@@ -387,7 +394,11 @@ Same shape for `remotes.json` and fleet directories:
 
 `source`: `remotes.json`, `fleet_dirs`, `none`. `transport`: `ssh`/`cloud`.
 `mode`: `muster` (remote runs muster) / `push` (hooks piped over SSH).
-`paired`: has an auth token (always true for cloud and push machines).
+`paired`: ready to run muster commands without SSH pairing: a muster-mode SSH
+server has an auth token. Always true for push servers (no muster there) and
+cloud servers (the Fleet Cloud relay authenticates; there is no pairing
+token). It is read from config only; use `fleet test --json` to check the
+agent is actually reachable. `fleet deploy --dry-run` uses the same rule.
 `fleet` is `""` and `group` may be null for `remotes.json` machines.
 
 ## fleet status [target] --json
@@ -395,14 +406,78 @@ Same shape for `remotes.json` and fleet directories:
 ```json
 {"status": [
   {"machine": "prod-1", "host": "10.0.0.5", "user": "deploy", "port": 22, "transport": "ssh", "mode": "muster",
-   "reachable": true, "healthy": 2, "total": 3, "error": null,
+   "reachable": true, "healthy": 2, "total": 3, "error": null, "muster_version": "",
    "services": [{"service": "api", "name": "API Server", "status": "healthy", "health_type": "http"}]}
 ]}
 ```
 
 `services` is that machine's own `status --json` services as an array
 (null when unavailable). `error`: `unreachable`, `unpaired`, `no status`,
-`no status from agent`, or null.
+`no status from agent`, or null. `muster_version`: from the server's own
+`status --json` (no extra round trip); `""` when unknown, which includes
+every server running muster 0.7.0 or older.
+
+## fleet test [target] --json
+
+```json
+{"servers": [
+  {"name": "byricky", "transport": "cloud", "mode": "muster", "ok": true,
+   "connect": "ok", "muster": "ok", "latency_ms": 276, "error": ""}
+ ], "passed": 1, "failed": 0}
+```
+
+Exit 0 when every server passed, else 1. `target`: a server, a group, or
+omitted for all servers.
+
+- `connect`: `ok`/`fail` — SSH `echo ok`, or the relay ping for cloud.
+- `muster`: `ok`/`fail`, or `skip` for push servers and when `connect`
+  failed (not checked). Muster mode checks `status --json` on the agent
+  (cloud) or that the stored token works (SSH); an unpaired SSH server is
+  `fail`.
+- `latency_ms`: integer ms for the connectivity check only. Resolution
+  depends on the machine running the command: `$EPOCHREALTIME` (bash 5),
+  GNU `date +%s%N`, perl `Time::HiRes`, or whole seconds × 1000 when none
+  of those exist.
+- `error`: short reason when `ok` is false (`SSH connection failed`,
+  `cloud agent is not connected to the relay`, `muster-tunnel is not
+  installed on this computer`, `muster did not answer on the agent`,
+  `unpaired: run muster fleet pair …`, `not in the fleet config`), else `""`.
+
+## fleet logs \<server\> \<service\> --json [--tail N]
+
+Runs `muster logs <service> --tail N --json` on the server and passes its
+NDJSON through unchanged (see `logs --json`); non-JSON output goes to
+stderr. `N` defaults to 100, max 1000 (larger values are capped). No
+`--follow`.
+
+- Cloud servers: sent as plain argv through the relay; read-only commands
+  run on the agent without a `MUSTER_TOKEN`.
+- SSH muster-mode servers: `MUSTER_TOKEN=<paired token> muster logs …` in
+  the server's project dir (`unpaired` error without a token).
+- Push servers (no muster there): runs this project's
+  `.muster/hooks/<service>/logs.sh` on the server for at most 5s with
+  `MUSTER_LOGS_TAIL=N` and wraps each line as
+  `{"event":"log","service":…,"source":"hook","line":…}`, then `end`.
+
+Errors: `usage` (missing args, service not `^[A-Za-z0-9_.-]+$`, bad
+`--tail`, `--follow`), `unknown_server`, `unpaired`, `no_logs`. A remote
+`{"error":…}` document (e.g. `unknown_service`) is forwarded as is; other
+remote failures are `remote_failed`. Exit code is the remote one.
+
+## fleet restart \<server\> [service…] --json --yes
+
+```json
+{"server": "byricky", "results": [{"service": "web", "ok": true, "error": ""}]}
+```
+
+Runs `muster restart <service>` on the server for each service (default:
+this project's deploy order, skipping `skip_deploy`). Exit 0 when all
+succeeded. Needs `--yes` without a TTY (`confirmation_required`).
+`error`: short reason when `ok` is false, e.g. hooks not approved on the
+server, the cloud agent's allowlist refusing `muster restart`, or
+`push mode needs a restart hook`. Push servers run this project's
+`.muster/hooks/<service>/restart.sh` remotely. Restart hooks must be
+approved on the server itself (`muster hooks approve` there).
 
 ## cloud status --json
 
@@ -423,6 +498,6 @@ Same shape for `remotes.json` and fleet directories:
 
 Tracked in muster-tui's `docs/ENGINE-GAPS.md`: per-service image/version in
 history and the deploy summary, health latency and error detail in
-`status`, `fleet test --json`, `machine` on `fleet deploy --json` events,
+`status`, `machine` on `fleet deploy --json` events,
 `cloud agents --json`, `doctor --fix --json` change reports, settings /
 config validation as JSON, and a TUI pairing command.
