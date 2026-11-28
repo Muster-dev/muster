@@ -44,9 +44,21 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Build release tarball and checksums
+        run: |
+          VER="${{ steps.version.outputs.ver }}"
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="muster-${VER}/" \
+            -o "dist/muster-${VER}.tar.gz" "${{ steps.version.outputs.tag }}"
+          cd dist && sha256sum "muster-${VER}.tar.gz" > checksums.txt
+          cat checksums.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          files: |
+            dist/muster-${{ steps.version.outputs.ver }}.tar.gz
+            dist/checksums.txt
           tag_name: ${{ steps.version.outputs.tag }}
           name: "muster ${{ steps.version.outputs.tag }}"
           body: ${{ steps.changelog.outputs.notes }}

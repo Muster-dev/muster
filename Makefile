@@ -7,13 +7,13 @@ lint:
 	@echo "Checking syntax..."
 	@bash -n bin/muster
 	@bash -n bin/muster-mcp
-	@for f in lib/core/*.sh lib/commands/*.sh lib/tui/*.sh lib/skills/*.sh; do \
+	@for f in lib/core/*.sh lib/commands/*.sh lib/tui/*.sh lib/skills/*.sh action/*.sh; do \
 		bash -n "$$f" || exit 1; \
 	done
 	@echo "All files pass syntax check"
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		echo "Running ShellCheck..."; \
-		ls bin/muster bin/muster-mcp lib/core/*.sh lib/commands/*.sh lib/tui/*.sh lib/skills/*.sh | xargs -n 1 -P 4 shellcheck --shell=bash --severity=warning || exit 1; \
+		ls bin/muster bin/muster-mcp lib/core/*.sh lib/commands/*.sh lib/tui/*.sh lib/skills/*.sh action/*.sh | xargs -n 1 -P 4 shellcheck --shell=bash --severity=warning || exit 1; \
 		find templates/hooks -name '*.sh' -print0 | xargs -0 -n 1 -P 4 shellcheck --shell=bash --severity=warning --exclude=SC1083,SC2034 || exit 1; \
 		echo "ShellCheck passed"; \
 	else \
