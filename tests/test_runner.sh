@@ -10,6 +10,9 @@ _TEST_HOME=$(mktemp -d)
 trap 'rm -rf "$_TEST_HOME"' EXIT
 export HOME="$_TEST_HOME"
 export MUSTER_CLOUD_NO_KEYCHAIN=1 MUSTER_NO_BROWSER=1
+# Tests deploy failing services on purpose: no ::error annotations on the
+# repo's own CI runs (tests/test_ci.sh turns them on where it checks them).
+export MUSTER_GITHUB_ANNOTATIONS=off
 
 failures=0
 ran=0
