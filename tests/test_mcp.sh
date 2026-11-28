@@ -26,7 +26,7 @@ _mock_init
 _mock_cmd ssh 'for a in "$@"; do last="$a"; done; case "$last" in "echo ok") echo ok ;; "bash -s") bash -s ;; *) exit 0 ;; esac'
 
 # ── Fixture project ──
-cd "$TMP/p"
+cd "$TMP/p" || exit 1
 "$M" setup --services api,web --stack bare --health api=none --health web=none --name mcpfix --force >/dev/null 2>&1
 printf '#!/usr/bin/env bash\necho "api deployed token=supersecretvalue123"\n' > .muster/hooks/api/deploy.sh
 printf '#!/usr/bin/env bash\necho "web deployed"\n' > .muster/hooks/web/deploy.sh
@@ -38,7 +38,7 @@ cat > remotes.json <<'EOF'
 {"machines":{"pusher":{"host":"10.0.0.8","user":"deploy","mode":"push","project_dir":"/srv/app"}},
  "groups":{"edge":["pusher"]},"deploy_order":["edge"]}
 EOF
-cd "$TMP/elsewhere"
+cd "$TMP/elsewhere" || exit 1
 
 INIT='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}'
 INITED='{"jsonrpc":"2.0","method":"notifications/initialized"}'
@@ -315,7 +315,7 @@ _test "stderr has the startup line" bash -c 'grep -q "muster-mcp\] started" "$1"
 
 # ── muster mcp (install / doctor) ──
 echo "  muster mcp"
-cd "$TMP/p"
+cd "$TMP/p" || exit 1
 out=$("$M" mcp install claude 2>&1)
 _test_contains "claude: claude mcp add" "claude mcp add" "$out"
 _test_contains "claude: --project" "--project $TMP/p" "$out"

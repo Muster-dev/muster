@@ -1074,8 +1074,8 @@ _MCP_PROMPTS='{"prompts":[
 
 # Prints a prompts/get result; return 1 with an error message on bad args
 _mcp_prompt_get() {
-  local name="$1" args="$2" svc svcs ctx="" text s
-  svc=$(printf '%s' "$args" | jq -r '.service // empty | tostring')
+  local name="$1" pjson="$2" svc svcs ctx="" text s
+  svc=$(printf '%s' "$pjson" | jq -r '.service // empty | tostring')
   case "$name" in
     diagnose_failure)
       if [[ -n "$svc" ]]; then
@@ -1090,7 +1090,7 @@ _mcp_prompt_get() {
 4. Explain the likely cause in plain words and propose concrete next steps. Do NOT run deploy, rollback, restart or hooks_approve without asking the user first; prefer \`muster explain ${svc:+$svc }--fix\` for suggested fixes so muster re-validates them."
       ;;
     deploy_checklist)
-      svcs=$(printf '%s' "$args" | jq -r '.services // empty | tostring')
+      svcs=$(printf '%s' "$pjson" | jq -r '.services // empty | tostring')
       local list_json='[]'
       if [[ -n "$svcs" ]]; then
         while IFS= read -r s; do
@@ -1217,8 +1217,8 @@ _mcp_worker_resource() {
 }
 
 _mcp_worker_prompt() {
-  local name="$1" args="$2" out red
-  if ! out=$(_mcp_prompt_get "$name" "$args"); then
+  local name="$1" pjson="$2" out red
+  if ! out=$(_mcp_prompt_get "$name" "$pjson"); then
     _mcp_finish "$(_mcp_error_json "$REQ_ID" -32602 "$out")"
     return
   fi
